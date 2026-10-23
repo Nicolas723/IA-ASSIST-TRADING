@@ -317,7 +317,7 @@ ai-trading-assistant/
 - **Reconciliación**: `LiveTradingService.reconcile_positions` compara cada posición con el saldo base del exchange, elimina posiciones cerradas fuera y ajusta cantidades. Se ejecuta en el guardián y bajo demanda.
 - **Idempotencia**: `client_order_id` en `POST /real/orders`, deduplicación en memoria + journal y mapeo por exchange.
 - **Guard más robusto**: un fallo al cerrar por SL/TP ya no se traga silenciosamente; se registra y se emite alerta crítica, manteniendo la posición para reintentar.
-- **Smoke test manual**: `scripts/real_testnet_smoke.py` (dry-run por defecto; exige `--execute --yes`; bloquea mainnet sin `--allow-mainnet`).
+- **Smoke test manual**: `scripts/real_testnet_smoke.py` (dry-run por defecto; exige `--execute --yes`; bloquea mainnet sin `--allow-mainnet`). Ejemplo: `backend\.venv\Scripts\python.exe scripts\real_testnet_smoke.py --execute --yes --quantity 0.0001`.
 - **Verificación**: 129 unitarios, 11 integración, cobertura 73.79%, Ruff 0 hallazgos, MyPy 0 errores, frontend build OK.
 - **Limitación pendiente**: OCO exchange-side. Se documenta y se muestra `protection_mode=local_guard`; implementarlo requiere una integración Binance-specific con validación en testnet para no duplicar ventas.
 
