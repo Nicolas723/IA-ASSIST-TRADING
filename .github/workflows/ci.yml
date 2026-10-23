@@ -1,0 +1,179 @@
+name: CI — AI Trading Assistant
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Lint & Type Check
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # Blocking: full lint + formatting. Backlog burnt down to zero.
+      - name: Run Ruff linter
+        run: ruff check src/ tests/
+
+      - name: Run Ruff formatter check
+        run: ruff format --check src/ tests/
+
+      - name: Run MyPy type check
+        run: mypy src/
+
+  # ---------------------------------------------------------------------------
+  # Unit Tests
+  # ---------------------------------------------------------------------------
+  test-unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Copy env file
+        run: cp .env.example .env
+
+      - name: Run unit tests
+        # No `-m unit` filter: every test under tests/unit/ is a unit test.
+        # Coverage gate (70%) is enforced via pyproject addopts.
+        run: pytest tests/unit/ -v --tb=short
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          file: backend/coverage.xml
+
+  # ---------------------------------------------------------------------------
+  # Integration Tests (with real services)
+  # ---------------------------------------------------------------------------
+  test-integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_DB: trading_test_db
+          POSTGRES_USER: trading_user
+          POSTGRES_PASSWORD: trading_password_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 3s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Configure test environment
+        run: |
+          cat > .env << EOF
+          DATABASE_URL=postgresql+asyncpg://trading_user:trading_password_test@localhost:5432/trading_test_db
+          REDIS_URL=redis://localhost:6379/0
+          APP_ENV=development
+          APP_DEBUG=true
+          EXECUTION_MODE=paper
+          ENABLE_REAL_TRADING=false
+          LOG_LEVEL=WARNING
+          EOF
+
+      - name: Apply database migrations
+        run: alembic upgrade head
+
+      - name: Run integration tests
+        run: pytest tests/integration/ -v --tb=short -m "integration"
+
+  # ---------------------------------------------------------------------------
+  # Frontend (lint + type-check + production build)
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend Build & Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check & build
+        run: npm run build

@@ -1,0 +1,37 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  logging:
+    loglevel: debug
+  otlphttp:
+    endpoint: http://collector:4318/v1/traces
+  loki:
+    endpoint: http://loki:3100/api/prom/push
+    labels:
+      job: "otel-collector"
+  jaeger:
+    endpoint: jaeger:14250
+    tls:
+      insecure: true
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_max_size: 1000
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [jaeger, otlphttp, logging]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [loki, logging]

@@ -1,0 +1,120 @@
+"""
+Secure Credential Vault — Encrypted In-Memory / File Persistent Key Store.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from datetime import UTC, datetime
+from pathlib import Path
+
+from pydantic import BaseModel
+
+from src.infrastructure.security.key_manager import KeyManager
+from src.shared.logging.setup import get_logger
+
+logger = get_logger(__name__)
+
+# Default vault location is resolved relative to THIS file (backend/.vault_store.json)
+# so it does not depend on the current working directory. Can be overridden with the
+# VAULT_STORAGE_PATH environment variable (useful for tests, Docker volumes, etc.).
+# Layout: backend/src/infrastructure/security/credential_vault.py -> parents[3] == backend/
+_DEFAULT_VAULT_FILE = Path(__file__).resolve().parents[3] / ".vault_store.json"
+
+
+class EncryptedCredential(BaseModel):
+    exchange: str
+    encrypted_api_key: str
+    encrypted_secret: str
+    encrypted_passphrase: str | None = None
+    masked_key: str
+    is_testnet: bool = True
+    can_trade: bool = False
+    has_withdrawal_permission: bool = False
+    last_verified_at: datetime | None = None
+    status: str = "configured"
+
+
+class CredentialVault:
+    """
+    Encrypts and persists API credentials using Fernet AES encryption.
+    """
+
+    def __init__(
+        self, key_manager: KeyManager | None = None, storage_path: Path | None = None
+    ) -> None:
+        self.km = key_manager or KeyManager()
+        self.storage_file = storage_path or Path(
+            os.getenv("VAULT_STORAGE_PATH", str(_DEFAULT_VAULT_FILE))
+        )
+        self._credentials: dict[str, EncryptedCredential] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if self.storage_file.exists():
+            try:
+                data = json.loads(self.storage_file.read_text(encoding="utf-8"))
+                for k, v in data.items():
+                    self._credentials[k] = EncryptedCredential(**v)
+            except Exception as exc:
+                logger.warning("vault_load_failed", error=str(exc))
+
+    def _save(self) -> None:
+        try:
+            dump = {k: v.model_dump(mode="json") for k, v in self._credentials.items()}
+            self.storage_file.write_text(json.dumps(dump, indent=2), encoding="utf-8")
+        except Exception as exc:
+            logger.warning("vault_save_failed", error=str(exc))
+
+    def store_credential(
+        self,
+        exchange: str,
+        api_key: str,
+        api_secret: str,
+        passphrase: str | None = None,
+        is_testnet: bool = True,
+    ) -> EncryptedCredential:
+        masked = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) >= 8 else "****"
+
+        cred = EncryptedCredential(
+            exchange=exchange.lower(),
+            encrypted_api_key=self.km.encrypt(api_key),
+            encrypted_secret=self.km.encrypt(api_secret),
+            encrypted_passphrase=self.km.encrypt(passphrase) if passphrase else None,
+            masked_key=masked,
+            is_testnet=is_testnet,
+            can_trade=True,
+            has_withdrawal_permission=False,
+            last_verified_at=datetime.now(tz=UTC),
+            status="active",
+        )
+
+        self._credentials[exchange.lower()] = cred
+        self._save()
+        logger.info("credential_stored_securely", exchange=exchange.lower(), masked=masked)
+        return cred
+
+    def get_decrypted_credential(self, exchange: str) -> tuple[str, str, str | None] | None:
+        cred = self._credentials.get(exchange.lower())
+        if not cred:
+            return None
+        api_key = self.km.decrypt(cred.encrypted_api_key)
+        secret = self.km.decrypt(cred.encrypted_secret)
+        passphrase = (
+            self.km.decrypt(cred.encrypted_passphrase) if cred.encrypted_passphrase else None
+        )
+        return api_key, secret, passphrase
+
+    def get_credential_summary(self, exchange: str) -> EncryptedCredential | None:
+        return self._credentials.get(exchange.lower())
+
+    def list_configured_exchanges(self) -> list[EncryptedCredential]:
+        return list(self._credentials.values())
+
+    def delete_credential(self, exchange: str) -> bool:
+        if exchange.lower() in self._credentials:
+            del self._credentials[exchange.lower()]
+            self._save()
+            return True
+        return False

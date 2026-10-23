@@ -1,0 +1,52 @@
+# =============================================================================
+# Backend Dockerfile — Development (with hot-reload)
+# =============================================================================
+
+FROM python:3.13-slim-bookworm AS base
+
+LABEL maintainer="AI Trading Assistant"
+LABEL description="AI Trading Assistant Backend — Development"
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# ---------------------------------------------------------------------------
+# Dependencies layer (cached unless pyproject.toml changes)
+# ---------------------------------------------------------------------------
+FROM base AS deps
+
+COPY pyproject.toml README.md ./
+RUN mkdir src && touch src/__init__.py
+
+# Install dependencies (without the project itself for better caching)
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir hatchling && \
+    pip install --no-cache-dir -e ".[dev]"
+
+# ---------------------------------------------------------------------------
+# Development image
+# ---------------------------------------------------------------------------
+FROM deps AS development
+
+# Copy source
+COPY src/ ./src/
+COPY .env.example .env.example
+
+# Create non-root user for security
+RUN groupadd -r trading && useradd -r -g trading trading
+RUN chown -R trading:trading /app
+USER trading
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+EXPOSE 8000 9090
+
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

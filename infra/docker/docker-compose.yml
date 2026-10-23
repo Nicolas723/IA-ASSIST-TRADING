@@ -1,0 +1,193 @@
+# =============================================================================
+# Docker Compose — Development Environment
+# =============================================================================
+# Runs the complete AI Trading Assistant stack locally.
+#
+# Services:
+#   - postgres:    PostgreSQL 16 + TimescaleDB (time-series)
+#   - redis:       Redis 7 (cache, queues, pub/sub)
+#   - backend:     FastAPI application
+#   - prometheus:  Metrics collection
+#   - grafana:     Metrics visualization
+#
+# Usage:
+#   docker compose up -d              # Start all services
+#   docker compose up -d postgres redis  # Only infrastructure
+#   docker compose logs -f backend    # Follow backend logs
+#   docker compose down               # Stop all
+#   docker compose down -v            # Stop + remove volumes
+# =============================================================================
+
+name: ai-trading-assistant
+
+# ---------------------------------------------------------------------------
+# Shared configuration
+# ---------------------------------------------------------------------------
+
+x-backend-base: &backend-base
+  build:
+    context: ../../backend
+    dockerfile: Dockerfile.dev
+  volumes:
+    - ../../backend/src:/app/src:ro          # Hot-reload source
+    - ../../backend/.env:/app/.env:ro
+    - ../../backend/tests:/app/tests:ro
+  environment:
+    - PYTHONPATH=/app
+    - PYTHONDONTWRITEBYTECODE=1
+    - PYTHONUNBUFFERED=1
+  networks:
+    - trading-network
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16 + TimescaleDB 2.x
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: ata-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: trading_db
+      POSTGRES_USER: trading_user
+      POSTGRES_PASSWORD: trading_password_dev
+      TIMESCALEDB_TELEMETRY: "off"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading_user -d trading_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - trading-network
+
+  # ---------------------------------------------------------------------------
+  # Redis 7
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: ata-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - trading-network
+
+  # ---------------------------------------------------------------------------
+  # FastAPI Backend
+  # ---------------------------------------------------------------------------
+  backend:
+    <<: *backend-base
+    container_name: ata-backend
+    restart: unless-stopped
+    command: >
+      uvicorn src.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir /app/src
+    ports:
+      - "8000:8000"
+      - "9090:9090"      # Prometheus metrics
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://trading_user:trading_password_dev@postgres:5432/trading_db
+      - REDIS_URL=redis://redis:6379/0
+      - APP_ENV=development
+      - APP_DEBUG=true
+      - LOG_FORMAT=console
+      - METRICS_ENABLED=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Prometheus — Metrics collection
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ata-prometheus
+    restart: unless-stopped
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+      - "--storage.tsdb.retention.time=30d"
+    networks:
+      - trading-network
+
+  # ---------------------------------------------------------------------------
+  # Grafana — Dashboards
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ata-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin_dev
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_FEATURE_TOGGLES_ENABLE=publicDashboards
+    networks:
+      - trading-network
+    depends_on:
+      - prometheus
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+
+networks:
+  trading-network:
+    driver: bridge
+    name: ata-network
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+
+volumes:
+  postgres_data:
+    name: ata-postgres-data
+  redis_data:
+    name: ata-redis-data
+  prometheus_data:
+    name: ata-prometheus-data
+  grafana_data:
+    name: ata-grafana-data

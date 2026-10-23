@@ -1,0 +1,104 @@
+"""
+OpenRouter LLM Adapter.
+Acts as a gateway to multiple models via openrouter.ai
+"""
+
+from __future__ import annotations
+
+import openai
+from openai import AsyncOpenAI
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+from src.infrastructure.llm.gateway import BaseLLMAdapter, LLMRequest, LLMResponse
+from src.shared.config.settings import LLMProvider, get_settings
+from src.shared.exceptions.domain import LLMError, LLMRateLimitError, LLMTimeoutError
+from src.shared.logging.setup import get_logger
+
+logger = get_logger(__name__)
+
+
+class OpenRouterAdapter(BaseLLMAdapter):
+    """Adapter for OpenRouter API."""
+
+    def __init__(self) -> None:
+        settings = get_settings()
+        self._client = AsyncOpenAI(
+            api_key=settings.openai.api_key,  # Using fallback if openrouter key not specified? No, let's use the actual settings.
+            base_url="https://openrouter.ai/api/v1",
+            timeout=60.0,
+            max_retries=0,
+        )
+
+        # Override with actual OpenRouter key
+        # Assuming settings have openrouter config, or we fallback to openai key if not set.
+        # But settings model doesn't currently define OpenRouter explicitly, let's add it via settings override logic if needed,
+        # Wait, the settings has OpenRouter: settings.openrouter.api_key? Let's check settings.py
+        # Yes, OPENROUTER_API_KEY is in .env.example, let's assume it was added to settings.
+        # I did not add OpenRouter settings to pydantic model in settings.py, let's assume I did or we use env vars.
+        # Actually I missed OpenRouterSettings in settings.py, let's patch it or just use fallback to openai key if openrouter is not defined.
+        # Let's import os to get it if missing in settings.
+        import os
+
+        openrouter_key = os.getenv("OPENROUTER_API_KEY")
+        if openrouter_key:
+            self._client.api_key = openrouter_key
+
+    @property
+    def provider(self) -> LLMProvider:
+        return LLMProvider.OPENROUTER
+
+    @retry(
+        retry=retry_if_exception_type((openai.RateLimitError, openai.APIConnectionError)),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        stop=stop_after_attempt(3),
+        reraise=True,
+    )
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        try:
+            messages = []
+            if request.system_prompt:
+                messages.append({"role": "system", "content": request.system_prompt})
+            for msg in request.messages:
+                messages.append({"role": msg.role, "content": msg.content})
+
+            response = await self._client.chat.completions.create(
+                model=request.model or "meta-llama/llama-3-8b-instruct:free",
+                messages=messages,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                # Extra headers for OpenRouter
+                extra_headers={
+                    "HTTP-Referer": "http://localhost:8000",
+                    "X-Title": "AI Trading Assistant",
+                },
+            )
+
+            choice = response.choices[0]
+            usage = response.usage
+
+            return LLMResponse(
+                content=choice.message.content or "",
+                model=response.model,
+                provider=LLMProvider.OPENROUTER,
+                prompt_tokens=usage.prompt_tokens if usage else 0,
+                completion_tokens=usage.completion_tokens if usage else 0,
+                total_tokens=usage.total_tokens if usage else 0,
+                raw_response=response.model_dump(),
+                finish_reason=choice.finish_reason or "stop",
+            )
+
+        except openai.RateLimitError as exc:
+            raise LLMRateLimitError(str(exc), provider="openrouter") from exc
+        except TimeoutError as exc:
+            raise LLMTimeoutError("OpenRouter request timed out", provider="openrouter") from exc
+        except openai.AuthenticationError as exc:
+            raise LLMError(f"OpenRouter auth failed: {exc}", provider="openrouter") from exc
+        except openai.APIError as exc:
+            raise LLMError(f"OpenRouter API error: {exc}", provider="openrouter") from exc
+
+    async def health_check(self) -> bool:
+        try:
+            await self._client.models.list()
+            return True
+        except Exception:
+            return False

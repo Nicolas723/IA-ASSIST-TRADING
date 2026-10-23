@@ -1,0 +1,16 @@
+﻿global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'ai-trading-assistant'
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'ai-trading-backend'
+    static_configs:
+      - targets: ['backend:9090']
+    metrics_path: '/metrics'
+    scrape_interval: 15s

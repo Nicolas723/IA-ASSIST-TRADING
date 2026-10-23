@@ -1,0 +1,313 @@
+# 🤖 AI Trading Assistant — Documento de Traspaso (Handover)
+
+> **Documento para continuar el desarrollo en una nueva conversación / entorno.**  
+> Resume la arquitectura, estado actual del proyecto, credenciales, decisiones de diseño y las tareas pendientes exactas.
+
+---
+
+## 📌 1. Visión General del Proyecto
+**AI Trading Assistant** es una plataforma de trading algorítmico y cuantitativo asistida por Inteligencia Artificial y un **Comité Multi-Agente**.
+- **Modo Paper Trading (Virtual)**: Simulación completa con $10,000 USDT virtuales, cálculo de comisiones, slippage, PnL en tiempo real y Stop Loss / Take Profit automáticos.
+- **Modo Real / Testnet**: Conexión con exchanges (Binance / Bybit) mediante CCXT y almacenamiento seguro de claves cifradas con AES-256 en un Credential Vault.
+- **Frontend Moderno e Intuitivo**: Hecho en React + Vite + Vanilla CSS, 100% en español, estructurado en pestañas (Tabs) para que usuarios sin experiencia técnica operen sin sobrecarga cognitiva ni ruido visual.
+
+---
+
+## 🏗️ 2. Arquitectura y Tecnologías
+
+### **Backend (Python 3.13 / FastAPI)**
+- **Framework**: FastAPI con arquitectura hexagonal / Clean Architecture (Domain, Application, Infrastructure, Interfaces).
+- **Base de Datos**: PostgreSQL 16 + **TimescaleDB** para series temporales (velas OHLCV, ticks). SQLAlchemy 2.0 (asyncio + asyncpg).
+- **Caché y Mensajería**: Redis 7 (FastAPI cache, colas, rate limiting).
+- **Datos de Mercado**: Conector CCXT (Binance público para velas y ticks en vivo sin requerir API key para paper trading).
+- **WebSockets**: Streaming en vivo hacia el frontend (`/api/v1/ws/market/{symbol}`).
+- **Comité Multi-Agente**:
+  - `TechnicalAnalyst`: Analiza RSI, MACD, EMAs (9, 21, 50, 200), Bandas de Bollinger.
+  - `PriceActionAnalyst`: Soporte/Resistencia, patrones de velas (Pin bar, envolvente) y conceptos SMC (Smart Money Concepts).
+  - `RiskManager`: Volatilidad ATR, sizing de posición dinámico y colocación de Stop-Loss / Take-Profit (mínimo ratio 2.0:1).
+  - `AgentCoordinator`: Pondera los votos de los especialistas y genera veredicto de consenso con nivel de convicción.
+  - *Nota*: Funciona 100% determinista sin API keys de LLM, pero admite OpenAI, Anthropic o Gemini si se configuran en `.env`.
+
+### **Frontend (TypeScript / React 19 / Vite)**
+- **UI & Diseño**: Vanilla CSS moderno con glassmorphism, modo oscuro con gradientes cuidados, micro-animaciones y diseño adaptable (desktop y móvil).
+- **Organización por Pestañas (Tabs)**:
+  1. `🤖 Asistente Autónomo`: Semáforo gigante de estado (COMPRA, VENTA, ESPERA), explicación en lenguaje humano, control ON/OFF y registro de decisiones.
+  2. `📈 Mercado & Gráfico`: Gráfico interactivo SVG de velas y línea de precio con actualización en vivo vía WebSockets (`MarketChart.tsx`).
+  3. `💼 Cartera & Operaciones`: Resumen de saldo, posiciones abiertas con PnL y compra/venta rápida con 1 clic ($100, $250, $500, $1000).
+  4. `🧠 Comité de Analistas IA`: Explicación clara del veredicto y qué opina cada agente especialista.
+  5. `⚙️ Configuración & Claves`: Conexión segura con Binance (AES-256), botón de Ping de latencia y estado de servicios.
+
+### **Infraestructura (Docker Compose)**
+Ubicación: `infra/docker/docker-compose.yml`
+- `ata-backend` (FastAPI en `:8000`)
+- `ata-postgres` (TimescaleDB en `:5432`)
+- `ata-redis` (Redis en `:6379`)
+- `ata-prometheus` (Métricas en `:9091`)
+- `ata-grafana` (Dashboards en `:3001` - user: `admin`, pass: `admin_dev`)
+
+> ℹ️ El único `docker-compose.yml` del proyecto es **`infra/docker/docker-compose.yml`** (los duplicados obsoletos de `backend/` se eliminaron).
+
+---
+
+## ⚙️ 3. Configuración y Credenciales Clave
+
+### Base de Datos (`backend/.env` y Compose)
+- **Host**: `localhost` (o `postgres` dentro de la red Docker)
+- **Puerto**: `5432`
+- **Base de datos**: `trading_db`
+- **Usuario**: `trading_user`
+- **Contraseña**: `trading_password_dev`
+- **DATABASE_URL**: `postgresql+asyncpg://trading_user:trading_password_dev@localhost:5432/trading_db` (en local) o `postgresql+asyncpg://trading_user:trading_password_dev@postgres:5432/trading_db` (en Docker).
+*IMPORTANTE*: Si el volumen ya existía, la contraseña interna de PostgreSQL fue sincronizada con:
+```sql
+ALTER USER trading_user WITH PASSWORD 'trading_password_dev';
+```
+
+> ⚠️ **Credenciales solo para desarrollo local.** Rota estos valores antes de cualquier despliegue. Las claves API de exchange se guardan cifradas (AES-256) en el Credential Vault, nunca en texto plano.
+
+> 📁 **Portabilidad de rutas.** La configuración y los archivos de datos se resuelven **relativos al código**, no al directorio de trabajo:
+> - `backend/.env` se localiza desde `settings.py` (funciona aunque arranques el backend desde otra carpeta).
+> - El vault se guarda por defecto en `backend/.vault_store.json`; puedes cambiarlo con la variable de entorno `VAULT_STORAGE_PATH`.
+> - `.vault_store.json` está en `.gitignore` (nunca se versiona).
+
+---
+
+## 🚀 4. Cómo Iniciar el Proyecto
+
+> Todas las rutas son **relativas a la raíz del repositorio** (`ai-trading-assistant/`). No hay rutas absolutas de máquina, así que el proyecto funciona aunque se mueva de carpeta, de usuario o de equipo.
+
+### Paso 1: Levantar los contenedores de Docker
+```powershell
+# Opción A — script portable (funciona desde cualquier carpeta)
+.\scripts\dev-up.ps1
+
+# Opción B — manual (siempre ejecutado desde la raíz del repositorio)
+docker compose -f infra/docker/docker-compose.yml up -d
+```
+Verificar que todos estén sanos:
+```powershell
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+```
+
+### Paso 2: Levantar el Frontend
+```powershell
+# Opción A — script portable
+.\scripts\dev-frontend.ps1
+
+# Opción B — manual (desde la raíz del repositorio)
+npm --prefix frontend run dev
+```
+Abrir en el navegador: [http://localhost:5173](http://localhost:5173)
+
+Usuarios de Linux/macOS/WSL: los equivalentes están en `scripts/dev-up.sh` y `scripts/dev-frontend.sh`.
+
+### Paso 3: Probar los Endpoints Principales
+- Estado Backend: `GET http://localhost:8000/api/v1/status`
+- Velas de Mercado: `GET http://localhost:8000/api/v1/market/BTC%2FUSDT/candles?timeframe=1h&limit=5`
+- Estado del Bot Autónomo: `GET http://localhost:8000/api/v1/autonomous/status`
+- Cartera Virtual: `GET http://localhost:8000/api/v1/portfolio`
+
+---
+
+## ✅ 5. Bug de "precio estático" — RESUELTO
+
+### ⚠️ Problema reportado por el usuario:
+> *"Actualmente el bot todo el tiempo está indicando el mismo precio de moneda, pero en la gráfica veo que el dato varía, creo que el bot no está tomando los datos correctamente."*
+
+### Causa raíz (eran DOS problemas independientes):
+1. **El bot evaluaba con la vela cerrada de 1h.** En `application/services/autonomous_engine.py`, `_execute_cycle()` obtenía el precio con:
+   ```python
+   candles = await self.market_service.get_candles(...)
+   current_price = float(candles[-1].close)
+   ```
+   Como una vela de 1h solo se cierra cada 60 minutos, `candles[-1].close` quedaba **congelado** durante toda la hora (y con más razón porque el `current candle` nunca se actualizaba).
+2. **El WebSocket del gráfico NO usaba el mercado real.** En `interfaces/websocket/market_stream.py`, `_ticker_loop()` generaba **precios aleatorios simulados** a partir de precios base hardcodeados (`BTC/USDT: 84800.0`, etc.) con `random.uniform(-0.0005, 0.0005)`. Por eso la gráfica "se movía" pero no reflejaba el mercado ni coincidía con el bot.
+
+> La nota anterior del handover decía que el WebSocket ya emitía fluctuaciones reales de CCXT. **Era incorrecto**: eran valores sintéticos.
+
+### Solución implementada (precio en tiempo real, una sola fuente de verdad):
+1. **`domain/market/ports.py`** → nuevo método abstracto `fetch_last_price(symbol) -> Decimal` en `MarketDataPort`.
+2. **`infrastructure/exchange/ccxt_base.py`** → implementado con `fetch_ticker` de CCXT y devuelve el campo `last` (con manejo de `last=None` → `ExchangeError`).
+3. **`infrastructure/market_data/rest_fetcher.py`** → `RetryingMarketDataFetcher.fetch_last_price()` con reintentos/backoff.
+4. **`application/services/market_data_service.py`** → nuevo `async get_latest_price(symbol) -> Decimal` (snapshot instantáneo, NO depende de la vela cerrada).
+5. **`application/services/autonomous_engine.py`** → `_execute_cycle()` ahora usa `get_latest_price()` y **solo cae al cierre de vela como fallback** si el ticker falla temporalmente (el daemon nunca se cae).
+6. **`interfaces/websocket/market_stream.py`** → `ConnectionManager.set_price_provider()` + `_resolve_price()`: el stream emite el **precio real** cuando hay proveedor y usa la simulación solo como fallback.
+7. **`main.py`** → en el `lifespan` se conecta el proveedor del WebSocket al ticker real (`fetch_last_price`).
+
+### Resultado:
+- El bot y el gráfico usan ahora la **misma fuente de precio en tiempo real**, por lo que ambos cambian segundo a segundo y coinciden.
+- Fallback robusto: si el exchange no responde, el bot sigue operando con el cierre de vela y el WS con un valor simulado.
+
+### Pruebas:
+- `tests/unit/test_services.py::test_market_data_service_get_latest_price`
+- `tests/unit/test_autonomous_engine.py::test_autonomous_cycle_uses_live_ticker_price`
+- `tests/unit/test_websocket_stream.py::test_connection_manager_resolve_price_uses_live_provider` y `..._falls_back_to_simulation`
+
+---
+
+## 💾 6. Persistencia y Auditoría (capa añadida)
+
+### Antes
+Solo se **persistían las velas** (`candles`, `ticks`). Órdenes, posiciones, cartera y las decisiones del Comité IA vivían **únicamente en memoria**: al reiniciar el backend se perdía todo el historial operativo y la "auditoría total" prometida en el plan no era real.
+
+### Ahora
+Se añadió una capa de persistencia completa (PostgreSQL / TimescaleDB):
+
+| Tabla | Contenido |
+|---|---|
+| `orders` | Órdenes en cualquier modo (paper/backtest/real) |
+| `trades` | Ejecuciones completadas |
+| `positions` | **Posiciones abiertas actuales** (upsert por id; se borran al cerrar) |
+| `portfolio_snapshots` | Serie temporal de equity/balances y drawdown |
+| `decision_logs` | **Auditoría IA completa**: veredicto, confianza, consenso, riesgo, targets y el `CoordinatorDecision` íntegro en JSON |
+
+### Componentes
+- **Puertos de dominio**: `domain/trading/ports.py` (`TradingRepositoryPort`) y `domain/agents/ports.py` (`DecisionRepositoryPort`).
+- **Repositorios**: `infrastructure/persistence/repositories/trading_repository.py` (`SqlTradingRepository`) y `.../decision_repository.py` (`SqlDecisionRepository`), con mappers puros dominio↔modelo (Decimal sin pérdida de precisión).
+- **Modelos ORM**: `persistence/models/trading.py` y `.../audit.py`.
+- **Migración Alembic**: `c4f1a2b3d5e6_trading_journal_and_audit` (encadena desde `93164c44d6de`).
+
+### Wiring (ya activo)
+- **`AgentService.run_analysis()`** guarda cada `CoordinatorDecision` en `decision_logs` (best-effort: si la BD falla, se registra warning y no rompe el análisis).
+- **`GET /api/v1/audit/decisions`** ahora lee de la BD (con filtro `symbol`) y cae a la memoria histórica si la BD no está disponible.
+- **`POST /api/v1/trading/orders`** y **`.../positions/{id}/close`** escriben la orden + sincronizan posiciones en el journal.
+- **`GET /api/v1/trading/orders/history`** (nuevo) lee el historial durable de órdenes.
+
+### Pruebas
+- `tests/unit/test_persistence.py` (15 tests) — round-trip de órdenes/trades/posiciones/cartera y de la decisión IA completa (incl. `agent_outputs`, `prompt_sent`, `llm_response`), sincronización de posiciones, limpieza del journal, **rehidratación** y consulta de velas, contra **SQLite en memoria** (`aiosqlite`, nueva dep de dev). No requiere PostgreSQL.
+- `tests/unit/test_strategy_plugins.py` (11 tests) — señales BUY/SELL/HOLD y variantes de `MarketContext` de los plugins EMA crossover, MACD momentum y RSI mean reversion.
+
+### Rehidratación de `PaperExchange` (RESUELTO)
+El exchange virtual sigue siendo en memoria, pero ahora **se reconstruye desde la BD al arrancar**:
+- `PaperExchange.restore(...)` reemplaza su estado interno (posiciones, órdenes, trades, `available_balance`, `realized_pnl`, `peak_equity`).
+- `application/services/hydration.py` → `hydrate_paper_exchange()` lee el journal y el último `portfolio_snapshot`, y `hydrate_from_database()` abre su propia sesión.
+- `main.py` (lifespan) llama a la rehidratación al iniciar; si la BD no está disponible, registra un warning y arranca con cuenta limpia.
+- **Journaling unificado** en `application/services/journal.py` (`record_execution`): lo usan el router HTTP **y** el motor autónomo (vía callback inyectado en `deps`), de modo que las órdenes del bot también persisten.
+- El **reset de cartera** (`POST /api/v1/portfolio/reset`) limpia el journal para que un reinicio no rehidrate la cuenta antigua.
+- El motor también refresca el `current_price` de las posiciones abiertas en cada ciclo (PnL no realizado siempre al día).
+
+---
+
+## 📂 7. Estructura de Carpetas Principal
+
+```text
+ai-trading-assistant/
+├── PROJECT_OVERVIEW.md
+├── .gitignore
+├── scripts/                                    # Arranque portable (rutas resueltas desde el script)
+│   ├── dev-up.ps1 / dev-up.sh                  # Levanta el stack Docker
+│   └── dev-frontend.ps1 / dev-frontend.sh      # Levanta el frontend
+├── backend/
+│   ├── .env / .env.example                    # Variables de entorno (credenciales solo-dev)
+│   ├── alembic.ini                            # Config de migraciones (script_location -> src/.../migrations)
+│   ├── pyproject.toml
+│   ├── src/
+│   │   ├── main.py                            # Entrypoint FastAPI (lifespan, routers, middleware)
+│   │   ├── application/
+│   │   │   ├── services/
+│   │   │   │   ├── autonomous_engine.py        # Daemon del bot (precio en tiempo real + fallback a vela)
+│   │   │   │   ├── agent_service.py            # Orquestación del Comité Multi-Agente
+│   │   │   │   ├── market_data_service.py      # Ingesta de velas + get_latest_price() (ticker live)
+│   │   │   │   ├── trading_service.py          # Órdenes, PnL, posiciones (paper/real)
+│   │   │   │   ├── journal.py                  # Persistencia unificada de ejecuciones (router + bot)
+│   │   │   │   ├── hydration.py                # Rehidrata PaperExchange desde la BD al arrancar
+│   │   │   │   ├── risk_service.py             # Circuit breaker y drawdown limits
+│   │   │   │   ├── vault_service.py            # Cifrado AES-256 de claves API
+│   │   │   │   ├── indicator_service.py        # RSI, MACD, EMAs, Bollinger, ATR, SuperTrend
+│   │   │   │   ├── strategy_service.py         # Registro de estrategias
+│   │   │   │   ├── backtesting_engine.py       # Motor de backtesting
+│   │   │   │   ├── optimization_service.py     # Optimización de parámetros
+│   │   │   │   └── observability_service.py    # Métricas / MLOps
+│   │   ├── domain/                             # Entidades puras y reglas de negocio
+│   │   │   ├── agents/
+│   │   │   │   ├── coordinator.py              # Pondera votos → veredicto de consenso
+│   │   │   │   ├── base.py / entities.py / ports.py
+│   │   │   │   └── specialists/                # technical_analyst, price_action_analyst, risk_manager
+│   │   │   ├── market/                         # entities.py + ports.py (incl. fetch_last_price)
+│   │   │   ├── indicators/                     # builtin.py (indicadores deterministas)
+│   │   │   ├── optimization/                   # parameter_optimizer, performance_coach
+│   │   │   ├── risk/                           # position_sizer, drawdown_guard
+│   │   │   ├── strategy/                       # base.py, entities.py
+│   │   │   └── trading/                        # entities.py + ports.py (TradingRepositoryPort)
+│   │   ├── infrastructure/
+│   │   │   ├── exchange/                       # ccxt_base (fetch_last_price), binance, live_binance, paper
+│   │   │   ├── market_data/rest_fetcher.py     # Decorador de reintentos/backoff
+│   │   │   ├── persistence/                    # database.py + models/ (market, trading, audit)
+│   │   │   │                                   #   + repositories/ (candle, trading, decision)
+│   │   │   │                                   #   + migrations/ (Alembic; c4f1a2b3d5e6 = journal + auditoría)
+│   │   │   ├── llm/                            # gateway + adapters (openai, anthropic, gemini, ollama, openrouter)
+│   │   │   ├── security/                       # credential_vault, key_manager
+│   │   │   └── cache/redis_client.py
+│   │   ├── interfaces/
+│   │   │   ├── api/v1/                         # routers: market, trading, portfolio, autonomous, agents,
+│   │   │   │                                   #   risk, strategy, backtesting, vault, observability,
+│   │   │   │                                   #   audit, migration, status + deps.py
+│   │   │   └── websocket/market_stream.py      # Ticker en vivo (precio real con fallback simulado)
+│   │   ├── plugins/                            # strategies/ e indicators/ (auto-descubiertos)
+│   │   └── shared/                             # config, logging, exceptions, observability, plugins, types
+│   └── tests/
+│       ├── unit/                               # 66 tests unitarios (72.7% cobertura), incl. test_persistence.py y test_strategy_plugins.py
+│       └── integration/
+├── frontend/
+│   ├── src/
+│   │   ├── App.tsx                             # Dashboard por pestañas en español
+│   │   ├── App.css                             # Estilos glassmorphism / modo oscuro
+│   │   ├── components/
+│   │   │   ├── MarketChart.tsx                 # Gráfico SVG de velas + línea de precio en vivo
+│   │   │   └── BacktestCharts.tsx              # Curva de equidad
+│   │   └── main.tsx
+│   └── package.json
+├── infra/
+│   └── docker/
+│       ├── docker-compose.yml                  # Postgres/TimescaleDB, Redis, Backend, Prometheus, Grafana
+│       └── prometheus/                         # Configuración de Prometheus
+└── docs/
+```
+
+---
+
+## 🧪 8. Calidad y CI
+
+- **Tests**: **118 unitarios** pasando; cobertura **73.93%** (gate `--cov-fail-under=70`).
+  - El job de CI ya **no filtra con `-m unit`**: antes descartaba 41 tests (corrían 14 de 66) y medía 57.8% de cobertura.
+- **MyPy strict**: **0 errores** en 96 archivos (`explicit_package_bases = true`). Ahora es **bloqueante** en CI.
+- **Ruff**: **0 hallazgos** y **116 archivos formateados**. `ruff check src tests` y `ruff format --check src tests` son **bloqueantes** en CI (backlog de estilo agotado).
+  - `flake8-type-checking` respeta los modelos Pydantic/SQLAlchemy y los routers FastAPI, que evalúan anotaciones en runtime.
+  - Alias de tipos migrados a sintaxis PEP 695 (`type Price = Decimal`).
+- **Frontend**: job de CI con `npm ci` + `oxlint` + `tsc -b && vite build`.
+- **Integración**: el job aplica `alembic upgrade head` antes de ejecutar los tests.
+- **Correcciones de tipos relevantes**: el SL/TP del bot comparaba `PositionSide` con `OrderSide` (nunca se disparaba); corregido a `LONG`/`SHORT`.
+- **Higiene**: un único `docker-compose.yml` (`infra/docker/`), eliminado el `MarketDataService` duplicado y `implementation_plan.md` alineado con la realidad (React/Vite, no Next.js).
+
+### Fase 8 — Trading real y alertas (COMPLETADA)
+
+**Ejecución real (Binance / Bybit vía CCXT)**
+- `infrastructure/exchange/live_exchange.py`: adaptador genérico asíncrono con `ping`, balances, balance libre, órdenes market/limit/stop y mapeo de errores CCXT a excepciones de dominio.
+- `application/services/live_trading_service.py`: ledger en memoria de órdenes, trades y posiciones reales; cartera calculada con el saldo USDT del exchange; cierre por posición o por símbolo (venta del saldo base libre).
+- **Interlocks acumulativos**:
+  1. `EXECUTION_MODE=real` **y** `ENABLE_REAL_TRADING=true`.
+  2. Credenciales presentes en el Credential Vault.
+  3. `ALLOW_MAINNET_TRADING=true` si las claves son de mainnet (por defecto solo testnet).
+  4. `REQUIRE_MANUAL_CONFIRMATION=true` exige `confirm=true` en cada orden real.
+  5. `REAL_TRADING_ALLOWED_SYMBOLS` (allowlist) y `REAL_TRADING_MAX_NOTIONAL` (límite por operación).
+  6. `ENABLE_AUTONOMOUS_REAL_TRADING=false` por defecto; el daemon rechaza arrancar en real si no se habilita explícitamente.
+  7. Validación previa con `RiskService` (stop-loss obligatorio, tamaño, drawdown y circuit breaker).
+- **Protección SL/TP**: guardián local en el lifespan (`live-trading-guard`) que consulta el precio y cierra con orden de mercado cuando se cruza el SL/TP. No hay OCO nativo del exchange todavía; si el backend se apaga, la posición real queda sin protección local.
+- **API**: `GET /api/v1/trading/real/status`, `GET /api/v1/trading/real/account`, `GET /api/v1/trading/real/positions`, `POST /api/v1/trading/real/orders`, `POST /api/v1/trading/real/positions/close`.
+- **Persistencia**: las órdenes reales se escriben en el journal (`orders`, `trades`, `positions`, snapshot de cartera) mediante `persist_live_order_to_database`; el journaling sigue siendo best-effort.
+- **Limitación conocida**: el ledger real vive en memoria y no se rehidrata al reiniciar (el exchange es la fuente de verdad para balances). Verificar el estado real antes de operar tras un reinicio.
+
+**Alertas multicanal**
+- `domain/notifications` + `application/services/alert_service.py` con severidades (`info`, `success`, `warning`, `critical`), filtro por `ALERT_MIN_SEVERITY`, contadores y entrega best-effort (nunca rompe una operación).
+- Canales: Telegram (`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`), webhook JSON (`ALERT_WEBHOOK_URL`) y email SMTP (`EMAIL_SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO`, ...).
+- Eventos: órdenes reales ejecutadas, cierres, SL/TP, kill-switch, bloqueos de riesgo y arranque con trading real.
+- **API**: `GET /api/v1/alerts/status`, `POST /api/v1/alerts/test`.
+- **Frontend**: panel "Trading Real y Alertas" en Configuración con entorno (testnet/mainnet), credenciales, límite, guardián, símbolos, estado de canales y botón de alerta de prueba. El botón de compra/venta usa los endpoints reales cuando el modo REAL está activo (con confirmación por orden).
+
+**Pruebas Fase 8**: `tests/unit/test_phase8_trading.py` (interlocks, ledger, cierres, SL/TP, alertas, bloqueo del bot real) y `tests/unit/test_phase8_channels.py` (Telegram/webhook/email y adaptador CCXT con cliente falso). Total: **52 tests nuevos**.
+
+---
+
+*Fin del resumen de traspaso. Al iniciar el nuevo chat, comparte este archivo o pide continuar a partir de la sección 8.*
+
+*Última actualización: Fase 8 completada (trading real Binance/Bybit con interlocks, guardián SL/TP local y alertas Telegram/webhook/email), 118 tests, 73.93% cobertura, Ruff/MyPy/CI en verde.*
