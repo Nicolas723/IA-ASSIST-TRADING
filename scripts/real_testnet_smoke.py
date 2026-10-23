@@ -13,8 +13,10 @@ Usage (backend running on http://localhost:8000):
     python scripts/real_testnet_smoke.py --execute --yes --quantity 0.0001
     python scripts/real_testnet_smoke.py --execute --yes --close
 
-The order is always guarded by the backend's safety interlocks. This script is
-not a substitute for reading the status/positions and confirming the exchange
+The order is always guarded by the backend's safety interlocks. When
+``REAL_TRADING_OCO_ENABLED=true``, the script also reports whether the
+exchange-side OCO was attached to the new position. This script is not a
+substitute for reading the status/positions and confirming the exchange
 environment in the UI.
 """
 
@@ -162,6 +164,25 @@ def main() -> int:
 
         positions = _request(client, "GET", "/api/v1/trading/real/positions")
         _print_json("OPEN REAL POSITIONS", positions)
+
+        if status.get("oco_enabled"):
+            oco_status = _request(client, "GET", "/api/v1/trading/real/status")
+            _print_json(
+                "OCO STATUS",
+                {
+                    "oco_enabled": oco_status.get("oco_enabled"),
+                    "oco_protected_positions": oco_status.get("oco_protected_positions"),
+                    "protection_mode": oco_status.get("protection_mode"),
+                    "oco_discovery_failed_exchanges": oco_status.get(
+                        "oco_discovery_failed_exchanges"
+                    ),
+                },
+            )
+            if not oco_status.get("oco_protected_positions"):
+                print(
+                    "WARNING: OCO is enabled but no protected position was reported. "
+                    "Check the alerts and backend logs before leaving the position open."
+                )
 
         if args.close:
             if not args.yes:

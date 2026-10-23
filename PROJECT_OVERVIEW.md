@@ -268,7 +268,7 @@ ai-trading-assistant/
 
 ## 🧪 8. Calidad y CI
 
-- **Tests**: **129 unitarios + 11 de integración** pasando; cobertura **73.79%** (gate `--cov-fail-under=70`).
+- **Tests**: **149 unitarios + 11 de integración** pasando; cobertura **73.84%** (gate `--cov-fail-under=70`).
   - El job de CI ya **no filtra con `-m unit`**: antes descartaba 41 tests (corrían 14 de 66) y medía 57.8% de cobertura.
 - **MyPy strict**: **0 errores** en 96 archivos (`explicit_package_bases = true`). Ahora es **bloqueante** en CI.
 - **Ruff**: **0 hallazgos** y **116 archivos formateados**. `ruff check src tests` y `ruff format --check src tests` son **bloqueantes** en CI (backlog de estilo agotado).
@@ -292,23 +292,30 @@ ai-trading-assistant/
   5. `REAL_TRADING_ALLOWED_SYMBOLS` (allowlist) y `REAL_TRADING_MAX_NOTIONAL` (límite por operación).
   6. `ENABLE_AUTONOMOUS_REAL_TRADING=false` por defecto; el daemon rechaza arrancar en real si no se habilita explícitamente.
   7. Validación previa con `RiskService` (stop-loss obligatorio, tamaño, drawdown y circuit breaker).
-- **Protección SL/TP**: guardián local en el lifespan (`live-trading-guard`) que consulta el precio y cierra con orden de mercado cuando se cruza el SL/TP. El estado expone `protection_mode=local_guard`.
-  - **OCO nativo no activado**: Binance spot no expone SL/TP adjuntos en la API unificada de CCXT (`createOrderWithTakeProfitAndStopLoss=False`) y Bybit spot no los adjunta a órdenes market. Colocar stop y take-profit como órdenes separadas sin OCO podía duplicar ventas; no se activó a ciegas. Próximo paso: OCO específico de Binance detrás de flag y validado en testnet.
+- **Protección SL/TP**:
+  - **OCO nativo de Binance spot (Fase 8.2, opt-in)**: si `REAL_TRADING_OCO_ENABLED=true` y una orden BUY se llena con SL/TP, se coloca una OCO exchange-side (`POST /api/v3/order/oco`) con TP limit y SL stop-limit. La OCO protege aunque el backend esté apagado. Por defecto está apagada. Solo Binance spot; Bybit sigue usando el guardián local.
+  - **Guardián local**: en el lifespan (`live-trading-guard`) consulta el precio y cierra con orden de mercado cuando se cruza el SL/TP. Es el fallback cuando la OCO no está disponible o falla su creación. El estado expone `protection_mode=exchange_oco|oco_with_local_fallback|oco_discovery_failed|local_guard`, `oco_enabled`, `oco_protected_positions` y `oco_discovery_failed_exchanges`.
+  - **Ciclo de vida OCO**: se cancela antes de cualquier venta o cierre manual (incluido `POST /real/orders` con side SELL); si no se puede confirmar la cancelación, la venta se aborta para evitar una doble venta. Al añadir a una posición existente se cancela la OCO anterior y se recrea por la cantidad total. La reconciliación importa las salidas ejecutadas por la OCO al ledger/journal.
+  - **Reinicio**: al arrancar se descubren las OCO abiertas y se reasocian a las posiciones restauradas. Si el descubrimiento falla, el guardián local no opera ese exchange y las ventas/cierres se bloquean hasta confirmar que no hay una OCO activa (fail-safe).
+  - **Stop-limit**: el SL de la OCO usa `REAL_TRADING_OCO_STOP_LIMIT_BUFFER_PCT=0.1` por defecto para dar margen al stop-limit. En huecos fuertes puede no llenarse; en ese caso la posición sigue bajo el guardián local y las alertas.
 - **API**: `GET /api/v1/trading/real/status`, `GET /api/v1/trading/real/account`, `GET /api/v1/trading/real/positions`, `POST /api/v1/trading/real/orders`, `POST /api/v1/trading/real/positions/close`, `POST /api/v1/trading/real/reconcile`.
 - **Persistencia**: las órdenes reales se escriben en el journal (`orders`, `trades`, `positions`, snapshot de cartera) mediante `persist_live_order_to_database`; el journaling sigue siendo best-effort.
 - **Rehidratación real**: al arrancar se restauran posiciones, órdenes, trades y el último snapshot de equity desde PostgreSQL. Si hay posiciones restauradas pero el trading real o las credenciales no están activos, se emite una alerta crítica.
 - **Reconciliación**: cada `REAL_TRADING_RECONCILE_INTERVAL_SECONDS` (300 s por defecto) se comparan las posiciones locales con el saldo base del exchange: se eliminan las cerradas fuera de la plataforma y se ajustan las cantidades parciales. También se puede forzar desde la UI o con `POST /real/reconcile`.
 - **Idempotencia**: cada orden real acepta `client_order_id` (máx. 36 caracteres). Se mapea a `newClientOrderId` en Binance y `orderLinkId` en Bybit. Un reintento con el mismo id devuelve la orden existente sin volver a enviarla al exchange.
-- **Limitación conocida**: el guardián SL/TP solo protege mientras el backend está encendido. La rehidratación es best-effort y el exchange sigue siendo la fuente de verdad para balances; revisar posiciones tras un reinicio o una intervención manual.
+- **Limitaciones conocidas**:
+  - La OCO solo cubre Binance spot y una OCO por símbolo (si se añade a la posición se reemplaza). Si la creación o la cancelación falla, se alerta y se mantiene el guardián local cuando no hay OCO activa; si una OCO previa sigue activa, no se envía una venta local para evitar duplicarla.
+  - Si la OCO se ejecuta con el backend apagado, al reiniciar la reconciliación de balances elimina la posición, pero el trade de salida puede no quedar reconstruido con PnL exacto en el journal. Revisar el historial del exchange.
+  - El guardián local solo protege mientras el backend está encendido. La rehidratación es best-effort y el exchange sigue siendo la fuente de verdad para balances; revisar posiciones tras un reinicio o una intervención manual.
 
 **Alertas multicanal**
 - `domain/notifications` + `application/services/alert_service.py` con severidades (`info`, `success`, `warning`, `critical`), filtro por `ALERT_MIN_SEVERITY`, contadores y entrega best-effort (nunca rompe una operación).
 - Canales: Telegram (`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`), webhook JSON (`ALERT_WEBHOOK_URL`) y email SMTP (`EMAIL_SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO`, ...).
 - Eventos: órdenes reales ejecutadas, cierres, SL/TP, kill-switch, bloqueos de riesgo y arranque con trading real.
 - **API**: `GET /api/v1/alerts/status`, `POST /api/v1/alerts/test`.
-- **Frontend**: panel "Trading Real y Alertas" en Configuración con entorno (testnet/mainnet), credenciales, límite, guardián, modo de protección, símbolos, estado de canales, botón de alerta de prueba y botón "Reconciliar con exchange". El botón de compra/venta usa los endpoints reales cuando el modo REAL está activo (con confirmación por orden y `client_order_id`).
+- **Frontend**: panel "Trading Real y Alertas" en Configuración con entorno (testnet/mainnet), credenciales, límite, guardián, modo de protección, contador de OCO activas, símbolos, estado de canales, botón de alerta de prueba y botón "Reconciliar con exchange". El botón de compra/venta usa los endpoints reales cuando el modo REAL está activo (con confirmación por orden y `client_order_id`).
 
-**Pruebas Fase 8**: `tests/unit/test_phase8_trading.py` (interlocks, ledger, cierres, SL/TP, idempotencia, rehidratación, reconciliación y alertas) y `tests/unit/test_phase8_channels.py` (Telegram/webhook/email y adaptador CCXT con cliente falso). Total: **63 tests nuevos** (129 unitarios) + **11 de integración**.
+**Pruebas Fase 8**: `tests/unit/test_phase8_trading.py` (interlocks, ledger, cierres, SL/TP local y OCO, idempotencia, rehidratación, reconciliación, descubrimiento de OCO y alertas) y `tests/unit/test_phase8_channels.py` (Telegram/webhook/email y adaptador CCXT con cliente falso, incluido el mapeo OCO). Total: **149 unitarios** + **11 de integración**, cobertura **73.84%**.
 
 ### Endurecimiento operativo (2026-10-22)
 
@@ -317,12 +324,12 @@ ai-trading-assistant/
 - **Reconciliación**: `LiveTradingService.reconcile_positions` compara cada posición con el saldo base del exchange, elimina posiciones cerradas fuera y ajusta cantidades. Se ejecuta en el guardián y bajo demanda.
 - **Idempotencia**: `client_order_id` en `POST /real/orders`, deduplicación en memoria + journal y mapeo por exchange.
 - **Guard más robusto**: un fallo al cerrar por SL/TP ya no se traga silenciosamente; se registra y se emite alerta crítica, manteniendo la posición para reintentar.
-- **Smoke test manual**: `scripts/real_testnet_smoke.py` (dry-run por defecto; exige `--execute --yes`; bloquea mainnet sin `--allow-mainnet`). Ejemplo: `backend\.venv\Scripts\python.exe scripts\real_testnet_smoke.py --execute --yes --quantity 0.0001`.
-- **Verificación**: 129 unitarios, 11 integración, cobertura 73.79%, Ruff 0 hallazgos, MyPy 0 errores, frontend build OK.
-- **Limitación pendiente**: OCO exchange-side. Se documenta y se muestra `protection_mode=local_guard`; implementarlo requiere una integración Binance-specific con validación en testnet para no duplicar ventas.
+- **Smoke test manual**: `scripts/real_testnet_smoke.py` (dry-run por defecto; exige `--execute --yes`; bloquea mainnet sin `--allow-mainnet`). Con `REAL_TRADING_OCO_ENABLED=true` también reporta el estado de la OCO y advierte si no se adjuntó a la posición. Ejemplo: `backend\.venv\Scripts\python.exe scripts\real_testnet_smoke.py --execute --yes --quantity 0.0001`.
+- **Verificación**: 149 unitarios, 11 integración, cobertura 73.84%, Ruff 0 hallazgos, MyPy 0 errores, frontend build OK.
+- **OCO exchange-side implementada (Fase 8.2)**: Binance spot, flag `REAL_TRADING_OCO_ENABLED=false` por defecto, cancelación segura antes de cierres, reconciliación de ejecuciones y descubrimiento al reiniciar. Pendiente la validación con credenciales reales de testnet; para probarla, activar el flag y ejecutar el smoke test con SL/TP.
 
 ---
 
 *Fin del resumen de traspaso. Al iniciar el nuevo chat, comparte este archivo o pide continuar a partir de la sección 8.*
 
-*Última actualización: Fase 8 endurecida (rehidratación y reconciliación real, idempotencia, guardián local y alertas Telegram/webhook/email), 129 tests unitarios + 11 de integración, 73.79% cobertura, Ruff/MyPy/CI en verde. OCO exchange-side pendiente de integración Binance-specific validada en testnet.*
+*Última actualización: Fase 8.2 con OCO nativo de Binance spot (opt-in), además del endurecimiento real (rehidratación y reconciliación, idempotencia, guardián local y alertas Telegram/webhook/email). 149 tests unitarios + 11 de integración, 73.84% cobertura, Ruff/MyPy/CI en verde. Pendiente validación de la OCO con credenciales reales de testnet.*

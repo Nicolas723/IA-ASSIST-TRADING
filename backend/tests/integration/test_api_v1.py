@@ -101,6 +101,9 @@ async def test_api_real_trading_status(async_client: AsyncClient):
     assert "allowed_symbols" in data
     assert "max_notional" in data
     assert data["protection_mode"] == "local_guard"
+    assert data["oco_enabled"] is False
+    assert data["oco_protected_positions"] == 0
+    assert data["oco_discovery_failed_exchanges"] == []
 
 
 @pytest.mark.integration

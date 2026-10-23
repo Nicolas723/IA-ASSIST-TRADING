@@ -269,6 +269,175 @@ class LiveExchangeAdapter:
             ),
         )
 
+    # ------------------------------------------------------------------
+    # Binance spot OCO (exchange-side SL/TP protection)
+    # ------------------------------------------------------------------
+
+    async def _ensure_markets(self, client: ccxt.Exchange) -> None:
+        if getattr(client, "markets", None):
+            return
+        try:
+            await client.load_markets()
+        except Exception as exc:
+            raise ExchangeError(f"Failed to load exchange markets: {exc}") from exc
+
+    async def _raw_symbol(self, client: ccxt.Exchange, symbol: str) -> str:
+        await self._ensure_markets(client)
+        try:
+            market = client.market(symbol)
+        except Exception as exc:
+            raise ExchangeError(f"Unknown exchange market '{symbol}': {exc}") from exc
+        raw = market.get("id") if isinstance(market, dict) else None
+        if not raw:
+            raise ExchangeError(f"Exchange market '{symbol}' has no raw symbol id")
+        return str(raw)
+
+    async def normalize_symbol(self, raw_symbol: str) -> str:
+        """Convert an exchange raw symbol (e.g. BTCUSDT) to CCXT form (BTC/USDT)."""
+        self._require_credentials()
+        client = self._require_client()
+        await self._ensure_markets(client)
+        markets = getattr(client, "markets_by_id", None) or {}
+        matches = markets.get(raw_symbol)
+        if matches:
+            return str(matches[0].get("symbol") or raw_symbol)
+        try:
+            return str(client.market(raw_symbol).get("symbol") or raw_symbol)
+        except Exception:
+            return raw_symbol
+
+    async def create_oco_sell(
+        self,
+        symbol: str,
+        quantity: float | Decimal,
+        take_profit: float | Decimal,
+        stop_loss: float | Decimal,
+        stop_limit_price: float | Decimal | None = None,
+        list_client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Place a native Binance spot OCO to protect a long position.
+
+        The OCO contains a take-profit limit sell and a stop-loss limit sell.
+        Only one leg can execute. This is exchange-side protection: it remains
+        active even if the backend is down.
+        """
+        if self._exchange_id != Exchange.BINANCE:
+            raise ExchangeError("Native OCO protection is only implemented for Binance spot.")
+        self._require_credentials()
+        client = self._require_client()
+        raw_symbol = await self._raw_symbol(client, symbol)
+
+        try:
+            amount = client.amount_to_precision(symbol, float(quantity))
+            tp = client.price_to_precision(symbol, float(take_profit))
+            sl = client.price_to_precision(symbol, float(stop_loss))
+            stop_limit = client.price_to_precision(
+                symbol, float(stop_limit_price if stop_limit_price is not None else stop_loss)
+            )
+        except Exception as exc:
+            raise ExchangeError(f"Failed to normalize OCO values: {exc}") from exc
+
+        if Decimal(amount) <= 0:
+            raise ExchangeError("OCO quantity must be greater than zero.")
+        if Decimal(tp) <= Decimal(sl):
+            raise ExchangeError("OCO take-profit must be above stop-loss for a long position.")
+        if Decimal(stop_limit) > Decimal(sl):
+            stop_limit = sl
+        if list_client_order_id and len(list_client_order_id) > 36:
+            raise ExchangeError("list_client_order_id must be at most 36 characters.")
+
+        params: dict[str, Any] = {
+            "symbol": raw_symbol,
+            "side": "SELL",
+            "quantity": amount,
+            "price": tp,
+            "stopPrice": sl,
+            "stopLimitPrice": stop_limit,
+            "stopLimitTimeInForce": "GTC",
+            "newOrderRespType": "FULL",
+        }
+        if list_client_order_id:
+            params["listClientOrderId"] = list_client_order_id
+
+        try:
+            response = await client.private_post_order_oco(params)
+        except ccxt.AuthenticationError as exc:
+            raise SecurityError(f"Exchange authentication failed: {exc}") from exc
+        except ccxt.InsufficientFunds as exc:
+            raise ExchangeError(f"Insufficient funds for OCO: {exc}") from exc
+        except ccxt.NetworkError as exc:
+            raise ExchangeError(f"Network error while placing OCO: {exc}") from exc
+        except Exception as exc:
+            logger.error(
+                "live_oco_creation_failed",
+                exchange=self.exchange_id.value,
+                symbol=symbol,
+                error=str(exc),
+            )
+            raise ExchangeError(f"Failed to place OCO: {exc}") from exc
+        return dict(response)
+
+    async def cancel_oco(self, symbol: str, order_list_id: int | str) -> dict[str, Any]:
+        """Cancel an open Binance OCO by order list id."""
+        if self._exchange_id != Exchange.BINANCE:
+            raise ExchangeError("Native OCO protection is only implemented for Binance spot.")
+        self._require_credentials()
+        client = self._require_client()
+        raw_symbol = await self._raw_symbol(client, symbol)
+        try:
+            response = await client.private_delete_orderlist(
+                {"symbol": raw_symbol, "orderListId": order_list_id}
+            )
+        except ccxt.NetworkError as exc:
+            raise ExchangeError(f"Network error while cancelling OCO: {exc}") from exc
+        except Exception as exc:
+            logger.warning(
+                "live_oco_cancel_failed",
+                exchange=self.exchange_id.value,
+                symbol=symbol,
+                order_list_id=str(order_list_id),
+                error=str(exc),
+            )
+            raise ExchangeError(f"Failed to cancel OCO: {exc}") from exc
+        return dict(response)
+
+    async def fetch_oco(self, symbol: str, order_list_id: int | str) -> dict[str, Any]:
+        """Fetch the state of one OCO order list."""
+        if self._exchange_id != Exchange.BINANCE:
+            raise ExchangeError("Native OCO protection is only implemented for Binance spot.")
+        self._require_credentials()
+        client = self._require_client()
+        raw_symbol = await self._raw_symbol(client, symbol)
+        try:
+            response = await client.private_get_orderlist(
+                {"symbol": raw_symbol, "orderListId": order_list_id}
+            )
+        except ccxt.NetworkError as exc:
+            raise ExchangeError(f"Network error while fetching OCO: {exc}") from exc
+        except Exception as exc:
+            raise ExchangeError(f"Failed to fetch OCO: {exc}") from exc
+        return dict(response)
+
+    async def fetch_open_oco_lists(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        """List open Binance OCO order lists (all symbols when symbol is None)."""
+        if self._exchange_id != Exchange.BINANCE:
+            raise ExchangeError("Native OCO protection is only implemented for Binance spot.")
+        self._require_credentials()
+        client = self._require_client()
+        params: dict[str, Any] = {}
+        if symbol is not None:
+            params["symbol"] = await self._raw_symbol(client, symbol)
+        try:
+            response = await client.private_get_openorderlist(params)
+        except ccxt.NetworkError as exc:
+            raise ExchangeError(f"Network error while listing open OCOs: {exc}") from exc
+        except Exception as exc:
+            raise ExchangeError(f"Failed to list open OCOs: {exc}") from exc
+        if not isinstance(response, list):
+            return []
+        return [dict(item) for item in response if isinstance(item, dict)]
+
     async def close(self) -> None:
         if self._client:
             await self._client.close()

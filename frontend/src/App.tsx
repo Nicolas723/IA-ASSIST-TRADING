@@ -97,6 +97,9 @@ interface RealTradingStatusData {
   guard_running: boolean;
   protection_mode?: string;
   reconciliation_interval_seconds?: number;
+  oco_enabled?: boolean;
+  oco_protected_positions?: number;
+  oco_discovery_failed_exchanges?: string[];
 }
 
 interface AlertChannelStatusData {
@@ -1737,12 +1740,23 @@ export default function App() {
                       {realTradingStatus.guard_running ? 'ACTIVO' : 'INACTIVO'}
                     </span>
                   </div>
+                  <div className="kpi-card" style={{ padding: '12px' }}>
+                    <span className="kpi-label">OCO activos</span>
+                    <span className="kpi-value" style={{ color: realTradingStatus.oco_discovery_failed_exchanges?.length ? '#ef4444' : realTradingStatus.oco_enabled ? '#10b981' : '#94a3b8' }}>
+                      {realTradingStatus.oco_enabled ? (realTradingStatus.oco_protected_positions ?? 0) : 'OFF'}
+                    </span>
+                  </div>
                 </div>
                 <div style={{ marginTop: '12px', fontSize: '12px', color: '#94a3b8' }}>
                   Símbolos permitidos: <strong style={{ color: '#e2e8f0' }}>{realTradingStatus.allowed_symbols.join(', ') || 'sin restricción'}</strong>
                   {' · '}Confirmación manual: <strong style={{ color: '#e2e8f0' }}>{realTradingStatus.require_manual_confirmation ? 'Sí' : 'No'}</strong>
                   {' · '}Bot autónomo real: <strong style={{ color: realTradingStatus.autonomous_real_enabled ? '#f59e0b' : '#94a3b8' }}>{realTradingStatus.autonomous_real_enabled ? 'HABILITADO' : 'deshabilitado'}</strong>
-                  {' · '}Protección: <strong style={{ color: '#f59e0b' }}>{realTradingStatus.protection_mode === 'local_guard' || !realTradingStatus.protection_mode ? 'Guardián local' : realTradingStatus.protection_mode}</strong>
+                  {' · '}Protección: <strong style={{ color: realTradingStatus.protection_mode === 'oco_discovery_failed' ? '#ef4444' : '#f59e0b' }}>{realTradingStatus.protection_mode === 'exchange_oco' ? 'OCO exchange-side' : realTradingStatus.protection_mode === 'oco_with_local_fallback' ? 'OCO + guardián local' : realTradingStatus.protection_mode === 'oco_discovery_failed' ? 'OCO sin confirmar (ventas bloqueadas)' : 'Guardián local'}</strong>
+                  {realTradingStatus.oco_discovery_failed_exchanges?.length ? (
+                    <span style={{ color: '#ef4444' }}>
+                      {' · '}Revisar OCO en: {realTradingStatus.oco_discovery_failed_exchanges.join(', ')}
+                    </span>
+                  ) : null}
                 </div>
                 <button
                   type="button"

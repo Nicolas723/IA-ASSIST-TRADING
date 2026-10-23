@@ -233,6 +233,10 @@ class Settings(BaseSettings):
     enable_autonomous_real_trading: bool = Field(default=False)
     real_trading_guard_interval_seconds: int = Field(default=15, ge=5, le=300)
     real_trading_reconcile_interval_seconds: int = Field(default=300, ge=30, le=3600)
+    real_trading_oco_enabled: bool = Field(default=False)
+    real_trading_oco_stop_limit_buffer_pct: Decimal = Field(
+        default=Decimal("0.1"), ge=Decimal("0"), le=Decimal("5")
+    )
 
     # -------------------------------------------------------------------------
     # Notifications / alerts

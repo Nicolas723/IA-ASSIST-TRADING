@@ -235,6 +235,23 @@ class FakeCcxtClient:
             "fee": {"cost": "1.5", "currency": "USDT"},
         }
         self.create_kwargs: dict[str, Any] = {}
+        self.markets: dict[str, Any] = {"BTC/USDT": {"id": "BTCUSDT", "symbol": "BTC/USDT"}}
+        self.markets_by_id: dict[str, Any] = {"BTCUSDT": [{"id": "BTCUSDT", "symbol": "BTC/USDT"}]}
+        self.oco_create_params: dict[str, Any] = {}
+        self.oco_cancel_params: dict[str, Any] = {}
+        self.oco_fetch_params: dict[str, Any] = {}
+        self.open_oco_params: dict[str, Any] = {}
+        self.oco_create_response: dict[str, Any] = {
+            "orderListId": 123,
+            "listOrderStatus": "EXECUTING",
+            "orders": [],
+        }
+        self.oco_status_response: dict[str, Any] = {
+            "orderListId": 123,
+            "listOrderStatus": "EXECUTING",
+            "orders": [],
+        }
+        self.open_oco_response: list[dict[str, Any]] = []
 
     def amount_to_precision(self, symbol: str, amount: float) -> str:
         return f"{amount:.2f}"
@@ -256,6 +273,28 @@ class FakeCcxtClient:
         if self.error is not None:
             raise self.error
         return self.response
+
+    def market(self, symbol: str) -> dict[str, Any]:
+        return self.markets[symbol]
+
+    async def load_markets(self) -> dict[str, Any]:
+        return self.markets
+
+    async def private_post_order_oco(self, params: dict[str, Any]) -> dict[str, Any]:
+        self.oco_create_params = params
+        return self.oco_create_response
+
+    async def private_delete_orderlist(self, params: dict[str, Any]) -> dict[str, Any]:
+        self.oco_cancel_params = params
+        return {"orderListId": params["orderListId"], "listOrderStatus": "ALL_DONE"}
+
+    async def private_get_orderlist(self, params: dict[str, Any]) -> dict[str, Any]:
+        self.oco_fetch_params = params
+        return self.oco_status_response
+
+    async def private_get_openorderlist(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        self.open_oco_params = params
+        return self.open_oco_response
 
     async def close(self) -> None:
         self.closed = True
@@ -446,3 +485,67 @@ async def test_live_adapter_closes_client() -> None:
 
     assert client.closed is True
     assert adapter._client is None
+
+
+async def test_live_adapter_create_oco_mapping() -> None:
+    adapter = make_adapter()
+    client = adapter._client
+    assert isinstance(client, FakeCcxtClient)
+
+    response = await adapter.create_oco_sell(
+        "BTC/USDT",
+        quantity=0.1,
+        take_profit=52_000,
+        stop_loss=48_000,
+        stop_limit_price=47_900,
+        list_client_order_id="oco-list-1",
+    )
+
+    assert response["orderListId"] == 123
+    assert client.oco_create_params == {
+        "symbol": "BTCUSDT",
+        "side": "SELL",
+        "quantity": "0.10",
+        "price": "52000.00",
+        "stopPrice": "48000.00",
+        "stopLimitPrice": "47900.00",
+        "stopLimitTimeInForce": "GTC",
+        "newOrderRespType": "FULL",
+        "listClientOrderId": "oco-list-1",
+    }
+
+
+async def test_live_adapter_oco_rejects_non_binance() -> None:
+    adapter = make_bybit_adapter()
+
+    with pytest.raises(ExchangeError, match="only implemented for Binance"):
+        await adapter.create_oco_sell("BTC/USDT", 0.1, 52_000, 48_000)
+
+
+async def test_live_adapter_oco_rejects_invalid_prices() -> None:
+    adapter = make_adapter()
+
+    with pytest.raises(ExchangeError, match="take-profit must be above"):
+        await adapter.create_oco_sell("BTC/USDT", 0.1, 48_000, 49_000)
+
+
+async def test_live_adapter_oco_cancel_fetch_and_open_lists() -> None:
+    adapter = make_adapter()
+    client = adapter._client
+    assert isinstance(client, FakeCcxtClient)
+    client.open_oco_response = [
+        {"orderListId": 123, "symbol": "BTCUSDT", "listOrderStatus": "EXECUTING"}
+    ]
+
+    await adapter.cancel_oco("BTC/USDT", 123)
+    await adapter.fetch_oco("BTC/USDT", 123)
+    lists = await adapter.fetch_open_oco_lists()
+    by_symbol = await adapter.fetch_open_oco_lists("BTC/USDT")
+    normalized = await adapter.normalize_symbol("BTCUSDT")
+
+    assert client.oco_cancel_params == {"symbol": "BTCUSDT", "orderListId": 123}
+    assert client.oco_fetch_params == {"symbol": "BTCUSDT", "orderListId": 123}
+    assert lists == client.open_oco_response
+    assert by_symbol == client.open_oco_response
+    assert client.open_oco_params == {"symbol": "BTCUSDT"}
+    assert normalized == "BTC/USDT"

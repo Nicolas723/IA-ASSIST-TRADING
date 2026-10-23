@@ -183,6 +183,15 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         except Exception as e:
             logger.warning("live_trading_rehydration_failed", error=str(e))
 
+        # Reattach exchange-side OCOs before starting the local guard, otherwise
+        # a restart could place a second sell while the OCO is still active.
+        if live_trading_service.settings.real_trading_oco_enabled:
+            try:
+                discovered = await live_trading_service.discover_oco_protections()
+                logger.info("live_oco_discovered", count=discovered)
+            except Exception as e:
+                logger.warning("live_oco_discovery_failed", error=str(e))
+
         async def _guard_price(symbol: str) -> float | None:
             fetcher = get_market_data_fetcher()
             return float(await fetcher.fetch_last_price(symbol))

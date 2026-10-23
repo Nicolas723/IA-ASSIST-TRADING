@@ -16,10 +16,10 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.domain.market.entities import Exchange
 from src.domain.notifications.entities import AlertSeverity
@@ -79,6 +79,24 @@ class LiveTradingStatus(BaseModel):
     guard_running: bool = False
     protection_mode: str = "local_guard"
     reconciliation_interval_seconds: int = 300
+    oco_enabled: bool = False
+    oco_protected_positions: int = 0
+    oco_discovery_failed_exchanges: list[str] = Field(default_factory=list)
+
+
+class OcoProtection(BaseModel):
+    """An exchange-side OCO protecting a long spot position."""
+
+    symbol: str
+    exchange: Exchange
+    order_list_id: str
+    list_client_order_id: str | None = None
+    quantity: Decimal
+    take_profit: Decimal | None = None
+    stop_loss: Decimal | None = None
+    stop_limit_price: Decimal | None = None
+    status: str = "EXECUTING"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
 
 
 class LiveTradingService:
@@ -107,6 +125,8 @@ class LiveTradingService:
         self._order_ids: set[UUID] = set()
         self._client_order_ids: dict[str, Order] = {}
         self._last_reconcile = 0.0
+        self._oco_protections: dict[str, OcoProtection] = {}
+        self._oco_discovery_failed: set[Exchange] = set()
 
         self._guard_task: asyncio.Task[None] | None = None
         self._price_fetcher: PriceFetcher | None = None
@@ -130,6 +150,15 @@ class LiveTradingService:
     def status(self, exchange: Exchange | str | None = None) -> LiveTradingStatus:
         exchange_id = self._exchange(exchange)
         summary = self.vault_service.vault.get_credential_summary(exchange_id.value)
+        oco_enabled = self.settings.real_trading_oco_enabled and exchange_id == Exchange.BINANCE
+        if not oco_enabled:
+            protection_mode = "local_guard"
+        elif self._oco_discovery_failed:
+            protection_mode = "oco_discovery_failed"
+        elif self._oco_protections:
+            protection_mode = "exchange_oco"
+        else:
+            protection_mode = "oco_with_local_fallback"
         return LiveTradingStatus(
             enabled=self.settings.real_trading_enabled,
             execution_mode=self.settings.execution_mode.value,
@@ -143,8 +172,13 @@ class LiveTradingService:
             autonomous_real_enabled=self.settings.enable_autonomous_real_trading,
             open_positions=len(self._positions),
             guard_running=self._guard_task is not None and not self._guard_task.done(),
-            protection_mode="local_guard",
+            protection_mode=protection_mode,
             reconciliation_interval_seconds=(self.settings.real_trading_reconcile_interval_seconds),
+            oco_enabled=oco_enabled,
+            oco_protected_positions=len(self._oco_protections),
+            oco_discovery_failed_exchanges=sorted(
+                item.value for item in self._oco_discovery_failed
+            ),
         )
 
     def _credentials(self, exchange: Exchange) -> tuple[str, str, str | None]:
@@ -182,6 +216,15 @@ class LiveTradingService:
             raise SecurityError(
                 f"Order notional ${notional:,.2f} exceeds REAL_TRADING_MAX_NOTIONAL "
                 f"(${self.settings.real_trading_max_notional:,.2f})."
+            )
+
+    def _assert_oco_discovery_known(self, exchange_id: Exchange) -> None:
+        """Block sells while an unknown exchange-side OCO may still be active."""
+        if self.settings.real_trading_oco_enabled and exchange_id in self._oco_discovery_failed:
+            raise SecurityError(
+                "No se puede vender o cerrar: no se pudieron descubrir las OCO abiertas "
+                f"en {exchange_id.value}. Ejecuta la reconciliación y revisa el exchange "
+                "antes de reintentar, para evitar una doble venta."
             )
 
     def _adapter(self, exchange: Exchange) -> LiveExchangeAdapter:
@@ -225,6 +268,8 @@ class LiveTradingService:
         if peak_value is not None:
             self._peak_value = peak_value
         self._last_reconcile = 0.0
+        self._oco_protections = {}
+        self._oco_discovery_failed = set()
 
     async def notify_restored_positions(self) -> None:
         """Warn when restored real positions cannot be protected automatically."""
@@ -256,6 +301,409 @@ class LiveTradingService:
                 AlertSeverity.CRITICAL,
                 {"exchanges": missing, "positions": len(self._positions)},
             )
+
+    # ------------------------------------------------------------------
+    # Exchange-side OCO protection (Binance spot)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _oco_status(data: dict[str, Any] | None) -> str:
+        if not data:
+            return ""
+        list_status = data.get("listOrderStatus")
+        if list_status:
+            return str(list_status).upper()
+        list_type = str(data.get("listStatusType") or "").upper()
+        if list_type in {"EXEC_STARTED", "RESPONSE"}:
+            return "EXECUTING"
+        if list_type:
+            return list_type
+        return str(data.get("status") or "").upper()
+
+    def _remove_oco(self, protection: OcoProtection) -> None:
+        current = self._oco_protections.get(protection.symbol)
+        if current is not None and current.order_list_id == protection.order_list_id:
+            self._oco_protections.pop(protection.symbol, None)
+
+    def _oco_exit_order(self, protection: OcoProtection, data: dict[str, Any]) -> Order | None:
+        """Build the synthetic sell order for an executed OCO leg."""
+        legs = data.get("orders") or []
+        filled: list[dict[str, Any]] = []
+        for leg in legs:
+            if not isinstance(leg, dict):
+                continue
+            quantity = Decimal(str(leg.get("executedQty") or leg.get("executedQuantity") or 0))
+            status = str(leg.get("status") or "").upper()
+            if quantity > 0 and status in {"FILLED", "PARTIALLY_FILLED"}:
+                filled.append(leg)
+        if not filled:
+            return None
+
+        leg = max(
+            filled,
+            key=lambda item: Decimal(
+                str(item.get("executedQty") or item.get("executedQuantity") or 0)
+            ),
+        )
+        quantity = Decimal(str(leg.get("executedQty") or leg.get("executedQuantity") or 0))
+        quote = Decimal(str(leg.get("cummulativeQuoteQty") or leg.get("cumulativeQuoteQty") or 0))
+        average = (
+            quote / quantity if quantity > 0 and quote > 0 else Decimal(str(leg.get("price") or 0))
+        )
+        if quantity <= 0 or average <= 0:
+            return None
+
+        leg_type = str(leg.get("type") or "").upper()
+        is_stop = "STOP" in leg_type
+        now = datetime.now(tz=UTC)
+        return Order(
+            symbol=protection.symbol,
+            exchange=protection.exchange,
+            mode=ExecutionMode.REAL,
+            side=OrderSide.SELL,
+            order_type=OrderType.STOP_LIMIT if is_stop else OrderType.LIMIT,
+            quantity=quantity,
+            limit_price=average,
+            stop_price=(protection.stop_loss or average) if is_stop else None,
+            status=OrderStatus.FILLED,
+            filled_quantity=quantity,
+            average_fill_price=average,
+            commission=Decimal("0"),
+            commission_asset="USDT",
+            client_order_id=protection.list_client_order_id,
+            submitted_at=now,
+            filled_at=now,
+            notes=f"Binance OCO {protection.order_list_id} executed ({leg_type or 'LEG'})",
+        )
+
+    async def _handle_terminal_oco(
+        self, protection: OcoProtection, data: dict[str, Any] | None
+    ) -> Order | None:
+        """Process an OCO that is no longer EXECUTING."""
+        status = self._oco_status(data)
+        protection.status = status or protection.status
+        self._remove_oco(protection)
+        if status == "ALL_DONE" and data is not None:
+            order = self._oco_exit_order(protection, data)
+            if order is not None:
+                self._record(order)
+                await self._alert(
+                    "OCO real ejecutado",
+                    f"{protection.symbol}: la OCO {protection.order_list_id} se ejecutó. "
+                    f"Salida registrada @ ${order.average_fill_price:,.2f}.",
+                    AlertSeverity.SUCCESS,
+                    {
+                        "symbol": protection.symbol,
+                        "order_list_id": protection.order_list_id,
+                        "order_id": str(order.id),
+                    },
+                )
+                if self._on_execution is not None:
+                    await self._on_execution(order)
+                return order
+            await self._alert(
+                "OCO finalizado sin fill",
+                f"{protection.symbol}: la OCO {protection.order_list_id} terminó sin una "
+                "ejecución detectable. Revisa el exchange.",
+                AlertSeverity.WARNING,
+                {
+                    "symbol": protection.symbol,
+                    "order_list_id": protection.order_list_id,
+                },
+            )
+            return None
+        await self._alert(
+            "OCO cancelada o expirada",
+            f"{protection.symbol}: la OCO {protection.order_list_id} ya no está activa "
+            f"(estado: {status or 'desconocido'}). El guardián local vuelve a proteger "
+            "la posición.",
+            AlertSeverity.WARNING,
+            {"symbol": protection.symbol, "order_list_id": protection.order_list_id},
+        )
+        return None
+
+    async def _protect_position_with_oco(self, order: Order) -> None:
+        """Create a Binance OCO for a filled long entry. Best-effort by design."""
+        if order.average_fill_price is None or order.stop_loss is None or order.take_profit is None:
+            return
+        if (
+            order.take_profit <= order.average_fill_price
+            or order.stop_loss >= order.average_fill_price
+        ):
+            await self._alert(
+                "OCO no colocada",
+                f"{order.symbol}: SL/TP inválidos respecto al precio de entrada. "
+                "Se mantiene el guardián local como protección.",
+                AlertSeverity.WARNING,
+                {"symbol": order.symbol},
+            )
+            return
+        position = self._positions.get(order.symbol)
+        if position is None:
+            return
+
+        buffer_pct = self.settings.real_trading_oco_stop_limit_buffer_pct / Decimal("100")
+        stop_limit = order.stop_loss * (Decimal("1") - buffer_pct)
+        if stop_limit <= 0:
+            stop_limit = order.stop_loss
+        list_client_order_id = f"oco-{uuid4().hex[:24]}"
+        had_existing = order.symbol in self._oco_protections
+        existing_cancelled = False
+        adapter = self._adapter(Exchange.BINANCE)
+        try:
+            if had_existing:
+                exit_order = await self._cancel_oco_for_symbol(order.symbol, adapter)
+                existing_cancelled = True
+                if exit_order is not None:
+                    position = self._positions.get(order.symbol)
+                    if position is None:
+                        return
+            response = await adapter.create_oco_sell(
+                symbol=order.symbol,
+                quantity=position.quantity,
+                take_profit=order.take_profit,
+                stop_loss=order.stop_loss,
+                stop_limit_price=stop_limit,
+                list_client_order_id=list_client_order_id,
+            )
+        except Exception as exc:
+            logger.warning("live_oco_creation_failed", symbol=order.symbol, error=str(exc))
+            fallback = (
+                "La OCO anterior puede seguir activa; revisa el exchange antes de operar."
+                if had_existing and not existing_cancelled
+                else "Se mantiene el guardián local como protección."
+            )
+            await self._alert(
+                "OCO no colocada",
+                f"{order.symbol}: no se pudo crear la OCO ({exc}). {fallback}",
+                AlertSeverity.WARNING,
+                {"symbol": order.symbol, "exchange": order.exchange.value},
+            )
+            return
+        finally:
+            await adapter.close()
+
+        order_list_id = str(response.get("orderListId") or response.get("orderListID") or "")
+        if not order_list_id:
+            await self._alert(
+                "OCO sin identificador",
+                f"{order.symbol}: Binance aceptó la OCO pero no devolvió orderListId. "
+                "Revisa las órdenes abiertas del exchange antes de operar.",
+                AlertSeverity.CRITICAL,
+                {"symbol": order.symbol},
+            )
+            return
+
+        protection = OcoProtection(
+            symbol=order.symbol,
+            exchange=Exchange.BINANCE,
+            order_list_id=order_list_id,
+            list_client_order_id=list_client_order_id,
+            quantity=position.quantity,
+            take_profit=order.take_profit,
+            stop_loss=order.stop_loss,
+            stop_limit_price=stop_limit,
+            status=self._oco_status(response) or "EXECUTING",
+        )
+        self._oco_protections[order.symbol] = protection
+        await self._alert(
+            "OCO real colocada",
+            f"{order.symbol}: OCO {order_list_id} activa. TP ${order.take_profit:,.2f} / "
+            f"SL ${order.stop_loss:,.2f} (stop-limit ${stop_limit:,.2f}).",
+            AlertSeverity.SUCCESS,
+            {
+                "symbol": order.symbol,
+                "order_list_id": order_list_id,
+                "quantity": str(position.quantity),
+            },
+        )
+
+    async def _cancel_oco_for_symbol(
+        self, symbol: str, adapter: LiveExchangeAdapter
+    ) -> Order | None:
+        """Cancel the symbol's OCO before a market sell.
+
+        Returns an exit order when the OCO had already executed, None when it was
+        safely cancelled. Raises ``ExchangeError`` when cancellation cannot be
+        confirmed, so the caller aborts instead of risking a double sell.
+        """
+        protection = self._oco_protections.get(symbol)
+        if protection is None:
+            return None
+        try:
+            await adapter.cancel_oco(symbol, protection.order_list_id)
+        except Exception as exc:
+            data: dict[str, Any] | None = None
+            try:
+                data = await adapter.fetch_oco(symbol, protection.order_list_id)
+            except Exception:
+                data = None
+            status = self._oco_status(data)
+            if status and status != "EXECUTING":
+                return await self._handle_terminal_oco(protection, data)
+            raise ExchangeError(
+                f"No se pudo cancelar la OCO {protection.order_list_id} de {symbol}; "
+                "se aborta el cierre para evitar una doble venta."
+            ) from exc
+
+        self._remove_oco(protection)
+        await self._alert(
+            "OCO cancelada",
+            f"{symbol}: OCO {protection.order_list_id} cancelada antes de cerrar la posición.",
+            AlertSeverity.INFO,
+            {"symbol": symbol, "order_list_id": protection.order_list_id},
+        )
+        return None
+
+    async def sync_oco_protections(self) -> list[Order]:
+        """Refresh tracked OCOs and import any exchange-side exits."""
+        if not self._oco_protections:
+            return []
+
+        by_exchange: dict[Exchange, list[OcoProtection]] = {}
+        for protection in self._oco_protections.values():
+            by_exchange.setdefault(protection.exchange, []).append(protection)
+
+        exits: list[Order] = []
+        for exchange, protections in by_exchange.items():
+            adapter: LiveExchangeAdapter | None = None
+            try:
+                adapter = self._adapter(exchange)
+                for protection in protections:
+                    try:
+                        data = await adapter.fetch_oco(protection.symbol, protection.order_list_id)
+                    except Exception as exc:
+                        logger.warning(
+                            "live_oco_status_failed",
+                            symbol=protection.symbol,
+                            order_list_id=protection.order_list_id,
+                            error=str(exc),
+                        )
+                        continue
+                    status = self._oco_status(data)
+                    if not status:
+                        logger.warning(
+                            "live_oco_status_unknown",
+                            symbol=protection.symbol,
+                            order_list_id=protection.order_list_id,
+                        )
+                        continue
+                    protection.status = status
+                    if status == "EXECUTING":
+                        continue
+                    exit_order = await self._handle_terminal_oco(protection, data)
+                    if exit_order is not None:
+                        exits.append(exit_order)
+            except Exception as exc:
+                logger.warning("live_oco_sync_failed", exchange=exchange.value, error=str(exc))
+            finally:
+                if adapter is not None:
+                    await adapter.close()
+        return exits
+
+    async def discover_oco_protections(self) -> int:
+        """
+        Attach open exchange-side OCOs to restored positions.
+
+        This is the restart safety net: if the backend was down while an OCO
+        stayed active, the local guard must know about it to avoid a double sell.
+        """
+        if not self.settings.real_trading_oco_enabled:
+            return 0
+
+        by_exchange: dict[Exchange, list[Position]] = {}
+        for position in self._positions.values():
+            if position.exchange == Exchange.BINANCE:
+                by_exchange.setdefault(position.exchange, []).append(position)
+        if not by_exchange:
+            self._oco_discovery_failed.clear()
+            return 0
+
+        discovered = 0
+        for exchange, positions in by_exchange.items():
+            if self.vault_service.vault.get_credential_summary(exchange.value) is None:
+                self._oco_discovery_failed.add(exchange)
+                continue
+            adapter: LiveExchangeAdapter | None = None
+            try:
+                adapter = self._adapter(exchange)
+                open_lists = await adapter.fetch_open_oco_lists()
+                by_symbol: dict[str, list[dict[str, Any]]] = {}
+                for item in open_lists:
+                    raw_symbol = str(item.get("symbol") or "")
+                    if not raw_symbol:
+                        continue
+                    try:
+                        symbol = await adapter.normalize_symbol(raw_symbol)
+                    except Exception:
+                        logger.warning("live_oco_symbol_normalize_failed", raw_symbol=raw_symbol)
+                        symbol = raw_symbol.upper()
+                    by_symbol.setdefault(symbol, []).append(item)
+                    raw_key = raw_symbol.replace("/", "").replace("-", "").upper()
+                    if raw_key != symbol:
+                        # Keep a raw-symbol alias so a failed normalization can
+                        # still be matched against a tracked position.
+                        by_symbol.setdefault(raw_key, []).append(item)
+
+                for position in positions:
+                    raw_key = position.symbol.replace("/", "").replace("-", "").upper()
+                    items = by_symbol.get(position.symbol) or by_symbol.get(raw_key, [])
+                    if not items:
+                        # Never drop a tracked protection just because the open-list
+                        # snapshot is empty: a concurrent placement may not be visible
+                        # yet. sync_oco_protections handles terminal states explicitly.
+                        continue
+                    if len(items) > 1:
+                        raise ExchangeError(
+                            f"Multiple open OCOs found for {position.symbol}; "
+                            "manual review is required to avoid a double sell."
+                        )
+                    item = items[0]
+                    order_list_id = str(item.get("orderListId") or item.get("orderListID") or "")
+                    if not order_list_id:
+                        raise ExchangeError(
+                            f"Open OCO for {position.symbol} has no orderListId; "
+                            "manual review is required to avoid a double sell."
+                        )
+                    self._oco_protections[position.symbol] = OcoProtection(
+                        symbol=position.symbol,
+                        exchange=exchange,
+                        order_list_id=order_list_id,
+                        list_client_order_id=item.get("listClientOrderId"),
+                        quantity=position.quantity,
+                        take_profit=position.take_profit,
+                        stop_loss=position.stop_loss,
+                        status=self._oco_status(item) or "EXECUTING",
+                    )
+                    discovered += 1
+                self._oco_discovery_failed.discard(exchange)
+            except Exception as exc:
+                logger.warning(
+                    "live_oco_discovery_failed",
+                    exchange=exchange.value,
+                    error=str(exc),
+                )
+                self._oco_discovery_failed.add(exchange)
+                await self._alert(
+                    "No se pudieron descubrir OCO",
+                    f"{exchange.value}: no se pudo consultar las OCO abiertas ({exc}). "
+                    "El guardián local no cerrará posiciones de este exchange hasta "
+                    "confirmar que no hay una OCO activa, para evitar una doble venta.",
+                    AlertSeverity.CRITICAL,
+                    {"exchange": exchange.value, "positions": len(positions)},
+                )
+            finally:
+                if adapter is not None:
+                    await adapter.close()
+
+        if discovered:
+            await self._alert(
+                "OCO reanudadas",
+                f"Se encontraron {discovered} OCO activas y se reanudó su seguimiento.",
+                AlertSeverity.INFO,
+                {"count": discovered},
+            )
+        return discovered
 
     # ------------------------------------------------------------------
     # Account
@@ -304,6 +752,9 @@ class LiveTradingService:
                 )
                 return existing
 
+        if req.side == OrderSide.SELL:
+            self._assert_oco_discovery_known(exchange_id)
+
         self._assert_order_allowed(symbol, notional)
 
         async with self._lock:
@@ -334,6 +785,13 @@ class LiveTradingService:
                     if not result.is_allowed:
                         reason = "; ".join(result.violation_reasons)
                         raise RiskViolationError(f"Order rejected by Risk Guard: {reason}")
+
+                if req.side == OrderSide.SELL:
+                    self._assert_oco_discovery_known(exchange_id)
+                    oco_exit = await self._cancel_oco_for_symbol(symbol, adapter)
+                    if oco_exit is not None:
+                        self._client_order_ids[client_order_id] = oco_exit
+                        return oco_exit
 
                 order = await adapter.place_order(
                     symbol=symbol,
@@ -367,6 +825,16 @@ class LiveTradingService:
             severity,
             {"order_id": str(order.id), "symbol": order.symbol, "exchange": exchange_id.value},
         )
+
+        if (
+            order.status == OrderStatus.FILLED
+            and order.side == OrderSide.BUY
+            and order.exchange == Exchange.BINANCE
+            and self.settings.real_trading_oco_enabled
+            and order.stop_loss is not None
+            and order.take_profit is not None
+        ):
+            await self._protect_position_with_oco(order)
         return order
 
     async def close_position(
@@ -406,11 +874,15 @@ class LiveTradingService:
         exchange_id = self._exchange(exchange)
         normalized = symbol.replace("-", "/").replace("_", "/").upper()
         self._assert_can_trade(exchange_id, confirm)
+        self._assert_oco_discovery_known(exchange_id)
 
         if quantity is None or quantity <= 0:
             base = normalized.split("/")[0]
             adapter = self._adapter(exchange_id)
             try:
+                oco_exit = await self._cancel_oco_for_symbol(normalized, adapter)
+                if oco_exit is not None:
+                    return oco_exit
                 quantity = await adapter.fetch_free_balance(base)
             finally:
                 await adapter.close()
@@ -437,9 +909,14 @@ class LiveTradingService:
     ) -> Order:
         exchange_id = self._exchange(exchange)
         self._assert_can_trade(exchange_id, confirm)
+        self._assert_oco_discovery_known(exchange_id)
         async with self._lock:
+            self._assert_oco_discovery_known(exchange_id)
             adapter = self._adapter(exchange_id)
             try:
+                oco_exit = await self._cancel_oco_for_symbol(symbol, adapter)
+                if oco_exit is not None:
+                    return oco_exit
                 order = await adapter.place_order(
                     symbol=symbol,
                     side=OrderSide.SELL,
@@ -586,7 +1063,18 @@ class LiveTradingService:
         or by an exchange-side order) and reduced when the balance is lower than
         the tracked quantity. Network/vault errors are logged and never raise.
         """
-        if not self._positions or not self.settings.real_trading_enabled:
+        if not self.settings.real_trading_enabled:
+            return []
+
+        oco_exits = (
+            await self.sync_oco_protections() if self.settings.real_trading_oco_enabled else []
+        )
+        if not self._positions:
+            if oco_exits and self._on_reconcile is not None:
+                try:
+                    await self._on_reconcile()
+                except Exception as exc:
+                    logger.warning("live_reconcile_persist_failed", error=str(exc))
             return []
 
         by_exchange: dict[Exchange, list[Position]] = {}
@@ -594,7 +1082,7 @@ class LiveTradingService:
             by_exchange.setdefault(position.exchange, []).append(position)
 
         removed: list[str] = []
-        changed = False
+        changed = bool(oco_exits)
         for exchange_id, positions in by_exchange.items():
             if self.vault_service.vault.get_credential_summary(exchange_id.value) is None:
                 continue
@@ -655,6 +1143,12 @@ class LiveTradingService:
         self.update_market_prices(price_map)
         exits: list[Order] = []
         for position in list(self._positions.values()):
+            if self.settings.real_trading_oco_enabled:
+                if position.exchange in self._oco_discovery_failed:
+                    # Fail-safe: an unknown OCO may be active; never risk a double sell.
+                    continue
+                if position.symbol in self._oco_protections:
+                    continue
             price = price_map.get(position.symbol)
             if price is None:
                 continue
@@ -726,6 +1220,14 @@ class LiveTradingService:
         interval = self.settings.real_trading_guard_interval_seconds
         while True:
             try:
+                if (
+                    self._positions
+                    and self.settings.real_trading_enabled
+                    and self.settings.real_trading_oco_enabled
+                    and self._oco_discovery_failed
+                ):
+                    await self.discover_oco_protections()
+
                 if self._positions and self.settings.real_trading_enabled:
                     now = time.monotonic()
                     if (
