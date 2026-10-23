@@ -334,4 +334,4 @@ ai-trading-assistant/
 
 *Fin del resumen de traspaso. Al iniciar el nuevo chat, comparte este archivo o pide continuar a partir de la sección 8.*
 
-*Última actualización: Fase 8.2 con OCO nativo de Binance spot validado en testnet (descubrimiento tras reinicio, cierre manual y ejecución TP con journal), además del endurecimiento real (rehidratación y reconciliación, idempotencia, guardián local y alertas Telegram/webhook/email). 152 tests unitarios + 11 de integración, 75.55% cobertura, Ruff/MyPy/CI en verde. Pendiente: configurar un canal de alertas y decidir el inicio de la Fase 9.*
+*Última actualización: Fase 8.2 con OCO nativo de Binance spot validado en testnet (descubrimiento tras reinicio, cierre manual y ejecución TP con journal), además del endurecimiento real (rehidratación y reconciliación, idempotencia, guardián local y alertas Telegram/webhook/email). 152 tests unitarios + 11 de integración, 75.55% cobertura, Ruff/MyPy/CI en verde. Alertas Telegram configuradas y validadas con `POST /api/v1/alerts/test` (delivered=true). Pendiente: decidir el inicio de la Fase 9.*

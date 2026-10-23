@@ -397,4 +397,4 @@ ai-trading-assistant/
 
 ---
 
-*Estado: Fases 0–6, 8, 8.1 y 8.2 completadas y validadas en testnet; Fase 7 parcial (sin tests de frontend); alertas pendientes de configurar un canal; Fase 9 pendiente — 2026-10-23*
+*Estado: Fases 0–6, 8, 8.1 y 8.2 completadas y validadas en testnet; Fase 7 parcial (sin tests de frontend); alertas Telegram configuradas y probadas; Fase 9 pendiente — 2026-10-23*
