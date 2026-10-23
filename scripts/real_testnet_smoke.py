@@ -148,8 +148,8 @@ def main() -> int:
             "/api/v1/trading/real/orders",
             json={
                 "symbol": symbol,
-                "side": "BUY",
-                "order_type": "MARKET",
+                "side": "buy",
+                "order_type": "market",
                 "quantity": args.quantity,
                 "price": reference,
                 "stop_loss": stop_loss,

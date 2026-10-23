@@ -79,7 +79,13 @@ class LiveExchangeAdapter:
             "secret": self.api_secret,
             "enableRateLimit": True,
             "timeout": self.timeout_ms,
-            "options": {"defaultType": self.market_type},
+            "options": {
+                "defaultType": self.market_type,
+                # Binance rejects signed requests when the local clock drifts
+                # ahead of the server. Let CCXT compute and apply the offset.
+                "adjustForTimeDifference": True,
+                "recvWindow": 10_000,
+            },
         }
         if self.passphrase:
             config["password"] = self.passphrase
@@ -408,11 +414,10 @@ class LiveExchangeAdapter:
             raise ExchangeError("Native OCO protection is only implemented for Binance spot.")
         self._require_credentials()
         client = self._require_client()
-        raw_symbol = await self._raw_symbol(client, symbol)
+        # Binance's GET /api/v3/orderList accepts orderListId or
+        # origClientOrderId, but not symbol. Sending symbol causes -1104.
         try:
-            response = await client.private_get_orderlist(
-                {"symbol": raw_symbol, "orderListId": order_list_id}
-            )
+            response = await client.private_get_orderlist({"orderListId": order_list_id})
         except ccxt.NetworkError as exc:
             raise ExchangeError(f"Network error while fetching OCO: {exc}") from exc
         except Exception as exc:

@@ -544,7 +544,7 @@ async def test_live_adapter_oco_cancel_fetch_and_open_lists() -> None:
     normalized = await adapter.normalize_symbol("BTCUSDT")
 
     assert client.oco_cancel_params == {"symbol": "BTCUSDT", "orderListId": 123}
-    assert client.oco_fetch_params == {"symbol": "BTCUSDT", "orderListId": 123}
+    assert client.oco_fetch_params == {"orderListId": 123}
     assert lists == client.open_oco_response
     assert by_symbol == client.open_oco_response
     assert client.open_oco_params == {"symbol": "BTCUSDT"}
