@@ -235,6 +235,7 @@ class FakeCcxtClient:
             "fee": {"cost": "1.5", "currency": "USDT"},
         }
         self.create_kwargs: dict[str, Any] = {}
+        self.load_markets_calls = 0
         self.markets: dict[str, Any] = {"BTC/USDT": {"id": "BTCUSDT", "symbol": "BTC/USDT"}}
         self.markets_by_id: dict[str, Any] = {"BTCUSDT": [{"id": "BTCUSDT", "symbol": "BTC/USDT"}]}
         self.oco_create_params: dict[str, Any] = {}
@@ -278,6 +279,9 @@ class FakeCcxtClient:
         return self.markets[symbol]
 
     async def load_markets(self) -> dict[str, Any]:
+        self.load_markets_calls += 1
+        if not self.markets:
+            self.markets = {"BTC/USDT": {"id": "BTCUSDT", "symbol": "BTC/USDT"}}
         return self.markets
 
     async def private_post_order_oco(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -549,3 +553,14 @@ async def test_live_adapter_oco_cancel_fetch_and_open_lists() -> None:
     assert by_symbol == client.open_oco_response
     assert client.open_oco_params == {"symbol": "BTCUSDT"}
     assert normalized == "BTC/USDT"
+
+
+async def test_live_adapter_oco_discovery_loads_markets_first() -> None:
+    adapter = make_adapter()
+    client = adapter._client
+    assert isinstance(client, FakeCcxtClient)
+    client.markets = {}
+
+    await adapter.fetch_open_oco_lists()
+
+    assert client.load_markets_calls == 1

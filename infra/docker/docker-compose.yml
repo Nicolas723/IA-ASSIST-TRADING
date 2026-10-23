@@ -32,6 +32,7 @@ x-backend-base: &backend-base
     - ../../backend/src:/app/src:ro          # Hot-reload source
     - ../../backend/.env:/app/.env:ro
     - ../../backend/tests:/app/tests:ro
+    - ../../backend/vault:/app/vault          # Persist encrypted credentials
   environment:
     - PYTHONPATH=/app
     - PYTHONDONTWRITEBYTECODE=1
@@ -119,6 +120,7 @@ services:
       - APP_DEBUG=true
       - LOG_FORMAT=console
       - METRICS_ENABLED=true
+      - VAULT_STORAGE_PATH=/app/vault/.vault_store.json
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s

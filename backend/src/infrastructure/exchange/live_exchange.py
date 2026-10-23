@@ -137,6 +137,7 @@ class LiveExchangeAdapter:
         """Query live balances (only assets with a non-dust amount)."""
         self._require_credentials()
         client = self._require_client()
+        await self._ensure_markets(client)
         try:
             raw = await client.fetch_balance()
             balances: dict[str, float] = {}
@@ -154,6 +155,7 @@ class LiveExchangeAdapter:
         """Return the free (available) balance for a single asset."""
         self._require_credentials()
         client = self._require_client()
+        await self._ensure_markets(client)
         try:
             raw = await client.fetch_balance()
             return float(raw.get("free", {}).get(asset, 0.0) or 0.0)
@@ -173,6 +175,7 @@ class LiveExchangeAdapter:
         """Submit a real order and map the CCXT response to a domain Order."""
         self._require_credentials()
         client = self._require_client()
+        await self._ensure_markets(client)
 
         is_stop = order_type in (OrderType.STOP_MARKET, OrderType.STOP_LIMIT)
         ccxt_type = "limit" if order_type in (OrderType.LIMIT, OrderType.STOP_LIMIT) else "market"
@@ -416,6 +419,7 @@ class LiveExchangeAdapter:
         client = self._require_client()
         # Binance's GET /api/v3/orderList accepts orderListId or
         # origClientOrderId, but not symbol. Sending symbol causes -1104.
+        await self._ensure_markets(client)
         try:
             response = await client.private_get_orderlist({"orderListId": order_list_id})
         except ccxt.NetworkError as exc:
@@ -430,6 +434,7 @@ class LiveExchangeAdapter:
             raise ExchangeError("Native OCO protection is only implemented for Binance spot.")
         self._require_credentials()
         client = self._require_client()
+        await self._ensure_markets(client)
         params: dict[str, Any] = {}
         if symbol is not None:
             params["symbol"] = await self._raw_symbol(client, symbol)

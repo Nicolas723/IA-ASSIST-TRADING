@@ -80,6 +80,8 @@ backend/.ruff_cache/
 # Encrypted credential vault (contains API keys — never commit)
 .vault_store.json
 backend/.vault_store.json
+backend/vault/*
+!backend/vault/.gitkeep
 infra/postgres_data/
 infra/redis_data/
 infra/prometheus_data/
