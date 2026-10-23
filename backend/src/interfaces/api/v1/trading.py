@@ -7,7 +7,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from src.application.services.journal import record_execution
+from src.application.services.journal import (
+    persist_live_positions_to_database,
+    record_execution,
+)
 from src.application.services.live_trading_service import LiveTradingService, LiveTradingStatus
 from src.application.services.market_data_service import MarketDataService
 from src.application.services.trading_service import TradingService
@@ -282,7 +285,15 @@ async def reconcile_real_positions(
     service: LiveTradingService = Depends(get_live_trading_service),
 ) -> dict[str, object]:
     """Drop or resize local positions that no longer match the exchange balance."""
+    before = {
+        position.id: position.quantity for position in service.get_positions(ExecutionMode.REAL)
+    }
     removed = await service.reconcile_positions()
+    after = {
+        position.id: position.quantity for position in service.get_positions(ExecutionMode.REAL)
+    }
+    if removed or before != after:
+        await persist_live_positions_to_database(service)
     return {
         "removed": removed,
         "open_positions": len(service.get_positions(ExecutionMode.REAL)),

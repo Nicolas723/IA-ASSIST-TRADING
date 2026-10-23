@@ -98,6 +98,30 @@ async def persist_order_to_database(
         return False
 
 
+async def persist_live_positions_to_database(live_service: LiveTradingService) -> bool:
+    """Persist reconciled real positions and an equity snapshot.
+
+    Called after the guard removes or resizes a position because the exchange
+    balance changed, so the next startup does not resurrect a stale position.
+    """
+    try:
+        from src.infrastructure.persistence.database import get_db_session
+        from src.infrastructure.persistence.repositories.trading_repository import (
+            SqlTradingRepository,
+        )
+
+        async with get_db_session() as session:
+            repo = SqlTradingRepository(session)
+            positions = live_service.get_positions(ExecutionMode.REAL)
+            await repo.sync_positions(ExecutionMode.REAL, positions)
+            portfolio = live_service.get_portfolio(ExecutionMode.REAL)
+            await repo.save_portfolio_snapshot(portfolio, portfolio.exchange)
+        return True
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("live_positions_persist_failed", error=str(exc))
+        return False
+
+
 async def persist_live_order_to_database(
     order: Order,
     live_service: LiveTradingService,

@@ -549,6 +549,23 @@ async def test_reconcile_reduces_quantity_to_exchange_balance() -> None:
     assert service.get_positions()[0].quantity == Decimal("0.05")
 
 
+async def test_reconcile_persists_changes_through_callback() -> None:
+    service, adapter = make_service()
+    await service.place_order(buy_request(), current_market_price=50_000, confirm=True)
+    adapter.balances = {"USDT": 10_000.0}
+    calls: list[bool] = []
+
+    async def on_reconcile() -> None:
+        calls.append(True)
+
+    service._on_reconcile = on_reconcile  # type: ignore[method-assign]
+
+    removed = await service.reconcile_positions()
+
+    assert removed == ["BTC/USDT"]
+    assert calls == [True]
+
+
 async def test_reconcile_is_skipped_when_real_trading_disabled() -> None:
     service, _ = make_service(settings=Settings(_env_file=None))
     service.restore(positions=[make_position()], orders=[], trades=[])

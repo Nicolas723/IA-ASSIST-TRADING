@@ -268,7 +268,7 @@ ai-trading-assistant/
 
 ## 🧪 8. Calidad y CI
 
-- **Tests**: **128 unitarios + 11 de integración** pasando; cobertura **73.99%** (gate `--cov-fail-under=70`).
+- **Tests**: **129 unitarios + 11 de integración** pasando; cobertura **73.79%** (gate `--cov-fail-under=70`).
   - El job de CI ya **no filtra con `-m unit`**: antes descartaba 41 tests (corrían 14 de 66) y medía 57.8% de cobertura.
 - **MyPy strict**: **0 errores** en 96 archivos (`explicit_package_bases = true`). Ahora es **bloqueante** en CI.
 - **Ruff**: **0 hallazgos** y **116 archivos formateados**. `ruff check src tests` y `ruff format --check src tests` son **bloqueantes** en CI (backlog de estilo agotado).
@@ -308,7 +308,7 @@ ai-trading-assistant/
 - **API**: `GET /api/v1/alerts/status`, `POST /api/v1/alerts/test`.
 - **Frontend**: panel "Trading Real y Alertas" en Configuración con entorno (testnet/mainnet), credenciales, límite, guardián, modo de protección, símbolos, estado de canales, botón de alerta de prueba y botón "Reconciliar con exchange". El botón de compra/venta usa los endpoints reales cuando el modo REAL está activo (con confirmación por orden y `client_order_id`).
 
-**Pruebas Fase 8**: `tests/unit/test_phase8_trading.py` (interlocks, ledger, cierres, SL/TP, idempotencia, rehidratación, reconciliación y alertas) y `tests/unit/test_phase8_channels.py` (Telegram/webhook/email y adaptador CCXT con cliente falso). Total: **62 tests nuevos** (128 unitarios) + **11 de integración**.
+**Pruebas Fase 8**: `tests/unit/test_phase8_trading.py` (interlocks, ledger, cierres, SL/TP, idempotencia, rehidratación, reconciliación y alertas) y `tests/unit/test_phase8_channels.py` (Telegram/webhook/email y adaptador CCXT con cliente falso). Total: **63 tests nuevos** (129 unitarios) + **11 de integración**.
 
 ### Endurecimiento operativo (2026-10-22)
 
@@ -318,11 +318,11 @@ ai-trading-assistant/
 - **Idempotencia**: `client_order_id` en `POST /real/orders`, deduplicación en memoria + journal y mapeo por exchange.
 - **Guard más robusto**: un fallo al cerrar por SL/TP ya no se traga silenciosamente; se registra y se emite alerta crítica, manteniendo la posición para reintentar.
 - **Smoke test manual**: `scripts/real_testnet_smoke.py` (dry-run por defecto; exige `--execute --yes`; bloquea mainnet sin `--allow-mainnet`).
-- **Verificación**: 128 unitarios, 11 integración, cobertura 73.99%, Ruff 0 hallazgos, MyPy 0 errores, frontend build OK.
+- **Verificación**: 129 unitarios, 11 integración, cobertura 73.79%, Ruff 0 hallazgos, MyPy 0 errores, frontend build OK.
 - **Limitación pendiente**: OCO exchange-side. Se documenta y se muestra `protection_mode=local_guard`; implementarlo requiere una integración Binance-specific con validación en testnet para no duplicar ventas.
 
 ---
 
 *Fin del resumen de traspaso. Al iniciar el nuevo chat, comparte este archivo o pide continuar a partir de la sección 8.*
 
-*Última actualización: Fase 8 endurecida (rehidratación y reconciliación real, idempotencia, guardián local y alertas Telegram/webhook/email), 128 tests unitarios + 11 de integración, 73.99% cobertura, Ruff/MyPy/CI en verde. OCO exchange-side pendiente de integración Binance-specific validada en testnet.*
+*Última actualización: Fase 8 endurecida (rehidratación y reconciliación real, idempotencia, guardián local y alertas Telegram/webhook/email), 129 tests unitarios + 11 de integración, 73.79% cobertura, Ruff/MyPy/CI en verde. OCO exchange-side pendiente de integración Binance-specific validada en testnet.*

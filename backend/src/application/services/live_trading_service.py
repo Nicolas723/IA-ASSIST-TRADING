@@ -59,6 +59,7 @@ logger = get_logger(__name__)
 
 PriceFetcher = Callable[[str], "Awaitable[float | None]"]
 ExecutionCallback = Callable[[Order], "Awaitable[None]"]
+ReconcileCallback = Callable[[], "Awaitable[None]"]
 
 
 class LiveTradingStatus(BaseModel):
@@ -110,6 +111,7 @@ class LiveTradingService:
         self._guard_task: asyncio.Task[None] | None = None
         self._price_fetcher: PriceFetcher | None = None
         self._on_execution: ExecutionCallback | None = None
+        self._on_reconcile: ReconcileCallback | None = None
 
     # ------------------------------------------------------------------
     # Configuration / readiness
@@ -592,6 +594,7 @@ class LiveTradingService:
             by_exchange.setdefault(position.exchange, []).append(position)
 
         removed: list[str] = []
+        changed = False
         for exchange_id, positions in by_exchange.items():
             if self.vault_service.vault.get_credential_summary(exchange_id.value) is None:
                 continue
@@ -616,6 +619,7 @@ class LiveTradingService:
                 if actual <= Decimal("0.00000001"):
                     self._positions.pop(position.symbol, None)
                     removed.append(position.symbol)
+                    changed = True
                     await self._alert(
                         "Posición real cerrada fuera de la plataforma",
                         f"{position.symbol} ya no tiene saldo en {exchange_id.value}; "
@@ -627,6 +631,7 @@ class LiveTradingService:
                     previous = position.quantity
                     position.quantity = actual
                     position.updated_at = datetime.now(tz=UTC)
+                    changed = True
                     await self._alert(
                         "Posición real ajustada",
                         f"{position.symbol}: cantidad local {previous} ajustada a {actual} "
@@ -634,6 +639,11 @@ class LiveTradingService:
                         AlertSeverity.WARNING,
                         {"symbol": position.symbol, "exchange": exchange_id.value},
                     )
+        if changed and self._on_reconcile is not None:
+            try:
+                await self._on_reconcile()
+            except Exception as exc:
+                logger.warning("live_reconcile_persist_failed", error=str(exc))
         return removed
 
     # ------------------------------------------------------------------
@@ -695,10 +705,12 @@ class LiveTradingService:
         self,
         price_fetcher: PriceFetcher,
         on_execution: ExecutionCallback | None = None,
+        on_reconcile: ReconcileCallback | None = None,
     ) -> None:
         """Start the background SL/TP monitor (idempotent)."""
         self._price_fetcher = price_fetcher
         self._on_execution = on_execution
+        self._on_reconcile = on_reconcile
         if self._guard_task is None or self._guard_task.done():
             self._guard_task = asyncio.create_task(self._guard_loop(), name="live-trading-guard")
 

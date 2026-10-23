@@ -162,7 +162,10 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
 
     # Real-trading protective guard: local SL/TP monitor for real positions.
     try:
-        from src.application.services.journal import persist_live_order_to_database
+        from src.application.services.journal import (
+            persist_live_order_to_database,
+            persist_live_positions_to_database,
+        )
         from src.interfaces.api.v1.deps import (
             get_live_trading_service,
             get_market_data_fetcher,
@@ -187,7 +190,10 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         async def _guard_persist(order: Order) -> None:
             await persist_live_order_to_database(order, live_trading_service)
 
-        live_trading_service.start_guard(_guard_price, _guard_persist)
+        async def _guard_reconcile() -> None:
+            await persist_live_positions_to_database(live_trading_service)
+
+        live_trading_service.start_guard(_guard_price, _guard_persist, _guard_reconcile)
         logger.info(
             "live_trading_guard_started",
             positions=len(live_trading_service.get_positions()),
