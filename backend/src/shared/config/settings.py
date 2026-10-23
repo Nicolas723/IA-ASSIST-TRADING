@@ -232,6 +232,7 @@ class Settings(BaseSettings):
     allow_mainnet_trading: bool = Field(default=False)
     enable_autonomous_real_trading: bool = Field(default=False)
     real_trading_guard_interval_seconds: int = Field(default=15, ge=5, le=300)
+    real_trading_reconcile_interval_seconds: int = Field(default=300, ge=30, le=3600)
 
     # -------------------------------------------------------------------------
     # Notifications / alerts

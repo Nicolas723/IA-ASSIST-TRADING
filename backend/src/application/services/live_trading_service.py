@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from pydantic import BaseModel
 
@@ -74,6 +76,8 @@ class LiveTradingStatus(BaseModel):
     autonomous_real_enabled: bool
     open_positions: int = 0
     guard_running: bool = False
+    protection_mode: str = "local_guard"
+    reconciliation_interval_seconds: int = 300
 
 
 class LiveTradingService:
@@ -99,6 +103,9 @@ class LiveTradingService:
         self._peak_value = Decimal("0")
         self._lock = asyncio.Lock()
         self._closing: set[UUID] = set()
+        self._order_ids: set[UUID] = set()
+        self._client_order_ids: dict[str, Order] = {}
+        self._last_reconcile = 0.0
 
         self._guard_task: asyncio.Task[None] | None = None
         self._price_fetcher: PriceFetcher | None = None
@@ -134,6 +141,8 @@ class LiveTradingService:
             autonomous_real_enabled=self.settings.enable_autonomous_real_trading,
             open_positions=len(self._positions),
             guard_running=self._guard_task is not None and not self._guard_task.done(),
+            protection_mode="local_guard",
+            reconciliation_interval_seconds=(self.settings.real_trading_reconcile_interval_seconds),
         )
 
     def _credentials(self, exchange: Exchange) -> tuple[str, str, str | None]:
@@ -184,6 +193,68 @@ class LiveTradingService:
             is_testnet=summary.is_testnet if summary else True,
         )
 
+    def restore(
+        self,
+        *,
+        positions: list[Position],
+        orders: list[Order],
+        trades: list[Trade],
+        available_balance: Decimal | None = None,
+        realized_pnl: Decimal | None = None,
+        peak_value: Decimal | None = None,
+    ) -> None:
+        """Replace the in-memory ledger with the journal snapshot."""
+        self._positions = {
+            position.symbol: position
+            for position in positions
+            if position.mode == ExecutionMode.REAL
+        }
+        self._orders = [order for order in orders if order.mode == ExecutionMode.REAL]
+        self._trades = [trade for trade in trades if trade.mode == ExecutionMode.REAL]
+        self._order_ids = {order.id for order in self._orders}
+        self._client_order_ids = {}
+        for order in self._orders:
+            if order.client_order_id:
+                self._client_order_ids[order.client_order_id] = order
+        if available_balance is not None:
+            self._usdt_balance = available_balance
+        if realized_pnl is not None:
+            self._realized_pnl = realized_pnl
+        if peak_value is not None:
+            self._peak_value = peak_value
+        self._last_reconcile = 0.0
+
+    async def notify_restored_positions(self) -> None:
+        """Warn when restored real positions cannot be protected automatically."""
+        if not self._positions:
+            return
+        if not self.settings.real_trading_enabled:
+            await self._alert(
+                "Posiciones reales sin protección",
+                f"Se restauraron {len(self._positions)} posiciones reales, pero "
+                "ENABLE_REAL_TRADING/EXECUTION_MODE no están activos. El guardián no "
+                "puede cerrarlas hasta habilitar el trading real.",
+                AlertSeverity.CRITICAL,
+                {"positions": len(self._positions)},
+            )
+            return
+
+        missing = sorted(
+            {
+                position.exchange.value
+                for position in self._positions.values()
+                if self.vault_service.vault.get_credential_summary(position.exchange.value) is None
+            }
+        )
+        if missing:
+            await self._alert(
+                "Posiciones reales sin credenciales",
+                "Se restauraron posiciones reales, pero faltan credenciales en el vault "
+                f"para: {', '.join(missing)}. El guardián no puede cerrarlas.",
+                AlertSeverity.CRITICAL,
+                {"exchanges": missing, "positions": len(self._positions)},
+            )
+
     # ------------------------------------------------------------------
     # Account
     # ------------------------------------------------------------------
@@ -214,11 +285,29 @@ class LiveTradingService:
         exchange_id = self._exchange(exchange)
         symbol = req.symbol.replace("-", "/").replace("_", "/").upper()
         notional = Decimal(str(current_market_price)) * Decimal(str(req.quantity))
+        client_order_id = req.client_order_id or f"ata-{uuid4().hex[:24]}"
+        if len(client_order_id) > 36:
+            raise ValidationError("client_order_id must be at most 36 characters.")
 
         self._assert_can_trade(exchange_id, confirm)
+
+        # Idempotent retry: the same client order id never reaches the exchange twice.
+        if req.client_order_id:
+            existing = self._client_order_ids.get(req.client_order_id)
+            if existing is not None:
+                logger.info(
+                    "live_order_idempotent_hit",
+                    client_order_id=req.client_order_id,
+                    order_id=str(existing.id),
+                )
+                return existing
+
         self._assert_order_allowed(symbol, notional)
 
         async with self._lock:
+            existing = self._client_order_ids.get(client_order_id)
+            if existing is not None:
+                return existing
             adapter = self._adapter(exchange_id)
             try:
                 balances = await adapter.fetch_balances()
@@ -250,6 +339,7 @@ class LiveTradingService:
                     order_type=req.order_type,
                     quantity=req.quantity,
                     price=req.price if req.order_type != OrderType.MARKET else None,
+                    client_order_id=client_order_id,
                 )
             finally:
                 await adapter.close()
@@ -259,6 +349,7 @@ class LiveTradingService:
                 "stop_loss": Decimal(str(req.stop_loss)) if req.stop_loss else None,
                 "take_profit": Decimal(str(req.take_profit)) if req.take_profit else None,
                 "strategy_id": req.strategy_id,
+                "client_order_id": order.client_order_id or client_order_id,
                 "notes": req.notes or order.notes,
             }
         )
@@ -372,7 +463,12 @@ class LiveTradingService:
     # ------------------------------------------------------------------
 
     def _record(self, order: Order) -> None:
+        if order.id in self._order_ids:
+            return
+        self._order_ids.add(order.id)
         self._orders.append(order)
+        if order.client_order_id:
+            self._client_order_ids[order.client_order_id] = order
         if order.status != OrderStatus.FILLED:
             return
 
@@ -480,6 +576,66 @@ class LiveTradingService:
             peak_value=self._peak_value,
         )
 
+    async def reconcile_positions(self) -> list[str]:
+        """
+        Best-effort reconciliation of tracked positions with exchange balances.
+
+        Spot positions are removed when the base asset is gone (closed manually
+        or by an exchange-side order) and reduced when the balance is lower than
+        the tracked quantity. Network/vault errors are logged and never raise.
+        """
+        if not self._positions or not self.settings.real_trading_enabled:
+            return []
+
+        by_exchange: dict[Exchange, list[Position]] = {}
+        for position in self._positions.values():
+            by_exchange.setdefault(position.exchange, []).append(position)
+
+        removed: list[str] = []
+        for exchange_id, positions in by_exchange.items():
+            if self.vault_service.vault.get_credential_summary(exchange_id.value) is None:
+                continue
+            adapter: LiveExchangeAdapter | None = None
+            try:
+                adapter = self._adapter(exchange_id)
+                balances = await adapter.fetch_balances()
+            except Exception as exc:
+                logger.warning(
+                    "live_position_reconcile_failed",
+                    exchange=exchange_id.value,
+                    error=str(exc),
+                )
+                continue
+            finally:
+                if adapter is not None:
+                    await adapter.close()
+
+            for position in positions:
+                base = position.symbol.split("/")[0]
+                actual = Decimal(str(balances.get(base, 0.0)))
+                if actual <= Decimal("0.00000001"):
+                    self._positions.pop(position.symbol, None)
+                    removed.append(position.symbol)
+                    await self._alert(
+                        "Posición real cerrada fuera de la plataforma",
+                        f"{position.symbol} ya no tiene saldo en {exchange_id.value}; "
+                        "se eliminó del ledger local. Revisa el historial del exchange.",
+                        AlertSeverity.WARNING,
+                        {"symbol": position.symbol, "exchange": exchange_id.value},
+                    )
+                elif actual < position.quantity:
+                    previous = position.quantity
+                    position.quantity = actual
+                    position.updated_at = datetime.now(tz=UTC)
+                    await self._alert(
+                        "Posición real ajustada",
+                        f"{position.symbol}: cantidad local {previous} ajustada a {actual} "
+                        f"según el saldo de {exchange_id.value}.",
+                        AlertSeverity.WARNING,
+                        {"symbol": position.symbol, "exchange": exchange_id.value},
+                    )
+        return removed
+
     # ------------------------------------------------------------------
     # Protective exits (local SL/TP monitor)
     # ------------------------------------------------------------------
@@ -500,12 +656,28 @@ class LiveTradingService:
             if triggered_reason is None:
                 continue
 
-            order = await self.close_position(
-                position_id=position.id,
-                current_market_price=price,
-                confirm=True,
-                exchange=position.exchange,
-            )
+            try:
+                order = await self.close_position(
+                    position_id=position.id,
+                    current_market_price=price,
+                    confirm=True,
+                    exchange=position.exchange,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "live_protective_exit_failed",
+                    symbol=position.symbol,
+                    reason=triggered_reason,
+                    error=str(exc),
+                )
+                await self._alert(
+                    "Fallo al ejecutar protección real",
+                    f"{triggered_reason} de {position.symbol} @ ${price:,.2f}: "
+                    f"no se pudo cerrar la posición ({exc}).",
+                    AlertSeverity.CRITICAL,
+                    {"symbol": position.symbol, "reason": triggered_reason},
+                )
+                continue
             if order is not None:
                 exits.append(order)
                 await self._alert(
@@ -542,7 +714,20 @@ class LiveTradingService:
         interval = self.settings.real_trading_guard_interval_seconds
         while True:
             try:
-                if self._positions and self._price_fetcher is not None:
+                if self._positions and self.settings.real_trading_enabled:
+                    now = time.monotonic()
+                    if (
+                        now - self._last_reconcile
+                        >= self.settings.real_trading_reconcile_interval_seconds
+                    ):
+                        self._last_reconcile = now
+                        await self.reconcile_positions()
+
+                if (
+                    self._positions
+                    and self.settings.real_trading_enabled
+                    and self._price_fetcher is not None
+                ):
                     symbols = list(self._positions)
                     prices: dict[str, float] = {}
                     for symbol in symbols:

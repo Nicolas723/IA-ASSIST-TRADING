@@ -59,6 +59,7 @@ class RealOrderBody(BaseModel):
     take_profit: float | None = None
     exchange: Exchange = Exchange.BINANCE
     confirm: bool = False
+    client_order_id: str | None = Field(default=None, max_length=36)
     notes: str = ""
 
 
@@ -274,6 +275,24 @@ async def list_real_positions(
 
 
 @router.post(
+    "/real/reconcile",
+    summary="Reconcile tracked real positions with exchange balances",
+)
+async def reconcile_real_positions(
+    service: LiveTradingService = Depends(get_live_trading_service),
+) -> dict[str, object]:
+    """Drop or resize local positions that no longer match the exchange balance."""
+    removed = await service.reconcile_positions()
+    return {
+        "removed": removed,
+        "open_positions": len(service.get_positions(ExecutionMode.REAL)),
+        "reconciliation_interval_seconds": (
+            service.settings.real_trading_reconcile_interval_seconds
+        ),
+    }
+
+
+@router.post(
     "/real/orders",
     response_model=Order,
     summary="Place a guarded real order (requires confirm=true)",
@@ -301,6 +320,7 @@ async def place_real_order(
         price=current_price,
         stop_loss=body.stop_loss,
         take_profit=body.take_profit,
+        client_order_id=body.client_order_id,
         notes=body.notes,
     )
 

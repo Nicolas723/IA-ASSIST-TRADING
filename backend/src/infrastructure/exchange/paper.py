@@ -37,6 +37,7 @@ class PlaceOrderRequest(BaseModel):
     stop_loss: float | None = None
     take_profit: float | None = None
     strategy_id: UUID | None = None
+    client_order_id: str | None = None
     notes: str = ""
 
 

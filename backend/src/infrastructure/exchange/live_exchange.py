@@ -11,11 +11,12 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import uuid4
 
 import ccxt.async_support as ccxt
 
+from src.domain.market.entities import Exchange
 from src.domain.trading.entities import (
     ExecutionMode,
     Order,
@@ -25,9 +26,6 @@ from src.domain.trading.entities import (
 )
 from src.shared.exceptions.domain import ExchangeError, SecurityError
 from src.shared.logging.setup import get_logger
-
-if TYPE_CHECKING:
-    from src.domain.market.entities import Exchange
 
 logger = get_logger(__name__)
 
@@ -187,7 +185,12 @@ class LiveExchangeAdapter:
             except Exception:
                 params["stopPrice"] = float(stop_price)
         if client_order_id:
-            params["clientOrderId"] = client_order_id
+            if self._exchange_id == Exchange.BINANCE:
+                params["newClientOrderId"] = client_order_id
+            elif self._exchange_id == Exchange.BYBIT:
+                params["orderLinkId"] = client_order_id
+            else:
+                params["clientOrderId"] = client_order_id
 
         limit_price: float | None = None
         if ccxt_type == "limit":
@@ -257,10 +260,13 @@ class LiveExchangeAdapter:
             commission_asset=str(fee.get("currency") or "USDT"),
             stop_loss=None,
             take_profit=None,
-            client_order_id=str(exchange_order_id) if exchange_order_id else client_order_id,
+            client_order_id=client_order_id,
             submitted_at=now,
             filled_at=now if status == OrderStatus.FILLED else None,
-            notes=f"Live {self._exchange_id.value} order ID: {exchange_order_id}",
+            notes=(
+                f"Live {self._exchange_id.value} order ID: {exchange_order_id}"
+                + (f" | client_order_id={client_order_id}" if client_order_id else "")
+            ),
         )
 
     async def close(self) -> None:

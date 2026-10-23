@@ -44,7 +44,7 @@
 | Comité IA | Multi-agente + LLM opcional | Técnico, Price Action, Risk Manager, Coordinador (determinista; LLM opcional) | ✅ |
 | Auditoría | `DecisionLog` total | `decision_logs` (payload JSON + columnas indexables) leído por `/api/v1/audit` | ✅ |
 | Dashboard | Centro de control | React por pestañas (Asistente, Mercado, Cartera, Comité, Config) | ✅ |
-| Trading real (Fase 8) | Binance/Bybit real + alertas | **Implementado**: ejecución real/testnet vía CCXT con interlocks, guardián SL/TP local, alertas Telegram/webhook/email y panel UI | ✅ Completada |
+| Trading real (Fase 8) | Binance/Bybit real + alertas | **Implementado**: ejecución real/testnet vía CCXT con interlocks, guardián SL/TP local, rehidratación/reconciliación del ledger real, idempotencia, alertas Telegram/webhook/email y panel UI | ✅ Completada |
 | MLOps / aprendizaje (Fase 9) | Métricas + feedback continuo | Observabilidad básica; sin bucle de aprendizaje | ⏳ Pendiente |
 | Infra prod | `docker-compose.prod.yml`, nginx/SSL | Solo `infra/docker/docker-compose.yml` (dev) | ⏳ Pendiente |
 
@@ -391,8 +391,9 @@ ai-trading-assistant/
 | ✅ Fase 6 | Sistema multiagente IA (comité + coordinador determinista) | **Completada** |
 | 🟡 Fase 7 | Dashboard web: pestañas operativas; faltan tests de frontend | **Parcial** |
 | ✅ Fase 8 | Trading real + alertas | **Completada** |
+| ✅ Fase 8.1 | Endurecimiento real: rehidratación, reconciliación, idempotencia y smoke test | **Completada** |
 | ⏳ Fase 9 | MLOps + aprendizaje continuo | **Pendiente** |
 
 ---
 
-*Estado: Fases 0–6 y 8 completadas, Fase 7 parcial (sin tests de frontend), Fase 9 pendiente — 2026-10-22*
+*Estado: Fases 0–6, 8 y 8.1 completadas; Fase 7 parcial (sin tests de frontend); Fase 9 pendiente — 2026-10-22*

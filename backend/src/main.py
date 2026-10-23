@@ -170,6 +170,16 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
 
         live_trading_service = get_live_trading_service()
 
+        # Restore the durable real-trading ledger before the guard starts.
+        try:
+            from src.application.services.hydration import hydrate_live_from_database
+
+            live_report = await hydrate_live_from_database(live_trading_service)
+            logger.info("live_trading_rehydrated", **live_report.model_dump())
+            await live_trading_service.notify_restored_positions()
+        except Exception as e:
+            logger.warning("live_trading_rehydration_failed", error=str(e))
+
         async def _guard_price(symbol: str) -> float | None:
             fetcher = get_market_data_fetcher()
             return float(await fetcher.fetch_last_price(symbol))

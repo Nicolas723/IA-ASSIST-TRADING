@@ -272,6 +272,17 @@ def make_adapter(api_key: str = "key", api_secret: str = "secret") -> LiveExchan
     return adapter
 
 
+def make_bybit_adapter() -> LiveExchangeAdapter:
+    adapter = LiveExchangeAdapter(
+        exchange=Exchange.BYBIT,
+        api_key="key",
+        api_secret="secret",
+        is_testnet=False,
+    )
+    adapter._client = FakeCcxtClient()
+    return adapter
+
+
 async def test_live_adapter_ping() -> None:
     adapter = make_adapter()
     result = await adapter.ping()
@@ -318,11 +329,28 @@ async def test_live_adapter_market_order_mapping() -> None:
     assert order.filled_quantity == Decimal("0.1")
     assert order.average_fill_price == Decimal("50000")
     assert order.commission == Decimal("1.5")
-    assert order.client_order_id == "exchange-order-1"
+    assert order.client_order_id == "client-1"
     client = adapter._client
     assert isinstance(client, FakeCcxtClient)
     assert client.create_kwargs["amount"] == 0.10
-    assert client.create_kwargs["params"]["clientOrderId"] == "client-1"
+    assert client.create_kwargs["params"]["newClientOrderId"] == "client-1"
+
+
+async def test_live_adapter_uses_bybit_order_link_id() -> None:
+    adapter = make_bybit_adapter()
+
+    order = await adapter.place_order(
+        "BTC/USDT",
+        OrderSide.BUY,
+        OrderType.MARKET,
+        0.1,
+        client_order_id="client-bybit",
+    )
+
+    assert order.client_order_id == "client-bybit"
+    client = adapter._client
+    assert isinstance(client, FakeCcxtClient)
+    assert client.create_kwargs["params"]["orderLinkId"] == "client-bybit"
 
 
 async def test_live_adapter_limit_order_mapping() -> None:

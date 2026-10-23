@@ -100,6 +100,18 @@ async def test_api_real_trading_status(async_client: AsyncClient):
     assert "execution_mode" in data
     assert "allowed_symbols" in data
     assert "max_notional" in data
+    assert data["protection_mode"] == "local_guard"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_api_real_reconcile(async_client: AsyncClient):
+    response = await async_client.post("/api/v1/trading/real/reconcile")
+    assert response.status_code == 200
+    data = response.json()
+    assert "removed" in data
+    assert "open_positions" in data
+    assert "reconciliation_interval_seconds" in data
 
 
 @pytest.mark.integration

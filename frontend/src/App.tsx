@@ -95,6 +95,8 @@ interface RealTradingStatusData {
   autonomous_real_enabled: boolean;
   open_positions: number;
   guard_running: boolean;
+  protection_mode?: string;
+  reconciliation_interval_seconds?: number;
 }
 
 interface AlertChannelStatusData {
@@ -217,6 +219,7 @@ export default function App() {
   const [realTradingStatus, setRealTradingStatus] = useState<RealTradingStatusData | null>(null);
   const [alertStatus, setAlertStatus] = useState<AlertStatusData | null>(null);
   const [isTestingAlert, setIsTestingAlert] = useState<boolean>(false);
+  const [isReconcilingReal, setIsReconcilingReal] = useState<boolean>(false);
 
   // Refrescos periódicos
   const refreshPortfolio = () => {
@@ -291,6 +294,27 @@ export default function App() {
       })
       .catch((err) => toast.error(`Error al enviar alerta: ${err.message}`))
       .finally(() => setIsTestingAlert(false));
+  };
+
+  const handleReconcileReal = () => {
+    setIsReconcilingReal(true);
+    fetch('/api/v1/trading/real/reconcile', { method: 'POST' })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        return data;
+      })
+      .then((data) => {
+        refreshRealTrading();
+        const removed = Array.isArray(data.removed) ? data.removed : [];
+        if (removed.length > 0) {
+          toast.success(`Reconciliado. Posiciones cerradas fuera: ${removed.join(', ')}`);
+        } else {
+          toast.success('Posiciones reales sincronizadas con el exchange.');
+        }
+      })
+      .catch((err) => toast.error(`Error al reconciliar: ${err.message}`))
+      .finally(() => setIsReconcilingReal(false));
   };
 
   // Carga inicial
@@ -558,6 +582,7 @@ export default function App() {
         ? {
             exchange: realTradingStatus?.exchange ?? 'binance',
             confirm: true,
+            client_order_id: `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
             stop_loss: side === 'BUY' ? Number((currentP * 0.98).toFixed(2)) : undefined,
             take_profit: side === 'BUY' ? Number((currentP * 1.04).toFixed(2)) : undefined,
           }
@@ -1717,7 +1742,17 @@ export default function App() {
                   Símbolos permitidos: <strong style={{ color: '#e2e8f0' }}>{realTradingStatus.allowed_symbols.join(', ') || 'sin restricción'}</strong>
                   {' · '}Confirmación manual: <strong style={{ color: '#e2e8f0' }}>{realTradingStatus.require_manual_confirmation ? 'Sí' : 'No'}</strong>
                   {' · '}Bot autónomo real: <strong style={{ color: realTradingStatus.autonomous_real_enabled ? '#f59e0b' : '#94a3b8' }}>{realTradingStatus.autonomous_real_enabled ? 'HABILITADO' : 'deshabilitado'}</strong>
+                  {' · '}Protección: <strong style={{ color: '#f59e0b' }}>{realTradingStatus.protection_mode === 'local_guard' || !realTradingStatus.protection_mode ? 'Guardián local' : realTradingStatus.protection_mode}</strong>
                 </div>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  style={{ marginTop: '10px', fontSize: '12px', padding: '6px 12px' }}
+                  onClick={handleReconcileReal}
+                  disabled={isReconcilingReal}
+                >
+                  {isReconcilingReal ? 'Reconciliando...' : 'Reconciliar con exchange'}
+                </button>
                 {realTradingStatus.enabled && !realTradingStatus.testnet && (
                   <div style={{ marginTop: '12px', padding: '10px 14px', borderRadius: '8px', background: 'rgba(239, 68, 68, 0.12)', border: '1px solid rgba(239, 68, 68, 0.35)', color: '#fca5a5', fontSize: '12px', fontWeight: 700 }}>
                     ⚠️ MAINNET activo: las órdenes confirmadas usarán dinero real.

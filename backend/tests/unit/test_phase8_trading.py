@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from src.application.services.alert_service import AlertService
+from src.application.services.hydration import hydrate_live_trading_service
 from src.application.services.live_trading_service import LiveTradingService
 from src.domain.market.entities import Exchange
 from src.domain.notifications.entities import Alert, AlertSeverity
@@ -20,6 +21,10 @@ from src.domain.trading.entities import (
     OrderSide,
     OrderStatus,
     OrderType,
+    Portfolio,
+    Position,
+    PositionSide,
+    Trade,
 )
 from src.infrastructure.exchange.paper import PlaceOrderRequest
 from src.shared.config.settings import Settings
@@ -78,6 +83,8 @@ class FakeAdapter:
         self.free_balance = 0.5
         self.balances = {"USDT": 10_000.0, "BTC": 1.0}
         self.last_place_kwargs: dict[str, Any] = {}
+        self.place_calls = 0
+        self.fail_on_sell = False
 
     async def fetch_balances(self) -> dict[str, float]:
         return self.balances
@@ -87,7 +94,10 @@ class FakeAdapter:
 
     async def place_order(self, **kwargs: Any) -> Order:
         self.last_place_kwargs = kwargs
+        self.place_calls += 1
         side = kwargs["side"]
+        if self.fail_on_sell and side == OrderSide.SELL:
+            raise RuntimeError("sell failed")
         quantity = Decimal(str(kwargs["quantity"]))
         price = Decimal("50_000") if side == OrderSide.BUY else Decimal("51_000")
         return Order(
@@ -101,6 +111,7 @@ class FakeAdapter:
             filled_quantity=quantity,
             average_fill_price=price,
             commission=Decimal("1"),
+            client_order_id=kwargs.get("client_order_id"),
             submitted_at=datetime.now(tz=UTC),
             filled_at=datetime.now(tz=UTC),
         )
@@ -147,6 +158,7 @@ def buy_request(
     quantity: float = 0.1,
     stop_loss: float | None = 49_000,
     take_profit: float | None = 55_000,
+    client_order_id: str | None = None,
 ) -> PlaceOrderRequest:
     return PlaceOrderRequest(
         symbol=symbol,
@@ -155,7 +167,64 @@ def buy_request(
         quantity=quantity,
         stop_loss=stop_loss,
         take_profit=take_profit,
+        client_order_id=client_order_id,
     )
+
+
+def make_position(quantity: Decimal = Decimal("0.1")) -> Position:
+    return Position(
+        symbol="BTC/USDT",
+        exchange=Exchange.BINANCE,
+        mode=ExecutionMode.REAL,
+        side=PositionSide.LONG,
+        entry_price=Decimal("50000"),
+        quantity=quantity,
+        current_price=Decimal("50000"),
+        stop_loss=Decimal("49000"),
+        take_profit=Decimal("55000"),
+    )
+
+
+class FakeRepo:
+    """Duck-typed journal used to exercise live hydration."""
+
+    def __init__(
+        self,
+        positions: list[Position],
+        orders: list[Order],
+        trades: list[Trade],
+        snapshot: Portfolio | None = None,
+    ) -> None:
+        self.positions = positions
+        self.orders = orders
+        self.trades = trades
+        self.snapshot = snapshot
+
+    async def list_positions(
+        self, mode: ExecutionMode | None = None, _symbol: str | None = None
+    ) -> list[Position]:
+        return [p for p in self.positions if mode is None or p.mode == mode]
+
+    async def list_orders(
+        self,
+        mode: ExecutionMode | None = None,
+        _symbol: str | None = None,
+        limit: int = 100,
+    ) -> list[Order]:
+        return [o for o in self.orders if mode is None or o.mode == mode][:limit]
+
+    async def list_trades(
+        self,
+        mode: ExecutionMode | None = None,
+        _symbol: str | None = None,
+        limit: int = 100,
+    ) -> list[Trade]:
+        return [t for t in self.trades if mode is None or t.mode == mode][:limit]
+
+    async def latest_portfolio_snapshot(
+        self, mode: ExecutionMode, _exchange: Exchange
+    ) -> Portfolio | None:
+        return self.snapshot
 
 
 def test_status_reports_defaults_without_credentials() -> None:
@@ -349,6 +418,168 @@ async def test_guard_starts_and_stops() -> None:
 
     await service.stop_guard()
     assert service.status().guard_running is False
+
+
+# ---------------------------------------------------------------------------
+# Hardening: idempotency, hydration and reconciliation
+# ---------------------------------------------------------------------------
+
+
+async def test_place_order_is_idempotent_with_client_order_id() -> None:
+    service, adapter = make_service()
+
+    first = await service.place_order(
+        buy_request(client_order_id="client-1"),
+        current_market_price=50_000,
+        confirm=True,
+    )
+    second = await service.place_order(
+        buy_request(client_order_id="client-1"),
+        current_market_price=50_000,
+        confirm=True,
+    )
+
+    assert second.id == first.id
+    assert adapter.place_calls == 1
+    assert len(service.get_positions()) == 1
+    assert len(service.get_orders()) == 1
+
+
+async def test_place_order_rejects_overlong_client_order_id() -> None:
+    service, _ = make_service()
+
+    with pytest.raises(ValidationError, match="36 characters"):
+        await service.place_order(
+            buy_request(client_order_id="x" * 37),
+            current_market_price=50_000,
+            confirm=True,
+        )
+
+
+async def test_restore_rebuilds_ledger_and_idempotency() -> None:
+    service, _ = make_service()
+    original = await service.place_order(
+        buy_request(client_order_id="restored-1"),
+        current_market_price=50_000,
+        confirm=True,
+    )
+
+    restored, adapter = make_service()
+    restored.restore(
+        positions=service.get_positions(),
+        orders=service.get_orders(),
+        trades=service.get_trades(),
+        available_balance=Decimal("9000"),
+        realized_pnl=Decimal("12"),
+        peak_value=Decimal("11000"),
+    )
+
+    assert len(restored.get_positions()) == 1
+    assert len(restored.get_orders()) == 1
+    assert len(restored.get_trades()) == 1
+    assert restored.get_portfolio().available_balance == Decimal("9000")
+    assert restored.get_portfolio().total_realized_pnl == Decimal("12")
+
+    again = await restored.place_order(
+        buy_request(client_order_id="restored-1"),
+        current_market_price=50_000,
+        confirm=True,
+    )
+    assert again.id == original.id
+    assert adapter.place_calls == 0
+
+
+async def test_hydrate_live_service_restores_journal_and_snapshot() -> None:
+    source, _ = make_service()
+    order = await source.place_order(
+        buy_request(client_order_id="hydrated-1"),
+        current_market_price=50_000,
+        confirm=True,
+    )
+    snapshot = Portfolio(
+        mode=ExecutionMode.REAL,
+        exchange=Exchange.BINANCE,
+        total_balance=Decimal("10500"),
+        available_balance=Decimal("9000"),
+        locked_balance=Decimal("0"),
+        total_realized_pnl=Decimal("25"),
+        peak_value=Decimal("11000"),
+    )
+    repo = FakeRepo(
+        positions=source.get_positions(),
+        orders=source.get_orders(),
+        trades=source.get_trades(),
+        snapshot=snapshot,
+    )
+
+    target, _ = make_service()
+    report = await hydrate_live_trading_service(target, repo)  # type: ignore[arg-type]
+
+    assert report.positions_restored == 1
+    assert report.orders_restored == 1
+    assert report.trades_restored == 1
+    assert report.balance_restored is True
+    assert report.exchanges == ["binance"]
+    assert target.get_positions()[0].id == source.get_positions()[0].id
+    assert target.get_orders()[0].id == order.id
+    assert target.get_portfolio().available_balance == Decimal("9000")
+
+
+async def test_reconcile_removes_position_closed_on_exchange() -> None:
+    alerts = FakeAlert()
+    service, adapter = make_service(alerts=alerts)
+    await service.place_order(buy_request(), current_market_price=50_000, confirm=True)
+    adapter.balances = {"USDT": 10_000.0}
+
+    removed = await service.reconcile_positions()
+
+    assert removed == ["BTC/USDT"]
+    assert service.get_positions() == []
+    assert any("cerrada fuera" in call[0] for call in alerts.calls)
+
+
+async def test_reconcile_reduces_quantity_to_exchange_balance() -> None:
+    service, adapter = make_service()
+    await service.place_order(buy_request(), current_market_price=50_000, confirm=True)
+    adapter.balances = {"USDT": 10_000.0, "BTC": 0.05}
+
+    removed = await service.reconcile_positions()
+
+    assert removed == []
+    assert service.get_positions()[0].quantity == Decimal("0.05")
+
+
+async def test_reconcile_is_skipped_when_real_trading_disabled() -> None:
+    service, _ = make_service(settings=Settings(_env_file=None))
+    service.restore(positions=[make_position()], orders=[], trades=[])
+
+    assert await service.reconcile_positions() == []
+    assert len(service.get_positions()) == 1
+
+
+async def test_notify_restored_positions_warns_when_disabled() -> None:
+    alerts = FakeAlert()
+    service, _ = make_service(settings=Settings(_env_file=None), alerts=alerts)
+    service.restore(positions=[make_position()], orders=[], trades=[])
+
+    await service.notify_restored_positions()
+
+    assert any(
+        call[2] == AlertSeverity.CRITICAL and "sin protección" in call[0] for call in alerts.calls
+    )
+
+
+async def test_protective_exit_failure_alerts_and_keeps_position() -> None:
+    alerts = FakeAlert()
+    service, adapter = make_service(alerts=alerts)
+    await service.place_order(buy_request(), current_market_price=50_000, confirm=True)
+    adapter.fail_on_sell = True
+
+    exits = await service.check_protective_exits({"BTC/USDT": 48_000})
+
+    assert exits == []
+    assert len(service.get_positions()) == 1
+    assert any("Fallo al ejecutar protección" in call[0] for call in alerts.calls)
 
 
 # ---------------------------------------------------------------------------
