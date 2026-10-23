@@ -426,7 +426,44 @@ class LiveExchangeAdapter:
             raise ExchangeError(f"Network error while fetching OCO: {exc}") from exc
         except Exception as exc:
             raise ExchangeError(f"Failed to fetch OCO: {exc}") from exc
-        return dict(response)
+
+        data = dict(response)
+        status = str(data.get("listOrderStatus") or data.get("listStatusType") or "").upper()
+        legs = data.get("orders") or []
+        if status == "EXECUTING" or not isinstance(legs, list):
+            return data
+
+        # Binance's orderList endpoint only returns symbol/orderId/clientOrderId
+        # for each leg. Fetch the leg details before declaring a terminal OCO
+        # unfilled, otherwise a filled stop-loss can be missed and the local
+        # guard may sell the same position again.
+        raw_symbol = await self._raw_symbol(client, symbol)
+        enriched: list[Any] = []
+        for leg in legs:
+            if not isinstance(leg, dict):
+                enriched.append(leg)
+                continue
+            if leg.get("executedQty") is not None or leg.get("executedQuantity") is not None:
+                enriched.append(leg)
+                continue
+            order_id = leg.get("orderId")
+            if order_id is None:
+                raise ExchangeError(
+                    "OCO leg is missing orderId; cannot verify whether it executed."
+                )
+            try:
+                detail = await client.private_get_order(
+                    {"symbol": raw_symbol, "orderId": order_id}
+                )
+            except ccxt.NetworkError as exc:
+                raise ExchangeError(f"Network error while fetching OCO leg: {exc}") from exc
+            except Exception as exc:
+                raise ExchangeError(f"Failed to fetch OCO leg: {exc}") from exc
+            if not isinstance(detail, dict):
+                raise ExchangeError("Unexpected OCO leg response from exchange.")
+            enriched.append({**leg, **detail})
+        data["orders"] = enriched
+        return data
 
     async def fetch_open_oco_lists(self, symbol: str | None = None) -> list[dict[str, Any]]:
         """List open Binance OCO order lists (all symbols when symbol is None)."""

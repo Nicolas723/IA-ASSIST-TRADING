@@ -241,6 +241,9 @@ class FakeCcxtClient:
         self.oco_create_params: dict[str, Any] = {}
         self.oco_cancel_params: dict[str, Any] = {}
         self.oco_fetch_params: dict[str, Any] = {}
+        self.oco_leg_params: list[dict[str, Any]] = []
+        self.oco_leg_details: dict[int, dict[str, Any]] = {}
+        self.oco_leg_error: Exception | None = None
         self.open_oco_params: dict[str, Any] = {}
         self.oco_create_response: dict[str, Any] = {
             "orderListId": 123,
@@ -295,6 +298,22 @@ class FakeCcxtClient:
     async def private_get_orderlist(self, params: dict[str, Any]) -> dict[str, Any]:
         self.oco_fetch_params = params
         return self.oco_status_response
+
+    async def private_get_order(self, params: dict[str, Any]) -> dict[str, Any]:
+        self.oco_leg_params.append(params)
+        if self.oco_leg_error is not None:
+            raise self.oco_leg_error
+        order_id = int(params["orderId"])
+        return self.oco_leg_details.get(
+            order_id,
+            {
+                "orderId": order_id,
+                "status": "CANCELED",
+                "type": "LIMIT_MAKER",
+                "executedQty": "0",
+                "cummulativeQuoteQty": "0",
+            },
+        )
 
     async def private_get_openorderlist(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         self.open_oco_params = params
@@ -553,6 +572,65 @@ async def test_live_adapter_oco_cancel_fetch_and_open_lists() -> None:
     assert by_symbol == client.open_oco_response
     assert client.open_oco_params == {"symbol": "BTCUSDT"}
     assert normalized == "BTC/USDT"
+
+
+async def test_live_adapter_enriches_terminal_oco_legs() -> None:
+    adapter = make_adapter()
+    client = adapter._client
+    assert isinstance(client, FakeCcxtClient)
+    client.oco_status_response = {
+        "orderListId": 123,
+        "listOrderStatus": "ALL_DONE",
+        "orders": [
+            {"symbol": "BTCUSDT", "orderId": 11, "clientOrderId": "stop-leg"},
+            {"symbol": "BTCUSDT", "orderId": 12, "clientOrderId": "tp-leg"},
+        ],
+    }
+    client.oco_leg_details = {
+        11: {
+            "orderId": 11,
+            "status": "FILLED",
+            "type": "STOP_LOSS_LIMIT",
+            "executedQty": "0.1",
+            "cummulativeQuoteQty": "4900",
+            "price": "48000",
+            "stopPrice": "49000",
+        },
+        12: {
+            "orderId": 12,
+            "status": "EXPIRED",
+            "type": "LIMIT_MAKER",
+            "executedQty": "0",
+            "cummulativeQuoteQty": "0",
+            "price": "55000",
+            "stopPrice": "0",
+        },
+    }
+
+    data = await adapter.fetch_oco("BTC/USDT", 123)
+
+    assert data["orders"][0]["status"] == "FILLED"
+    assert data["orders"][0]["executedQty"] == "0.1"
+    assert data["orders"][1]["status"] == "EXPIRED"
+    assert client.oco_leg_params == [
+        {"symbol": "BTCUSDT", "orderId": 11},
+        {"symbol": "BTCUSDT", "orderId": 12},
+    ]
+
+
+async def test_live_adapter_terminal_oco_leg_error_is_not_treated_as_empty() -> None:
+    adapter = make_adapter()
+    client = adapter._client
+    assert isinstance(client, FakeCcxtClient)
+    client.oco_status_response = {
+        "orderListId": 123,
+        "listOrderStatus": "ALL_DONE",
+        "orders": [{"symbol": "BTCUSDT", "orderId": 11, "clientOrderId": "stop-leg"}],
+    }
+    client.oco_leg_error = RuntimeError("leg unavailable")
+
+    with pytest.raises(ExchangeError, match="Failed to fetch OCO leg"):
+        await adapter.fetch_oco("BTC/USDT", 123)
 
 
 async def test_live_adapter_oco_discovery_loads_markets_first() -> None:

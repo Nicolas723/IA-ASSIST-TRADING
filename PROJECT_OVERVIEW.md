@@ -296,6 +296,7 @@ ai-trading-assistant/
   - **OCO nativo de Binance spot (Fase 8.2, opt-in)**: si `REAL_TRADING_OCO_ENABLED=true` y una orden BUY se llena con SL/TP, se coloca una OCO exchange-side (`POST /api/v3/order/oco`) con TP limit y SL stop-limit. La OCO protege aunque el backend esté apagado. Por defecto está apagada. Solo Binance spot; Bybit sigue usando el guardián local.
   - **Guardián local**: en el lifespan (`live-trading-guard`) consulta el precio y cierra con orden de mercado cuando se cruza el SL/TP. Es el fallback cuando la OCO no está disponible o falla su creación. El estado expone `protection_mode=exchange_oco|oco_with_local_fallback|oco_discovery_failed|local_guard`, `oco_enabled`, `oco_protected_positions` y `oco_discovery_failed_exchanges`.
   - **Ciclo de vida OCO**: se cancela antes de cualquier venta o cierre manual (incluido `POST /real/orders` con side SELL); si no se puede confirmar la cancelación, la venta se aborta para evitar una doble venta. Al añadir a una posición existente se cancela la OCO anterior y se recrea por la cantidad total. La reconciliación importa las salidas ejecutadas por la OCO al ledger/journal.
+  - **Detección de ejecución**: `GET /api/v3/orderList` de Binance devuelve solo los `orderId` de las piernas, no su estado ni cantidad ejecutada. El adaptador consulta cada pierna (`GET /api/v3/order`) antes de declarar una OCO terminal sin fill. Si no puede verificar las piernas, falla de forma segura y mantiene la protección/guardián bloqueado para ese símbolo, evitando una doble venta.
   - **Reinicio**: al arrancar se descubren las OCO abiertas y se reasocian a las posiciones restauradas. Si el descubrimiento falla, el guardián local no opera ese exchange y las ventas/cierres se bloquean hasta confirmar que no hay una OCO activa (fail-safe).
   - **Stop-limit**: el SL de la OCO usa `REAL_TRADING_OCO_STOP_LIMIT_BUFFER_PCT=0.1` por defecto para dar margen al stop-limit. En huecos fuertes puede no llenarse; en ese caso la posición sigue bajo el guardián local y las alertas.
 - **API**: `GET /api/v1/trading/real/status`, `GET /api/v1/trading/real/account`, `GET /api/v1/trading/real/positions`, `POST /api/v1/trading/real/orders`, `POST /api/v1/trading/real/positions/close`, `POST /api/v1/trading/real/reconcile`.
@@ -315,7 +316,7 @@ ai-trading-assistant/
 - **API**: `GET /api/v1/alerts/status`, `POST /api/v1/alerts/test`.
 - **Frontend**: panel "Trading Real y Alertas" en Configuración con entorno (testnet/mainnet), credenciales, límite, guardián, modo de protección, contador de OCO activas, símbolos, estado de canales, botón de alerta de prueba y botón "Reconciliar con exchange". El botón de compra/venta usa los endpoints reales cuando el modo REAL está activo (con confirmación por orden y `client_order_id`).
 
-**Pruebas Fase 8**: `tests/unit/test_phase8_trading.py` (interlocks, ledger, cierres, SL/TP local y OCO, idempotencia, rehidratación, reconciliación, descubrimiento de OCO y alertas) y `tests/unit/test_phase8_channels.py` (Telegram/webhook/email y adaptador CCXT con cliente falso, incluido el mapeo OCO). Total: **149 unitarios** + **11 de integración**, cobertura **73.84%**.
+**Pruebas Fase 8**: `tests/unit/test_phase8_trading.py` (interlocks, ledger, cierres, SL/TP local y OCO, idempotencia, rehidratación, reconciliación, descubrimiento de OCO y alertas) y `tests/unit/test_phase8_channels.py` (Telegram/webhook/email y adaptador CCXT con cliente falso, incluido el mapeo OCO y el enriquecimiento de piernas terminales). Total: **152 unitarios** + **11 de integración**, cobertura **75.55%**.
 
 ### Endurecimiento operativo (2026-10-22)
 
@@ -325,11 +326,12 @@ ai-trading-assistant/
 - **Idempotencia**: `client_order_id` en `POST /real/orders`, deduplicación en memoria + journal y mapeo por exchange.
 - **Guard más robusto**: un fallo al cerrar por SL/TP ya no se traga silenciosamente; se registra y se emite alerta crítica, manteniendo la posición para reintentar.
 - **Smoke test manual**: `scripts/real_testnet_smoke.py` (dry-run por defecto; exige `--execute --yes`; bloquea mainnet sin `--allow-mainnet`). Con `REAL_TRADING_OCO_ENABLED=true` también reporta el estado de la OCO y advierte si no se adjuntó a la posición. Ejemplo: `backend\.venv\Scripts\python.exe scripts\real_testnet_smoke.py --execute --yes --quantity 0.0001`.
-- **Verificación**: 149 unitarios, 11 integración, cobertura 73.84%, Ruff 0 hallazgos, MyPy 0 errores, frontend build OK.
-- **OCO exchange-side implementada (Fase 8.2)**: Binance spot, flag `REAL_TRADING_OCO_ENABLED=false` por defecto, cancelación segura antes de cierres, reconciliación de ejecuciones y descubrimiento al reiniciar. Pendiente la validación con credenciales reales de testnet; para probarla, activar el flag y ejecutar el smoke test con SL/TP.
+- **Verificación**: 163 tests (152 unitarios + 11 integración), cobertura 75.55%, Ruff 0 hallazgos, MyPy 0 errores, frontend build OK.
+- **OCO exchange-side implementada y validada (Fase 8.2)**: Binance spot, flag `REAL_TRADING_OCO_ENABLED=false` por defecto, cancelación segura antes de cierres, reconciliación de ejecuciones y descubrimiento al reiniciar.
+- **Validación testnet (2026-10-23)**: OCO creada y redescubierta tras reiniciar; cierre manual cancela la OCO; pierna TP ejecutada y registrada en el journal como orden `limit` con nota `Binance OCO ... executed (LIMIT_MAKER)`, sin venta adicional del guardián local. La prueba también reveló y corrigió que Binance no incluye el estado de las piernas en `orderList`; ahora se consultan una a una antes de concluir que no hubo fill.
 
 ---
 
 *Fin del resumen de traspaso. Al iniciar el nuevo chat, comparte este archivo o pide continuar a partir de la sección 8.*
 
-*Última actualización: Fase 8.2 con OCO nativo de Binance spot (opt-in), además del endurecimiento real (rehidratación y reconciliación, idempotencia, guardián local y alertas Telegram/webhook/email). 149 tests unitarios + 11 de integración, 73.84% cobertura, Ruff/MyPy/CI en verde. Pendiente validación de la OCO con credenciales reales de testnet.*
+*Última actualización: Fase 8.2 con OCO nativo de Binance spot validado en testnet (descubrimiento tras reinicio, cierre manual y ejecución TP con journal), además del endurecimiento real (rehidratación y reconciliación, idempotencia, guardián local y alertas Telegram/webhook/email). 152 tests unitarios + 11 de integración, 75.55% cobertura, Ruff/MyPy/CI en verde. Pendiente: configurar un canal de alertas y decidir el inicio de la Fase 9.*

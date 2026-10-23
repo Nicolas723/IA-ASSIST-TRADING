@@ -100,8 +100,11 @@ async def test_api_real_trading_status(async_client: AsyncClient):
     assert "execution_mode" in data
     assert "allowed_symbols" in data
     assert "max_notional" in data
-    assert data["protection_mode"] == "local_guard"
-    assert data["oco_enabled"] is False
+    assert isinstance(data["oco_enabled"], bool)
+    # The protection mode follows the local OCO flag. Integration tests must
+    # not assume a specific .env value because testnet OCO is opt-in.
+    expected_mode = "oco_with_local_fallback" if data["oco_enabled"] else "local_guard"
+    assert data["protection_mode"] == expected_mode
     assert data["oco_protected_positions"] == 0
     assert data["oco_discovery_failed_exchanges"] == []
 

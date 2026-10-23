@@ -392,9 +392,9 @@ ai-trading-assistant/
 | 🟡 Fase 7 | Dashboard web: pestañas operativas; faltan tests de frontend | **Parcial** |
 | ✅ Fase 8 | Trading real + alertas | **Completada** |
 | ✅ Fase 8.1 | Endurecimiento real: rehidratación, reconciliación, idempotencia y smoke test | **Completada** |
-| ✅ Fase 8.2 | OCO nativo de Binance spot: flag opt-in, cancelación segura, reconciliación y descubrimiento al reiniciar | **Completada** (validación testnet pendiente) |
+| ✅ Fase 8.2 | OCO nativo de Binance spot: flag opt-in, cancelación segura, reconciliación, descubrimiento al reiniciar y detección de piernas ejecutadas | **Completada y validada en testnet** |
 | ⏳ Fase 9 | MLOps + aprendizaje continuo | **Pendiente** |
 
 ---
 
-*Estado: Fases 0–6, 8, 8.1 y 8.2 completadas; Fase 7 parcial (sin tests de frontend); Fase 9 pendiente — 2026-10-22*
+*Estado: Fases 0–6, 8, 8.1 y 8.2 completadas y validadas en testnet; Fase 7 parcial (sin tests de frontend); alertas pendientes de configurar un canal; Fase 9 pendiente — 2026-10-23*
