@@ -162,6 +162,154 @@ class LiveExchangeAdapter:
         except Exception as exc:
             raise ExchangeError(f"Failed to fetch {asset} balance: {exc}") from exc
 
+    async def fetch_order(
+        self,
+        symbol: str,
+        *,
+        client_order_id: str | None = None,
+        order_id: str | None = None,
+    ) -> Order | None:
+        """Fetch a single order by exchange id or client id.
+
+        Returns ``None`` when the exchange reports the order as unknown, which
+        lets reconciliation distinguish "not found" from a network failure.
+        """
+        self._require_credentials()
+        client = self._require_client()
+        await self._ensure_markets(client)
+
+        params: dict[str, Any] = {}
+        if client_order_id:
+            if self._exchange_id == Exchange.BINANCE:
+                params["origClientOrderId"] = client_order_id
+            elif self._exchange_id == Exchange.BYBIT:
+                params["orderLinkId"] = client_order_id
+            else:
+                params["clientOrderId"] = client_order_id
+
+        try:
+            response = await client.fetch_order(order_id, symbol, params)
+        except ccxt.OrderNotFound:
+            return None
+        except Exception as exc:
+            logger.warning(
+                "live_fetch_order_failed",
+                exchange=self.exchange_id.value,
+                symbol=symbol,
+                error=str(exc),
+            )
+            raise ExchangeError(f"Failed to fetch live order: {exc}") from exc
+
+        status = _STATUS_MAP.get(str(response.get("status") or "").lower(), OrderStatus.OPEN)
+        filled_raw = response.get("filled")
+        filled = Decimal(str(filled_raw)) if filled_raw is not None else Decimal("0")
+        requested_raw = response.get("amount")
+        requested = Decimal(str(requested_raw)) if requested_raw is not None else filled
+        if status == OrderStatus.FILLED and filled == 0 and requested > 0:
+            filled = requested
+        if status == OrderStatus.OPEN and 0 < filled < requested:
+            status = OrderStatus.PARTIALLY_FILLED
+
+        average_raw = response.get("average") or response.get("price")
+        average = Decimal(str(average_raw)) if average_raw and filled > 0 else None
+        fee = response.get("fee") or {}
+        side_raw = str(response.get("side") or "buy").lower()
+        type_raw = str(response.get("type") or "market").lower()
+
+        return Order(
+            id=uuid4(),
+            symbol=symbol,
+            exchange=self._exchange_id,
+            mode=ExecutionMode.REAL,
+            side=OrderSide.SELL if side_raw == "sell" else OrderSide.BUY,
+            order_type=OrderType.LIMIT if "limit" in type_raw else OrderType.MARKET,
+            quantity=requested or filled,
+            status=status,
+            filled_quantity=filled,
+            average_fill_price=average,
+            commission=Decimal(str(fee.get("cost") or 0)),
+            commission_asset=str(fee.get("currency") or "USDT"),
+            client_order_id=client_order_id,
+            notes=f"Reconciled live {self._exchange_id.value} order ID: {response.get('id')}",
+        )
+
+    async def fetch_open_orders(self, symbol: str | None = None) -> list[Order]:
+        """List exchange-side open orders, including ones this process never journaled.
+
+        Only the caller can decide whether an order belongs to this system; the
+        adapter reports every open order for the symbol and preserves the client
+        order id so attribution is explicit rather than guessed.
+        """
+        self._require_credentials()
+        client = self._require_client()
+        await self._ensure_markets(client)
+        try:
+            responses = await client.fetch_open_orders(symbol)
+        except Exception as exc:
+            logger.warning(
+                "live_fetch_open_orders_failed",
+                exchange=self.exchange_id.value,
+                symbol=symbol,
+                error=str(exc),
+            )
+            raise ExchangeError(f"Failed to list live open orders: {exc}") from exc
+        orders: list[Order] = []
+        for response in responses or []:
+            mapped = self._order_from_response(response)
+            if mapped is not None:
+                orders.append(mapped)
+        return orders
+
+    def _order_from_response(self, response: dict[str, Any]) -> Order | None:
+        """Map a CCXT order payload to the domain model without inventing fields."""
+        symbol = response.get("symbol")
+        if not symbol:
+            return None
+        info = response.get("info") or {}
+        client_order_id = (
+            response.get("clientOrderId")
+            or info.get("clientOrderId")
+            or info.get("origClientOrderId")
+            or info.get("orderLinkId")
+        )
+        status = _STATUS_MAP.get(str(response.get("status") or "").lower(), OrderStatus.OPEN)
+        filled_raw = response.get("filled")
+        filled = Decimal(str(filled_raw)) if filled_raw is not None else Decimal("0")
+        requested_raw = response.get("amount")
+        requested = Decimal(str(requested_raw)) if requested_raw is not None else filled
+        if status == OrderStatus.OPEN and 0 < filled < requested:
+            status = OrderStatus.PARTIALLY_FILLED
+        average_raw = response.get("average") or response.get("price")
+        average = Decimal(str(average_raw)) if average_raw and filled > 0 else None
+        limit_raw = response.get("price")
+        stop_raw = response.get("stopPrice") or info.get("stopPrice")
+        fee = response.get("fee") or {}
+        side_raw = str(response.get("side") or "buy").lower()
+        type_raw = str(response.get("type") or "market").lower()
+        order_type = OrderType.LIMIT if "limit" in type_raw else OrderType.MARKET
+        if stop_raw and "limit" in type_raw:
+            order_type = OrderType.STOP_LIMIT
+        elif stop_raw:
+            order_type = OrderType.STOP_MARKET
+        return Order(
+            id=uuid4(),
+            symbol=str(symbol),
+            exchange=self._exchange_id,
+            mode=ExecutionMode.REAL,
+            side=OrderSide.SELL if side_raw == "sell" else OrderSide.BUY,
+            order_type=order_type,
+            quantity=requested or filled,
+            limit_price=Decimal(str(limit_raw)) if limit_raw else None,
+            stop_price=Decimal(str(stop_raw)) if stop_raw else None,
+            status=status,
+            filled_quantity=filled,
+            average_fill_price=average,
+            commission=Decimal(str(fee.get("cost") or 0)),
+            commission_asset=str(fee.get("currency") or "USDT"),
+            client_order_id=str(client_order_id) if client_order_id else None,
+            notes=f"Discovered live {self._exchange_id.value} order ID: {response.get('id')}",
+        )
+
     async def place_order(
         self,
         symbol: str,
@@ -452,9 +600,7 @@ class LiveExchangeAdapter:
                     "OCO leg is missing orderId; cannot verify whether it executed."
                 )
             try:
-                detail = await client.private_get_order(
-                    {"symbol": raw_symbol, "orderId": order_id}
-                )
+                detail = await client.private_get_order({"symbol": raw_symbol, "orderId": order_id})
             except ccxt.NetworkError as exc:
                 raise ExchangeError(f"Network error while fetching OCO leg: {exc}") from exc
             except Exception as exc:

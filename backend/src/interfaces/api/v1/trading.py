@@ -13,6 +13,11 @@ from src.application.services.journal import (
 )
 from src.application.services.live_trading_service import LiveTradingService, LiveTradingStatus
 from src.application.services.market_data_service import MarketDataService
+from src.application.services.runtime_config_service import (
+    RuntimeConfigService,
+    RuntimeTradingConfigResponse,
+    RuntimeTradingConfigUpdate,
+)
 from src.application.services.trading_service import TradingService
 from src.domain.market.entities import Exchange, Timeframe
 from src.domain.trading.entities import ExecutionMode, Order, OrderSide, OrderType, Position
@@ -23,6 +28,7 @@ from src.infrastructure.persistence.repositories.trading_repository import (
 from src.interfaces.api.v1.deps import (
     get_live_trading_service,
     get_market_data_service,
+    get_runtime_config_service,
     get_trading_repository,
     get_trading_service,
 )
@@ -242,6 +248,56 @@ async def get_real_trading_status(
 ) -> LiveTradingStatus:
     """Expose whether real trading is enabled and which safeguards are active."""
     return service.status()
+
+
+@router.get(
+    "/runtime-config",
+    response_model=RuntimeTradingConfigResponse,
+    summary="Get the UI-managed trading configuration",
+)
+async def get_runtime_trading_config(
+    service: RuntimeConfigService = Depends(get_runtime_config_service),
+) -> RuntimeTradingConfigResponse:
+    """Return effective execution flags, limits and environment readiness."""
+    return service.snapshot()
+
+
+@router.put(
+    "/runtime-config",
+    response_model=RuntimeTradingConfigResponse,
+    summary="Update trading mode, environment and safety limits from the app",
+)
+async def update_runtime_trading_config(
+    body: RuntimeTradingConfigUpdate,
+    service: RuntimeConfigService = Depends(get_runtime_config_service),
+    live_service: LiveTradingService = Depends(get_live_trading_service),
+) -> RuntimeTradingConfigResponse:
+    """
+    Persist and apply runtime trading changes.
+
+    Paper/real and testnet/mainnet are independent switches. MAINNET still
+    requires ``allow_mainnet_trading`` and ``confirm=true``. Changing the
+    environment is blocked while real positions are open to avoid mixing
+    balances from two different venues.
+    """
+    current = service.current()
+    if (
+        body.trading_environment is not None
+        and body.trading_environment != current.trading_environment
+        and live_service.get_positions(ExecutionMode.REAL)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Cierra o reconcilia las posiciones reales antes de cambiar entre "
+                "testnet y mainnet."
+            ),
+        )
+    try:
+        service.update(body)
+    except Exception as exc:
+        raise HTTPException(status_code=_real_error_status(exc), detail=str(exc)) from exc
+    return service.snapshot()
 
 
 @router.get(

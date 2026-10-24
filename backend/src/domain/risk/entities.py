@@ -37,6 +37,9 @@ class RiskProfile(BaseModel):
     max_position_size_pct: float = Field(
         default=20.0, description="Max capital allocation per single asset (%)"
     )
+    max_portfolio_exposure_pct: float = Field(
+        default=100.0, description="Max gross portfolio exposure including the proposed order (%)"
+    )
     max_open_positions: int = Field(default=5, description="Max concurrent open positions")
     enforce_stop_loss: bool = Field(
         default=True, description="Require valid stop-loss on every order"
@@ -56,6 +59,8 @@ class OrderRiskCheckRequest(BaseModel):
     take_profit: float | None = None
     account_balance: float = 10000.0
     current_open_positions_count: int = 0
+    current_total_exposure_usd: float = 0.0
+    current_symbol_exposure_usd: float = 0.0
     current_daily_loss_pct: float = 0.0
     current_drawdown_pct: float = 0.0
 
@@ -104,6 +109,9 @@ class RiskStatusSummary(BaseModel):
     max_drawdown_pct: float
     open_positions_count: int
     max_open_positions: int
+    current_equity_usd: float = 0.0
+    gross_exposure_usd: float = 0.0
+    max_portfolio_exposure_pct: float = 100.0
     real_trading_enabled: bool
     kill_switch_active: bool
     profile: RiskProfile

@@ -103,14 +103,32 @@ class DrawdownGuard:
 
         # 6. Position Size and Risk Allocation Validation
         order_notional = req.price * req.quantity
-        max_notional_allowed = req.account_balance * (self.profile.max_position_size_pct / 100.0)
+        max_asset_notional = req.account_balance * (self.profile.max_position_size_pct / 100.0)
+        asset_capacity = max(0.0, max_asset_notional - req.current_symbol_exposure_usd)
+        portfolio_capacity = max(
+            0.0,
+            req.account_balance * (self.profile.max_portfolio_exposure_pct / 100.0)
+            - req.current_total_exposure_usd,
+        )
+        max_notional_allowed = (
+            min(asset_capacity, portfolio_capacity)
+            if req.side.upper() == "BUY"
+            else max_asset_notional
+        )
         max_allowed_qty = round(max_notional_allowed / req.price, 6) if req.price > 0 else 0.0
 
-        if order_notional > max_notional_allowed:
+        if req.side.upper() == "BUY" and order_notional > asset_capacity:
             violations.append(
-                f"Position size (${round(order_notional, 2)}) exceeds max allowed allocation (${round(max_notional_allowed, 2)})."
+                "Proposed order exceeds remaining per-asset allocation "
+                f"(${round(asset_capacity, 2)} remaining)."
             )
             risk_level = RiskLevel.MEDIUM
+        if req.side.upper() == "BUY" and order_notional > portfolio_capacity:
+            violations.append(
+                "Proposed order exceeds remaining portfolio exposure capacity "
+                f"(${round(portfolio_capacity, 2)} remaining)."
+            )
+            risk_level = RiskLevel.HIGH
 
         # Risk USD and Risk/Reward calculation
         calculated_risk_usd = 0.0

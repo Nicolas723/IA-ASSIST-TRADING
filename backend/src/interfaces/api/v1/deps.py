@@ -22,6 +22,7 @@ from src.application.services.market_data_service import MarketDataService
 from src.application.services.observability_service import ObservabilityService
 from src.application.services.optimization_service import OptimizationService
 from src.application.services.risk_service import RiskService
+from src.application.services.runtime_config_service import RuntimeConfigService
 from src.application.services.strategy_service import StrategyService
 from src.application.services.trading_service import TradingService
 from src.application.services.vault_service import VaultService
@@ -33,12 +34,19 @@ from src.domain.indicators.builtin import (
     MACDIndicator,
     RSIIndicator,
 )
-from src.infrastructure.exchange.binance import BinanceAdapter
+from src.infrastructure.exchange.ccxt_base import CcxtBaseAdapter
+from src.infrastructure.exchange.market_data_factory import create_market_data_adapter
 from src.infrastructure.exchange.paper import PaperExchange
+from src.infrastructure.llm.factory import create_llm_gateway
+from src.infrastructure.llm.gateway import LLMGateway
 from src.infrastructure.market_data.rest_fetcher import RetryingMarketDataFetcher
 from src.infrastructure.persistence.database import get_db
 from src.infrastructure.persistence.repositories.candle_repository import TimescaleCandleRepository
 from src.infrastructure.persistence.repositories.decision_repository import SqlDecisionRepository
+from src.infrastructure.persistence.repositories.research_repository import SqlResearchRepository
+from src.infrastructure.persistence.repositories.shadow_scan_repository import (
+    SqlShadowScanRepository,
+)
 from src.infrastructure.persistence.repositories.trading_repository import SqlTradingRepository
 from src.infrastructure.security.credential_vault import CredentialVault
 from src.shared.config.settings import get_settings
@@ -48,7 +56,7 @@ if TYPE_CHECKING:
     from src.domain.trading.entities import Order
 
 # Single shared adapter instance
-_binance_adapter: BinanceAdapter | None = None
+_market_data_adapter: CcxtBaseAdapter | None = None
 _fetcher: RetryingMarketDataFetcher | None = None
 _strategy_service: StrategyService | None = None
 _risk_service: RiskService | None = None
@@ -61,14 +69,26 @@ _observability_service: ObservabilityService | None = None
 _autonomous_engine: AutonomousEngine | None = None
 _alert_service: AlertService | None = None
 _live_trading_service: LiveTradingService | None = None
+_runtime_config_service: RuntimeConfigService | None = None
+_llm_gateway: LLMGateway | None = None
+_llm_gateway_initialized = False
 
 
 def get_market_data_fetcher() -> RetryingMarketDataFetcher:
-    global _binance_adapter, _fetcher
+    global _market_data_adapter, _fetcher
     if _fetcher is None:
-        _binance_adapter = BinanceAdapter()
-        _fetcher = RetryingMarketDataFetcher(_binance_adapter)
+        _market_data_adapter = create_market_data_adapter(get_settings().market_data_exchange)
+        _fetcher = RetryingMarketDataFetcher(_market_data_adapter)
     return _fetcher
+
+
+def get_llm_gateway() -> LLMGateway | None:
+    """Share one provider gateway across all committee specialists."""
+    global _llm_gateway, _llm_gateway_initialized
+    if not _llm_gateway_initialized:
+        _llm_gateway = create_llm_gateway()
+        _llm_gateway_initialized = True
+    return _llm_gateway
 
 
 def get_market_data_service(
@@ -148,21 +168,39 @@ def get_decision_repository(
     return SqlDecisionRepository(session)
 
 
+def get_shadow_scan_repository(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> SqlShadowScanRepository:
+    """Repository for read-only market scan history."""
+    return SqlShadowScanRepository(session)
+
+
+def get_research_repository(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> SqlResearchRepository:
+    """Durable, versioned research memory bound to the request session."""
+    return SqlResearchRepository(session)
+
+
 def get_agent_service(
     market_service: Annotated[MarketDataService, Depends(get_market_data_service)],
     decision_repository: Annotated[SqlDecisionRepository, Depends(get_decision_repository)],
+    research_repository: Annotated[SqlResearchRepository, Depends(get_research_repository)],
+    llm_gateway: Annotated[LLMGateway | None, Depends(get_llm_gateway)],
 ) -> AgentService:
     global _agent_service
     if _agent_service is None:
-        coordinator = AgentCoordinator()
+        coordinator = AgentCoordinator(llm_gateway=llm_gateway)
         _agent_service = AgentService(
             coordinator=coordinator,
             market_service=market_service,
             decision_repository=decision_repository,
+            research_repository=research_repository,
         )
     else:
         _agent_service.market_service = market_service
         _agent_service.decision_repository = decision_repository
+        _agent_service.research_repository = research_repository
     return _agent_service
 
 
@@ -181,7 +219,19 @@ def get_vault_service() -> VaultService:
     global _vault_service
     if _vault_service is None:
         _vault_service = VaultService(vault=CredentialVault())
+        _vault_service.set_active_environment(get_settings().trading_environment.value)
     return _vault_service
+
+
+def get_runtime_config_service() -> RuntimeConfigService:
+    """Singleton for UI-managed trading overrides."""
+    global _runtime_config_service
+    if _runtime_config_service is None:
+        _runtime_config_service = RuntimeConfigService(
+            settings=get_settings(),
+            vault_service=get_vault_service(),
+        )
+    return _runtime_config_service
 
 
 def get_observability_service() -> ObservabilityService:

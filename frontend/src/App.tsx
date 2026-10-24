@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import './App.css';
 import toast, { Toaster } from 'react-hot-toast';
 import { MarketChart } from './components/MarketChart';
@@ -10,40 +10,157 @@ const safeNum = (v: unknown, fallback = 0): number =>
 const safeFix = (v: unknown, dec = 2): string => safeNum(v).toFixed(dec);
 const safeLoc = (v: unknown, opts?: Intl.NumberFormatOptions): string =>
   safeNum(v).toLocaleString('es-ES', opts);
+const safeUsd = (v: unknown): string => {
+  if (typeof v !== 'number' || isNaN(v)) return 'n/d';
+  return `$${v < 0.01 ? v.toFixed(6) : v.toFixed(4)}`;
+};
+const safeMetric = (v: unknown, dec = 2): string => (v == null ? 'n/d' : safeFix(v, dec));
 
 export interface RiskStatusSummary {
   circuit_breaker_state: string;
-  portfolio_daily_pnl_pct: number;
-  portfolio_drawdown_pct: number;
+  daily_loss_pct: number;
+  max_daily_loss_pct: number;
+  current_drawdown_pct: number;
+  max_drawdown_pct: number;
   open_positions_count: number;
-  max_allowed_positions: number;
-  can_open_new_position: boolean;
-  reject_reasons: string[];
+  max_open_positions: number;
+  current_equity_usd: number;
+  gross_exposure_usd: number;
+  max_portfolio_exposure_pct: number;
+  kill_switch_active: boolean;
+  reject_reasons?: string[];
 }
 
-interface PositionData {
-  id: string;
+interface ShadowCandidateData {
   symbol: string;
-  side: string;
-  quantity: number;
-  entry_price: number;
-  current_price: number;
-  unrealized_pnl: number;
-  unrealized_pnl_pct: number;
-  stop_loss?: number;
-  take_profit?: number;
-  opened_at: string;
+  status: string;
+  rank?: number | null;
+  last_price?: number | null;
+  lookback_return_pct?: number | null;
+  quoted_spread_pct?: number | null;
+  observed_movement_less_spread_pct?: number | null;
+  spread_status?: string;
+  error?: string | null;
 }
 
-interface PortfolioData {
-  cash: number;
-  total_balance: number;
-  available_balance: number;
-  margin_used: number;
-  total_unrealized_pnl: number;
-  total_realized_pnl: number;
-  position_count: number;
-  positions: PositionData[];
+interface ShadowScanData {
+  scan_id: string;
+  timeframe: string;
+  scanned_at: string;
+  candidates: ShadowCandidateData[];
+  execution_enabled: boolean;
+}
+
+interface OpportunityCandidateData {
+  symbol: string;
+  rank?: number | null;
+  cost_adjusted_movement_pct?: number | null;
+  eligible: boolean;
+  abstain_reasons: string[];
+}
+
+interface OpportunityAssessmentData {
+  decision: string;
+  selected_symbol?: string | null;
+  selection_reason: string;
+  execution_enabled: boolean;
+  policy: Record<string, number>;
+  evidence: {
+    matured_evaluations?: number;
+    mean_top_minus_alternatives_net_pct?: number | null;
+    net_evidence_positive?: boolean;
+    interpretation?: string;
+  };
+  candidates: OpportunityCandidateData[];
+}
+
+interface ResearchNoteData {
+  id: string;
+  kind: string;
+  title: string;
+  statement: string;
+  validation_status: string;
+  symbols: string[];
+  timeframe?: string | null;
+  created_at: string;
+}
+
+interface ResearchContextData {
+  symbol?: string | null;
+  timeframe?: string | null;
+  notes: ResearchNoteData[];
+  usage_policy: string;
+  disclaimer: string;
+}
+
+interface LLMUsageBucket {
+  requests: number;
+  failures: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  avg_tokens_per_request: number | null;
+  avg_latency_ms: number | null;
+  estimated_cost_usd: number | null;
+  models: string[];
+}
+
+interface LLMStatusData {  mode: string;
+  primary_provider?: string | null;
+  configured_providers: string[];
+  fallback_providers?: string[];
+  usage?: {
+    requests: number;
+    tokens_used: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    avg_tokens_per_request: number | null;
+    daily_token_budget: number;
+    tokens_remaining: number | null;
+    budget_exhausted: boolean;
+    fallbacks: number;
+    estimated_cost_usd: number | null;
+    pricing: {
+      input_usd_per_million_tokens: number;
+      output_usd_per_million_tokens: number;
+      configured: boolean;
+    };
+    by_agent: Record<string, LLMUsageBucket>;
+    by_provider: Record<string, LLMUsageBucket>;
+    cost_estimate_note: string;
+    date_utc: string;
+  };
+}
+
+interface DriftWindowMetrics {
+  label: string;
+  sample_size: number;
+  win_rate_pct: number | null;
+  avg_net_pnl_pct: number | null;
+  total_net_pnl: number | string;
+  profit_factor: number | null;
+}
+
+interface DriftSignalData {
+  metric: string;
+  recent: number | null;
+  baseline: number | null;
+  delta: number | null;
+  threshold: number;
+  breached: boolean;
+}
+
+interface DriftReportData {
+  generated_at: string;
+  mode: string | null;
+  symbol: string | null;
+  status: 'insufficient_data' | 'stable' | 'watch' | 'degraded';
+  reasons: string[];
+  recent: DriftWindowMetrics;
+  baseline: DriftWindowMetrics;
+  signals: DriftSignalData[];
+  enforcement: string;
+  disclaimer: string;
 }
 
 interface AgentVoteData {
@@ -102,6 +219,22 @@ interface RealTradingStatusData {
   oco_discovery_failed_exchanges?: string[];
 }
 
+interface RuntimeTradingConfigData {
+  execution_mode: 'paper' | 'real' | 'backtest';
+  trading_environment: 'testnet' | 'mainnet';
+  enable_real_trading: boolean;
+  allow_mainnet_trading: boolean;
+  require_manual_confirmation: boolean;
+  real_trading_max_notional: number | string;
+  real_trading_allowed_symbols: string[];
+  real_trading_oco_enabled: boolean;
+  enable_autonomous_real_trading: boolean;
+  real_trading_active: boolean;
+  mainnet_trading_active: boolean;
+  credentials: Record<string, boolean>;
+  runtime_override_active: boolean;
+}
+
 interface AlertChannelStatusData {
   name: string;
   configured: boolean;
@@ -135,6 +268,7 @@ interface AutonomousBotConfig {
   timeframe: string;
   interval_seconds: number;
   execution_mode: string;
+  confirm_real_trading: boolean;
   min_confidence_pct: number;
   risk_per_trade_pct: number;
   max_open_positions: number;
@@ -159,6 +293,66 @@ interface AutonomousBotStatus {
   logs: AutonomousLogEntry[];
 }
 
+interface AgentPerformanceData {
+  agent_type: string;
+  decisions_scored: number;
+  correct: number;
+  incorrect: number;
+  abstained: number;
+  hit_rate_pct: number;
+  avg_confidence: number;
+  avg_processing_time_ms: number;
+}
+
+interface SignalPerformanceData {
+  signal: string;
+  decisions: number;
+  resolved: number;
+  correct: number;
+  hit_rate_pct: number;
+  net_pnl: number | string;
+}
+
+interface SymbolPerformanceData {
+  symbol: string;
+  decisions: number;
+  resolved: number;
+  win_rate_pct: number;
+  net_pnl: number | string;
+}
+
+interface ConfidenceBucketData {
+  lower: number;
+  upper: number;
+  decisions: number;
+  correct: number;
+  hit_rate_pct: number;
+  minimum_sample_size: number;
+  sample_sufficient: boolean;
+}
+
+interface MlopsPerformanceData {
+  total_decisions: number;
+  executed: number;
+  resolved: number;
+  open: number;
+  unexecuted: number;
+  win_rate_pct: number;
+  net_pnl: number | string;
+  gross_pnl: number | string;
+  fees: number | string;
+  profit_factor: number | null;
+  avg_pnl: number | string;
+  avg_confidence: number;
+  by_agent: AgentPerformanceData[];
+  by_signal: SignalPerformanceData[];
+  by_symbol: SymbolPerformanceData[];
+  confidence_buckets: ConfidenceBucketData[];
+  unattributed_orders: number;
+  generated_at: string;
+  data_available: boolean;
+}
+
 const AVAILABLE_SYMBOLS = [
   { id: 'BTC/USDT', name: 'Bitcoin (BTC)', icon: '₿' },
   { id: 'ETH/USDT', name: 'Ethereum (ETH)', icon: 'Ξ' },
@@ -173,7 +367,28 @@ const TIMEFRAMES = [
   { id: '1d', label: '1 Día' },
 ];
 
-type DashboardTab = 'bot' | 'market' | 'portfolio' | 'agents' | 'settings';
+const AGENT_LABELS: Record<string, string> = {
+  technical_analyst: 'Analista Técnico',
+  price_action_analyst: 'Acción del Precio',
+  sentiment_analyst: 'Sentimiento',
+  macro_analyst: 'Macro',
+  fundamental_analyst: 'Fundamental',
+  strategy_optimizer: 'Optimizador',
+  system_supervisor: 'Supervisor',
+  performance_coach: 'Coach de Rendimiento',
+};
+
+const SIGNAL_LABELS: Record<string, string> = {
+  strong_buy: 'Compra fuerte',
+  buy: 'Compra',
+  neutral: 'Neutral',
+  sell: 'Venta',
+  strong_sell: 'Venta fuerte',
+  hold: 'Mantener',
+  no_signal: 'Sin señal',
+};
+
+type DashboardTab = 'bot' | 'agents' | 'mlops' | 'settings';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<DashboardTab>('bot');
@@ -184,21 +399,18 @@ export default function App() {
   const [selectedTimeframe, setSelectedTimeframe] = useState<string>('1h');
   const [candles, setCandles] = useState<CandleItem[]>([]);
   const [isLoadingCandles, setIsLoadingCandles] = useState<boolean>(false);
-  const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [wsConnected, setWsConnected] = useState<boolean>(false);
   const [livePrice, setLivePrice] = useState<number | null>(null);
-  const [lastTickTime, setLastTickTime] = useState<string | null>(null);
 
   // Cartera y Operaciones
-  const [portfolio, setPortfolio] = useState<PortfolioData | null>(null);
-  const [executionMode, setExecutionMode] = useState<'PAPER' | 'REAL'>('PAPER');
-  const [orderAmountUsd, setOrderAmountUsd] = useState<number>(500);
-  const [isSubmittingOrder, setIsSubmittingOrder] = useState<boolean>(false);
 
   // Bot Autónomo
   const [autonomousStatus, setAutonomousStatus] = useState<AutonomousBotStatus | null>(null);
-  const [botInterval, setBotInterval] = useState<number>(5);
-  const [botRiskLevel, setBotRiskLevel] = useState<'conservative' | 'moderate' | 'aggressive'>('moderate');
+  const [botInterval, setBotInterval] = useState<number>(60);
+  const [botExecutionMode, setBotExecutionMode] = useState<'PAPER' | 'REAL'>('PAPER');
+  const [botMinConfidence, setBotMinConfidence] = useState<number>(60);
+  const [botMaxOpenPositions, setBotMaxOpenPositions] = useState<number>(1);
+  const [botRiskLevel, setBotRiskLevel] = useState<'conservative' | 'moderate' | 'aggressive'>('conservative');
   const [botAutoExecute, setBotAutoExecute] = useState<boolean>(true);
   const [isTogglingBot, setIsTogglingBot] = useState<boolean>(false);
 
@@ -206,8 +418,21 @@ export default function App() {
   const [aiDecision, setAiDecision] = useState<CoordinatorDecisionData | null>(null);
   const [isAnalyzingAI, setIsAnalyzingAI] = useState<boolean>(false);
 
+  // MLOps / aprendizaje continuo
+  const [mlopsPerformance, setMlopsPerformance] = useState<MlopsPerformanceData | null>(null);
+  const [isLoadingMlops, setIsLoadingMlops] = useState<boolean>(false);
+  const [mlopsMode, setMlopsMode] = useState<'all' | 'paper' | 'real'>('all');
+  const [mlopsSymbol, setMlopsSymbol] = useState<string>('');
+
   // Riesgo y Seguridad
   const [riskStatus, setRiskStatus] = useState<RiskStatusSummary | null>(null);
+  const [driftReport, setDriftReport] = useState<DriftReportData | null>(null);
+
+  // Oportunidades en sombra y coste de IA (solo lectura)
+  const [latestShadowScan, setLatestShadowScan] = useState<ShadowScanData | null>(null);
+  const [opportunityAssessment, setOpportunityAssessment] = useState<OpportunityAssessmentData | null>(null);
+  const [llmStatus, setLlmStatus] = useState<LLMStatusData | null>(null);
+  const [researchContext, setResearchContext] = useState<ResearchContextData | null>(null);
 
   // Credenciales
   const [vaultCredentials, setVaultCredentials] = useState<EncryptedCredentialData[]>([]);
@@ -220,25 +445,30 @@ export default function App() {
 
   // Trading real y alertas
   const [realTradingStatus, setRealTradingStatus] = useState<RealTradingStatusData | null>(null);
+  const [runtimeTradingConfig, setRuntimeTradingConfig] = useState<RuntimeTradingConfigData | null>(null);
+  const [isSavingRuntimeConfig, setIsSavingRuntimeConfig] = useState<boolean>(false);
+  const [runtimeMaxNotional, setRuntimeMaxNotional] = useState<string>('50');
+  const [runtimeAllowedSymbols, setRuntimeAllowedSymbols] = useState<string>('BTC/USDT');
+  const [runtimeAutonomousReal, setRuntimeAutonomousReal] = useState<boolean>(false);
+  const [runtimeOcoEnabled, setRuntimeOcoEnabled] = useState<boolean>(true);
   const [alertStatus, setAlertStatus] = useState<AlertStatusData | null>(null);
   const [isTestingAlert, setIsTestingAlert] = useState<boolean>(false);
   const [isReconcilingReal, setIsReconcilingReal] = useState<boolean>(false);
 
   // Refrescos periódicos
-  const refreshPortfolio = () => {
-    fetch('/api/v1/portfolio')
-      .then((res) => res.json())
-      .then((data: PortfolioData) => setPortfolio(data))
-      .catch((err) => console.error('Error al consultar cartera', err));
-  };
-
   const refreshAutonomousStatus = () => {
     fetch('/api/v1/autonomous/status')
       .then((res) => res.json())
       .then((data: AutonomousBotStatus) => {
         setAutonomousStatus(data);
-        if (data && data.config) {
+        // While stopped, these controls are a local draft for the next session.
+        // The polling endpoint keeps returning the engine's old config (often
+        // "paper"), so syncing it here would overwrite a user's selection.
+        if (data?.is_running && data.config) {
           setBotInterval(data.config.interval_seconds);
+          setBotExecutionMode(data.config.execution_mode === 'real' ? 'REAL' : 'PAPER');
+          setBotMinConfidence(data.config.min_confidence_pct);
+          setBotMaxOpenPositions(data.config.max_open_positions);
           setBotAutoExecute(data.config.auto_execute);
         }
       })
@@ -261,6 +491,49 @@ export default function App() {
       .catch((err) => console.error('Error riesgo', err));
   };
 
+  const refreshDrift = () => {
+    fetch('/api/v1/mlops/drift')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: DriftReportData | null) => {
+        if (data) setDriftReport(data);
+      })
+      .catch((err) => console.error('Error drift', err));
+  };
+
+  const refreshOpportunities = () => {
+    fetch('/api/v1/agents/scan/shadow/history?limit=1')
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data: ShadowScanData[]) => {
+        const latest = Array.isArray(data) && data.length > 0 ? data[0] : null;
+        setLatestShadowScan(latest);
+        if (!latest) {
+          setOpportunityAssessment(null);
+          return;
+        }
+        fetch(`/api/v1/agents/scan/shadow/${latest.scan_id}/assessment`, { method: 'POST' })
+          .then((res) => (res.ok ? res.json() : null))
+          .then((assessment: OpportunityAssessmentData | null) => setOpportunityAssessment(assessment))
+          .catch((err) => console.error('Error evaluación de oportunidades', err));
+      })
+      .catch((err) => console.error('Error historial shadow', err));
+  };
+
+  const refreshLLMStatus = () => {
+    fetch('/api/v1/agents/llm/status')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: LLMStatusData | null) => setLlmStatus(data))
+      .catch((err) => console.error('Error estado LLM', err));
+  };
+
+  const refreshResearchContext = () => {
+    const params = new URLSearchParams({ symbol: selectedSymbol, limit: '5' });
+    if (selectedTimeframe) params.set('timeframe', selectedTimeframe);
+    fetch(`/api/v1/research/context?${params.toString()}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: ResearchContextData | null) => setResearchContext(data))
+      .catch((err) => console.error('Error contexto de investigación', err));
+  };
+
   const refreshRealTrading = () => {
     fetch('/api/v1/trading/real/status')
       .then((res) => (res.ok ? res.json() : null))
@@ -268,11 +541,78 @@ export default function App() {
       .catch((err) => console.error('Error estado trading real', err));
   };
 
+  const refreshRuntimeConfig = () => {
+    fetch('/api/v1/trading/runtime-config')
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        return data as RuntimeTradingConfigData;
+      })
+      .then((data) => {
+        setRuntimeTradingConfig(data);
+        setVaultIsTestnet(data.trading_environment === 'testnet');
+        setRuntimeMaxNotional(String(data.real_trading_max_notional));
+        setRuntimeAllowedSymbols(data.real_trading_allowed_symbols.join(', '));
+        setRuntimeAutonomousReal(data.enable_autonomous_real_trading);
+        setRuntimeOcoEnabled(data.real_trading_oco_enabled);
+      })
+      .catch((err) => console.error('Error configuración de trading', err));
+  };
+
+  const saveRuntimeConfig = async (
+    changes: Partial<RuntimeTradingConfigData>,
+    confirm = false,
+  ) => {
+    setIsSavingRuntimeConfig(true);
+    try {
+      const res = await fetch('/api/v1/trading/runtime-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...changes, confirm }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      setRuntimeTradingConfig(data as RuntimeTradingConfigData);
+      setVaultIsTestnet(data.trading_environment === 'testnet');
+      setRuntimeMaxNotional(String(data.real_trading_max_notional));
+      setRuntimeAllowedSymbols(data.real_trading_allowed_symbols.join(', '));
+      setRuntimeAutonomousReal(data.enable_autonomous_real_trading);
+      setRuntimeOcoEnabled(data.real_trading_oco_enabled);
+      refreshRealTrading();
+      toast.success('Configuración de ejecución guardada.');
+      return true;
+    } catch (err) {
+      toast.error(`No se pudo guardar: ${(err as Error).message}`);
+      return false;
+    } finally {
+      setIsSavingRuntimeConfig(false);
+    }
+  };
+
   const refreshAlerts = () => {
     fetch('/api/v1/alerts/status')
       .then((res) => (res.ok ? res.json() : null))
       .then((data: AlertStatusData | null) => setAlertStatus(data))
       .catch((err) => console.error('Error estado alertas', err));
+  };
+
+  const refreshMlopsPerformance = () => {
+    setIsLoadingMlops(true);
+    const params = new URLSearchParams({ limit: '200' });
+    if (mlopsMode !== 'all') params.set('mode', mlopsMode);
+    if (mlopsSymbol) params.set('symbol', mlopsSymbol);
+    fetch(`/api/v1/mlops/performance?${params.toString()}`)
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        return data;
+      })
+      .then((data: MlopsPerformanceData) => setMlopsPerformance(data))
+      .catch((err) => {
+        console.error('Error métricas MLOps', err);
+        toast.error(`No se pudieron cargar las métricas: ${err.message}`);
+      })
+      .finally(() => setIsLoadingMlops(false));
   };
 
   const handleTestAlert = () => {
@@ -327,20 +667,31 @@ export default function App() {
       .then((data) => setStatus(data))
       .catch((err) => console.error('Error status', err));
 
-    refreshPortfolio();
     refreshAutonomousStatus();
     refreshVault();
     refreshRisk();
+    refreshDrift();
+    refreshOpportunities();
+    refreshLLMStatus();
+    refreshResearchContext();
     refreshRealTrading();
+    refreshRuntimeConfig();
     refreshAlerts();
 
     const intervalTimer = setInterval(() => {
       refreshAutonomousStatus();
-      refreshPortfolio();
     }, 3000);
 
     return () => clearInterval(intervalTimer);
   }, []);
+
+  // Métricas de aprendizaje: se cargan al abrir la pestaña y se refrescan cada 15 s.
+  useEffect(() => {
+    if (activeTab !== 'mlops') return;
+    refreshMlopsPerformance();
+    const timer = setInterval(refreshMlopsPerformance, 15000);
+    return () => clearInterval(timer);
+  }, [activeTab, mlopsMode, mlopsSymbol]);
 
   // Conexión WebSocket para precio en tiempo real
   useEffect(() => {
@@ -380,7 +731,6 @@ export default function App() {
             setWsConnected(true);
           } else if (data.type === 'price_tick' && typeof data.price === 'number') {
             setLivePrice(data.price);
-            if (data.timestamp) setLastTickTime(data.timestamp);
             setCandles((prev) => {
               if (!prev || prev.length === 0) return prev;
               const last = prev[prev.length - 1];
@@ -441,27 +791,8 @@ export default function App() {
       })
       .catch((err) => console.error('Error al cargar velas', err))
       .finally(() => setIsLoadingCandles(false));
+    refreshResearchContext();
   }, [selectedSymbol, selectedTimeframe]);
-
-  // Cálculo de estadísticas rápidas
-  const marketStats = useMemo(() => {
-    if (!candles.length) return null;
-    const latest = candles[candles.length - 1];
-    const prev = candles.length > 1 ? candles[candles.length - 2] : latest;
-    const currentP = livePrice ?? latest.close;
-    const change = prev.close > 0 ? ((currentP - prev.close) / prev.close) * 100 : 0;
-    const high24h = Math.max(...candles.map((c) => c.high));
-    const low24h = Math.min(...candles.map((c) => c.low));
-    const volumeTotal = candles.reduce((acc, c) => acc + c.volume, 0);
-
-    return {
-      currentPrice: currentP,
-      change,
-      high24h,
-      low24h,
-      volumeTotal,
-    };
-  }, [candles, livePrice]);
 
   // Acciones del Bot Autónomo
   const handleToggleBot = () => {
@@ -479,28 +810,73 @@ export default function App() {
         .finally(() => setIsTogglingBot(false));
     } else {
       const riskPct = botRiskLevel === 'conservative' ? 1.0 : botRiskLevel === 'moderate' ? 2.0 : 3.0;
+      const environment = runtimeTradingConfig?.trading_environment ?? 'testnet';
+      if (botExecutionMode === 'REAL') {
+        if (!runtimeTradingConfig?.credentials[environment]) {
+          toast.error(`No hay credenciales ${environment.toUpperCase()} configuradas.`);
+          setActiveTab('settings');
+          setIsTogglingBot(false);
+          return;
+        }
+        if (environment === 'mainnet' && !runtimeTradingConfig?.allow_mainnet_trading) {
+          toast.error('Mainnet requiere habilitar el segundo opt-in en Configuración.');
+          setActiveTab('settings');
+          setIsTogglingBot(false);
+          return;
+        }
+        const venue = environment === 'mainnet' ? 'BINANCE MAINNET (dinero real)' : 'BINANCE TESTNET (fondos de prueba)';
+        const notionalLimit = safeLoc(Number(runtimeTradingConfig?.real_trading_max_notional));
+        if (!window.confirm(
+          `Vas a autorizar al asistente autónomo a enviar órdenes en ${venue} durante esta sesión.\n\n` +
+          `Par: ${selectedSymbol} · Intervalo: ${botInterval}s · Puntuación mínima del comité: ${botMinConfidence}%\n` +
+          `Riesgo solicitado al stop: ${riskPct}% del saldo (sujeto al perfil de riesgo) · Límite por orden: ${notionalLimit} USDT\n` +
+          `Posiciones simultáneas: ${botMaxOpenPositions}. Stop/objetivo: 2%/4% (RR 2:1).\n\n` +
+          'El Risk Guard, la allowlist y las protecciones siguen activos. ¿Confirmas iniciar?'
+        )) {
+          setIsTogglingBot(false);
+          return;
+        }
+      }
       const payload: AutonomousBotConfig = {
         symbol: selectedSymbol,
         timeframe: selectedTimeframe,
         interval_seconds: botInterval,
-        execution_mode: executionMode.toLowerCase(),
-        min_confidence_pct: 50,
+        execution_mode: botExecutionMode.toLowerCase(),
+        confirm_real_trading: botExecutionMode === 'REAL',
+        min_confidence_pct: botMinConfidence,
         risk_per_trade_pct: riskPct,
-        max_open_positions: 3,
+        max_open_positions: botMaxOpenPositions,
         auto_execute: botAutoExecute,
         stop_loss_pct: 2.0,
         take_profit_pct: 4.0,
       };
 
-      fetch('/api/v1/autonomous/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-        .then((res) => {
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          return res.json();
-        })
+      (async () => {
+        if (botExecutionMode === 'REAL') {
+          const configResponse = await fetch('/api/v1/trading/runtime-config', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              execution_mode: 'real',
+              enable_real_trading: true,
+              enable_autonomous_real_trading: true,
+              require_manual_confirmation: true,
+              confirm: true,
+            }),
+          });
+          const configData = await configResponse.json();
+          if (!configResponse.ok) throw new Error(configData.detail || `HTTP ${configResponse.status}`);
+          setRuntimeTradingConfig(configData as RuntimeTradingConfigData);
+        }
+        const response = await fetch('/api/v1/autonomous/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+        return data as AutonomousBotStatus;
+      })()
         .then((data: AutonomousBotStatus) => {
           setAutonomousStatus(data);
           toast.success(`🚀 ¡Asistente Autónomo Activo para ${payload.symbol}!`);
@@ -523,122 +899,8 @@ export default function App() {
       .then((data: AutonomousBotStatus) => {
         setAutonomousStatus(data);
         toast.error('🚨 PARADA DE EMERGENCIA EJECUTADA: Bot detenido y posiciones cerradas.');
-        refreshPortfolio();
       })
       .catch((err) => toast.error(`Error de parada: ${err.message}`));
-  };
-
-  // Sincronizar velas
-  const handleSyncMarket = () => {
-    setIsSyncing(true);
-    const encoded = encodeURIComponent(selectedSymbol);
-    fetch(`/api/v1/market/${encoded}/sync?timeframe=${selectedTimeframe}&days_back=14`, {
-      method: 'POST',
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data) => {
-        toast.success(`✅ ${data.candles_synced} velas sincronizadas correctamente.`);
-        // Recargar velas
-        fetch(`/api/v1/market/${encoded}/candles?timeframe=${selectedTimeframe}&limit=50`)
-          .then((r) => r.json())
-          .then((d) => setCandles(d.data || []));
-      })
-      .catch((err) => toast.error(`Error al sincronizar: ${err.message}`))
-      .finally(() => setIsSyncing(false));
-  };
-
-  // Operación rápida manual (Compra / Venta con 1 clic)
-  const handleQuickTrade = (side: 'BUY' | 'SELL') => {
-    const currentP = livePrice || (candles.length ? candles[candles.length - 1].close : 84800);
-    const qty = Number((orderAmountUsd / currentP).toFixed(4));
-
-    if (qty <= 0) {
-      toast.error('El monto debe ser mayor a 0');
-      return;
-    }
-
-    const isReal = executionMode === 'REAL';
-    if (isReal) {
-      if (!realTradingStatus?.enabled || !realTradingStatus.credentials_configured) {
-        toast.error(
-          'Trading real no habilitado. Configura EXECUTION_MODE=real, ENABLE_REAL_TRADING=true y guarda tus claves API.'
-        );
-        return;
-      }
-      const venue = realTradingStatus.testnet ? 'TESTNET (fondos de prueba)' : 'MAINNET (DINERO REAL)';
-      if (!window.confirm(`¿Confirmas ${side} de ${qty} ${selectedSymbol.split('/')[0]} en ${venue}?`)) {
-        return;
-      }
-    }
-
-    setIsSubmittingOrder(true);
-    const payload = {
-      symbol: selectedSymbol,
-      side,
-      order_type: 'MARKET',
-      quantity: qty,
-      mode: executionMode.toLowerCase(),
-      ...(isReal
-        ? {
-            exchange: realTradingStatus?.exchange ?? 'binance',
-            confirm: true,
-            client_order_id: `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-            stop_loss: side === 'BUY' ? Number((currentP * 0.98).toFixed(2)) : undefined,
-            take_profit: side === 'BUY' ? Number((currentP * 1.04).toFixed(2)) : undefined,
-          }
-        : {}),
-      notes: `Operación Rápida desde Panel en Español`,
-    };
-
-    const endpoint = isReal
-      ? side === 'BUY'
-        ? '/api/v1/trading/real/orders'
-        : '/api/v1/trading/real/positions/close'
-      : '/api/v1/trading/orders';
-
-    fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    })
-      .then((res) => {
-        if (!res.ok) return res.json().then((e) => { throw new Error(e.detail || `HTTP ${res.status}`); });
-        return res.json();
-      })
-      .then((order) => {
-        const accionStr = side === 'BUY' ? 'COMPRA' : 'VENTA';
-        toast.success(`✅ ¡Orden de ${accionStr} ejecutada! ${qty} ${selectedSymbol.split('/')[0]} @ $${order.average_fill_price}`);
-        refreshPortfolio();
-      })
-      .catch((err) => toast.error(`Error en la orden: ${err.message}`))
-      .finally(() => setIsSubmittingOrder(false));
-  };
-
-  const handleClosePosition = (positionId: string) => {
-    fetch(`/api/v1/trading/positions/${positionId}/close`, { method: 'POST' })
-      .then((res) => {
-        if (!res.ok) return res.json().then((e) => { throw new Error(e.detail || `HTTP ${res.status}`); });
-        return res.json();
-      })
-      .then((order) => {
-        toast.success(`Posición cerrada exitosamente @ $${order.average_fill_price}`);
-        refreshPortfolio();
-      })
-      .catch((err) => toast.error(`Error al cerrar: ${err.message}`));
-  };
-
-  const handleResetPaperAccount = () => {
-    if (!window.confirm('¿Deseas reiniciar el saldo virtual a $10,000.00 USDT?')) return;
-    fetch('/api/v1/portfolio/reset', { method: 'POST' })
-      .then((res) => res.json())
-      .then(() => {
-        toast.success('Cuenta virtual reiniciada a $10,000.00 USDT');
-        refreshPortfolio();
-      })
-      .catch((err) => toast.error(`Error al reiniciar: ${err.message}`));
   };
 
   // Análisis bajo demanda del comité
@@ -665,7 +927,7 @@ export default function App() {
             : data.final_signal === 'sell' || data.final_signal === 'strong_sell'
             ? 'VENDER'
             : 'ESPERAR / NEUTRO';
-        toast.success(`Veredicto del Comité: ${signalTraducida} (${Math.round(safeNum(data.aggregate_confidence) * 100)}% de confianza)`);
+        toast.success(`Veredicto del Comité: ${signalTraducida} (puntuación ${Math.round(safeNum(data.aggregate_confidence) * 100)}%; no es probabilidad de éxito)`);
       })
       .catch((err) => toast.error(`Error en análisis: ${err.message}`))
       .finally(() => setIsAnalyzingAI(false));
@@ -707,7 +969,7 @@ export default function App() {
     fetch('/api/v1/vault/test-connection', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ exchange: 'binance' }),
+      body: JSON.stringify({ exchange: 'binance', is_testnet: vaultIsTestnet }),
     })
       .then((res) => {
         if (!res.ok) return res.json().then((e) => { throw new Error(e.detail || `HTTP ${res.status}`); });
@@ -789,7 +1051,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Controles de Modo y Estado en Vivo */}
+        {/* Estado del mercado */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
           {/* Badge WebSocket en vivo */}
           <div
@@ -818,106 +1080,8 @@ export default function App() {
             {wsConnected ? 'MERCADO EN VIVO' : 'CONECTANDO...'}
           </div>
 
-          {/* Selector de Modo Simulado / Real */}
-          <button
-            type="button"
-            className={`btn ${executionMode === 'PAPER' ? 'btn-secondary' : 'btn-danger'}`}
-            style={{ fontSize: '13px', padding: '6px 14px' }}
-            onClick={() => {
-              const nextMode = executionMode === 'PAPER' ? 'REAL' : 'PAPER';
-              if (
-                nextMode === 'REAL' &&
-                !window.confirm(
-                  '🚨 ¿Deseas activar el MODO REAL? Asegúrate de tener tus claves API configuradas en la pestaña Configuración.'
-                )
-              ) {
-                return;
-              }
-              setExecutionMode(nextMode);
-              toast(
-                nextMode === 'PAPER'
-                  ? '🛡️ Modo Simulado Activado (Saldo de prueba)'
-                  : '🚨 Modo Real Activado',
-                { icon: nextMode === 'PAPER' ? '🛡️' : '⚠️' }
-              );
-            }}
-          >
-            {executionMode === 'PAPER' ? '🛡️ MODO SIMULADO (SEGURO)' : '🚨 MODO DINERO REAL'}
-          </button>
         </div>
       </header>
-
-      {/* ====================================================================
-          RESUMEN RÁPIDO DE CARTERA (BANNER SUPERIOR)
-          ==================================================================== */}
-      {portfolio && (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-            gap: '12px',
-            marginBottom: '20px',
-            padding: '14px 20px',
-            background: 'rgba(15, 23, 42, 0.7)',
-            borderRadius: '14px',
-            border: '1px solid rgba(255, 255, 255, 0.06)',
-            alignItems: 'center',
-          }}
-        >
-          <div>
-            <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 600 }}>
-              Saldo de la Cuenta
-            </span>
-            <div style={{ fontSize: '20px', fontWeight: 800, color: '#f8fafc' }}>
-              ${safeLoc(portfolio.total_balance, { minimumFractionDigits: 2 })} USDT
-            </div>
-          </div>
-
-          <div>
-            <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 600 }}>
-              Ganancia / Pérdida en Vivo
-            </span>
-            <div
-              style={{
-                fontSize: '18px',
-                fontWeight: 800,
-                color: safeNum(portfolio.total_unrealized_pnl) >= 0 ? '#10b981' : '#ef4444',
-              }}
-            >
-              {safeNum(portfolio.total_unrealized_pnl) >= 0 ? '+' : ''}$
-              {safeFix(portfolio.total_unrealized_pnl)} USDT
-            </div>
-          </div>
-
-          <div>
-            <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 600 }}>
-              Operaciones Abiertas
-            </span>
-            <div style={{ fontSize: '18px', fontWeight: 800, color: '#38bdf8' }}>
-              {portfolio.position_count} {portfolio.position_count === 1 ? 'activa' : 'activas'}
-            </div>
-          </div>
-
-          {/* Selector de Cripto Activa */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 600 }}>
-              Criptomoneda en Foco
-            </span>
-            <select
-              className="select-input"
-              style={{ padding: '6px 12px', fontSize: '13px', fontWeight: 700 }}
-              value={selectedSymbol}
-              onChange={(e) => setSelectedSymbol(e.target.value)}
-            >
-              {AVAILABLE_SYMBOLS.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.icon} {s.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-      )}
 
       {/* ====================================================================
           BARRA DE PESTAÑAS (TABS) CLARA & MODERNA
@@ -933,35 +1097,18 @@ export default function App() {
 
         <button
           type="button"
-          className={`nav-tab-btn ${activeTab === 'market' ? 'active' : ''}`}
-          onClick={() => setActiveTab('market')}
-        >
-          📈 Mercado & Gráfico
-        </button>
-
-        <button
-          type="button"
-          className={`nav-tab-btn ${activeTab === 'portfolio' ? 'active' : ''}`}
-          onClick={() => setActiveTab('portfolio')}
-        >
-          💼 Cartera & Operaciones
-        </button>
-
-        <button
-          type="button"
-          className={`nav-tab-btn ${activeTab === 'agents' ? 'active' : ''}`}
-          onClick={() => setActiveTab('agents')}
-        >
-          🧠 Comité de Analistas IA
-        </button>
-
-        <button
-          type="button"
           className={`nav-tab-btn ${activeTab === 'settings' ? 'active' : ''}`}
           onClick={() => setActiveTab('settings')}
         >
           ⚙️ Configuración & Claves
         </button>
+        <details className="advanced-nav">
+          <summary>Avanzado</summary>
+          <div className="advanced-nav-menu">
+            <button type="button" className="nav-tab-btn" onClick={(event) => { setActiveTab('agents'); event.currentTarget.closest('details')?.removeAttribute('open'); }}>Comité de analistas IA</button>
+            <button type="button" className="nav-tab-btn" onClick={(event) => { setActiveTab('mlops'); event.currentTarget.closest('details')?.removeAttribute('open'); }}>Métricas de aprendizaje</button>
+          </div>
+        </details>
       </nav>
 
       {/* ====================================================================
@@ -969,6 +1116,47 @@ export default function App() {
           ==================================================================== */}
       {activeTab === 'bot' && (
         <div>
+          {/* Mercado y gráfico integrados en la vista principal */}
+          <section className="panel trading-chart-panel">
+            <div className="trading-chart-toolbar">
+              <div className="trading-pair-title">
+                <select
+                  aria-label="Par de mercado"
+                  className="select-input"
+                  value={selectedSymbol}
+                  onChange={(event) => setSelectedSymbol(event.target.value)}
+                >
+                  {AVAILABLE_SYMBOLS.map((symbol) => (
+                    <option key={symbol.id} value={symbol.id}>{symbol.name}</option>
+                  ))}
+                </select>
+                <strong>{livePrice ? `$${safeLoc(livePrice, { minimumFractionDigits: 2 })}` : '—'}</strong>
+                <span className={wsConnected ? 'market-live-indicator connected' : 'market-live-indicator'}>
+                  {wsConnected ? 'En vivo' : 'Conectando'}
+                </span>
+              </div>
+              <div className="trading-timeframes" aria-label="Temporalidad del gráfico">
+                {TIMEFRAMES.map((timeframe) => (
+                  <button
+                    key={timeframe.id}
+                    type="button"
+                    className={`btn ${selectedTimeframe === timeframe.id ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setSelectedTimeframe(timeframe.id)}
+                  >
+                    {timeframe.id}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="integrated-market-chart">
+              {isLoadingCandles ? (
+                <div style={{ textAlign: 'center', padding: '60px', color: '#94a3b8' }}>Cargando mercado…</div>
+              ) : (
+                <MarketChart candles={candles} livePrice={livePrice} symbol={selectedSymbol} timeframe={selectedTimeframe} />
+              )}
+            </div>
+          </section>
+
           {/* Tarjeta Hero Principal del Bot */}
           <div className="hero-assistant-card">
             <div className="hero-card-grid">
@@ -1001,7 +1189,7 @@ export default function App() {
                     {autonomousStatus?.is_running ? 'BOT EN EJECUCIÓN CONTINUA' : 'BOT EN PAUSA'}
                   </span>
                   <span style={{ fontSize: '13px', color: '#94a3b8' }}>
-                    Par: <strong>{selectedSymbol}</strong> • Escaneo cada {botInterval}s
+                    {botExecutionMode === 'PAPER' ? 'Paper' : `Real · ${runtimeTradingConfig?.trading_environment.toUpperCase() ?? 'TESTNET'}`} · Par: <strong>{selectedSymbol}</strong> · cada {botInterval}s
                   </span>
                 </div>
 
@@ -1028,13 +1216,13 @@ export default function App() {
                     </span>
                   </div>
                   <div className="kpi-card" style={{ padding: '12px' }}>
-                    <span className="kpi-label">Ciclos Completados</span>
+                    <span className="kpi-label">Posiciones del asistente</span>
                     <span className="kpi-value" style={{ fontSize: '16px' }}>
-                      {autonomousStatus?.total_cycles || 0}
+                      {autonomousStatus?.active_positions_count || 0}
                     </span>
                   </div>
                   <div className="kpi-card" style={{ padding: '12px' }}>
-                    <span className="kpi-label">Órdenes Realizadas</span>
+                    <span className="kpi-label">Operaciones de esta sesión</span>
                     <span className="kpi-value" style={{ fontSize: '16px', color: '#10b981' }}>
                       {autonomousStatus?.trades_executed || 0}
                     </span>
@@ -1055,8 +1243,58 @@ export default function App() {
                 }}
               >
                 <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 700, color: '#f8fafc' }}>
-                  Controles del Asistente
+                  Configura y ejecuta el asistente
                 </h3>
+
+                <div style={{ padding: '12px', borderRadius: '10px', background: botExecutionMode === 'PAPER' ? 'rgba(56, 189, 248, 0.1)' : 'rgba(239, 68, 68, 0.12)', border: `1px solid ${botExecutionMode === 'PAPER' ? 'rgba(56, 189, 248, 0.3)' : 'rgba(239, 68, 68, 0.35)'}` }}>
+                  <strong style={{ color: botExecutionMode === 'PAPER' ? '#7dd3fc' : '#fca5a5' }}>
+                    {botExecutionMode === 'PAPER' ? 'Modo Paper: simulado, sin dinero real' : `Modo Real: ${runtimeTradingConfig?.trading_environment.toUpperCase() ?? 'TESTNET'}`}
+                  </strong>
+                  <div style={{ marginTop: '5px', fontSize: '12px', color: '#cbd5e1' }}>
+                    {botExecutionMode === 'PAPER' ? 'Recomendado para aprender y validar la estrategia.' : 'El asistente podrá abrir y cerrar órdenes automáticamente durante esta sesión.'}
+                  </div>
+                </div>
+
+                <label className="input-group">
+                  <span className="input-label">Modo del asistente</span>
+                  <select className="select-input" value={botExecutionMode} disabled={autonomousStatus?.is_running} onChange={(event) => setBotExecutionMode(event.target.value as 'PAPER' | 'REAL')}>
+                    <option value="PAPER">Paper · practicar sin dinero real</option>
+                    <option value="REAL">Real · usar el entorno configurado</option>
+                  </select>
+                </label>
+                <details className="advanced-options">
+                  <summary>Ajustes de estrategia</summary>
+                  <div className="advanced-options-content">
+                <label className="input-group">
+                  <span className="input-label">Revisar el mercado cada</span>
+                  <select className="select-input" value={botInterval} disabled={autonomousStatus?.is_running} onChange={(event) => setBotInterval(Number(event.target.value))}>
+                    <option value={30}>30 segundos</option><option value={60}>1 minuto (recomendado)</option><option value={120}>2 minutos</option><option value={300}>5 minutos</option>
+                  </select>
+                </label>
+                <label className="input-group">
+                  <span className="input-label">Puntuación mínima de señal (no es probabilidad): {botMinConfidence}%</span>
+                  <input type="range" min="50" max="90" step="5" value={botMinConfidence} disabled={autonomousStatus?.is_running} onChange={(event) => setBotMinConfidence(Number(event.target.value))} />
+                  <span style={{ fontSize: '11px', color: '#94a3b8' }}>Un umbral mayor reduce operaciones; esta puntuación no está calibrada como probabilidad.</span>
+                </label>
+                <label className="input-group">
+                  <span className="input-label">Máximo de posiciones abiertas</span>
+                  <select className="select-input" value={botMaxOpenPositions} disabled={autonomousStatus?.is_running} onChange={(event) => setBotMaxOpenPositions(Number(event.target.value))}>
+                    <option value={1}>1 posición (recomendado)</option><option value={2}>2 posiciones</option><option value={3}>3 posiciones</option>
+                  </select>
+                </label>
+                  </div>
+                </details>
+
+                {/* Auto-ejecución */}
+                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', fontSize: '13px' }}>
+                  <input
+                    type="checkbox"
+                    checked={botAutoExecute}
+                    onChange={(e) => setBotAutoExecute(e.target.checked)}
+                    disabled={autonomousStatus?.is_running}
+                  />
+                  <span>El asistente ejecutará automáticamente sus señales</span>
+                </label>
 
                 {/* Botón Principal de Encendido/Apagado */}
                 <button
@@ -1084,10 +1322,12 @@ export default function App() {
                     : '▶ Iniciar Asistente Autónomo'}
                 </button>
 
-                {/* Perfil de Riesgo Simple */}
-                <div>
+                {/* Ajustes técnicos ocultos por defecto */}
+                <details className="advanced-options">
+                  <summary>Tamaño de posición</summary>
+                  <div className="advanced-options-content">
                   <span style={{ fontSize: '12px', color: '#94a3b8', fontWeight: 600 }}>
-                    Nivel de Riesgo por Operación
+                    Tamaño máximo de cada posición (% del saldo)
                   </span>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', marginTop: '6px' }}>
                     <button
@@ -1096,7 +1336,7 @@ export default function App() {
                       style={{ padding: '6px 8px', fontSize: '11px', justifyContent: 'center' }}
                       onClick={() => setBotRiskLevel('conservative')}
                     >
-                      🛡️ 1% Seguro
+                      🛡️ 1% Conservador
                     </button>
                     <button
                       type="button"
@@ -1104,7 +1344,7 @@ export default function App() {
                       style={{ padding: '6px 8px', fontSize: '11px', justifyContent: 'center' }}
                       onClick={() => setBotRiskLevel('moderate')}
                     >
-                      ⚖️ 2% Normal
+                      ⚖️ 2% Moderado
                     </button>
                     <button
                       type="button"
@@ -1112,23 +1352,17 @@ export default function App() {
                       style={{ padding: '6px 8px', fontSize: '11px', justifyContent: 'center' }}
                       onClick={() => setBotRiskLevel('aggressive')}
                     >
-                      ⚡ 3% Ágil
+                      ⚡ 3% Alto
                     </button>
                   </div>
-                </div>
+                  </div>
+                </details>
 
-                {/* Auto-ejecución */}
-                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', fontSize: '13px' }}>
-                  <input
-                    type="checkbox"
-                    checked={botAutoExecute}
-                    onChange={(e) => setBotAutoExecute(e.target.checked)}
-                    disabled={autonomousStatus?.is_running}
-                  />
-                  <span>Permitir al bot ejecutar compras/ventas automáticamente</span>
-                </label>
+                <span style={{ marginTop: '-10px', fontSize: '11px', color: '#94a3b8' }}>En Real se solicita una confirmación antes de iniciar. El bot usa Stop 2% y objetivo 4%.</span>
 
                 {/* Botón de Emergencia */}
+                <details className="advanced-options">
+                  <summary>Controles de emergencia</summary>
                 <button
                   type="button"
                   className="btn btn-danger"
@@ -1142,14 +1376,17 @@ export default function App() {
                   }}
                   onClick={handleEmergencyStop}
                 >
-                  🚨 Parada de Emergencia (Cerrar Todo)
+                  🚨 Detener y cerrar posiciones del bot
                 </button>
+                </details>
               </div>
             </div>
           </div>
 
           {/* Registro de Actividad y Pensamiento del Bot */}
-          <div className="panel" style={{ padding: '20px' }}>
+          <details className="advanced-options advanced-log">
+            <summary>Registro técnico de decisiones ({autonomousStatus?.logs?.length || 0})</summary>
+            <div className="panel" style={{ padding: '20px', marginTop: '12px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
               <div>
                 <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 800 }}>
@@ -1190,286 +1427,13 @@ export default function App() {
                 ))
               )}
             </div>
-          </div>
+            </div>
+          </details>
         </div>
       )}
 
       {/* ====================================================================
           PESTAÑA 2: MERCADO & GRÁFICO
-          ==================================================================== */}
-      {activeTab === 'market' && (
-        <div className="panel" style={{ padding: '24px' }}>
-          {/* Barra de herramientas del mercado */}
-          <div
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              flexWrap: 'wrap',
-              gap: '12px',
-              marginBottom: '20px',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              {/* Selector de Cripto */}
-              <select
-                className="select-input"
-                style={{ padding: '8px 14px', fontSize: '14px', fontWeight: 700 }}
-                value={selectedSymbol}
-                onChange={(e) => setSelectedSymbol(e.target.value)}
-              >
-                {AVAILABLE_SYMBOLS.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.icon} {s.name}
-                  </option>
-                ))}
-              </select>
-
-              {/* Selector de Temporalidad */}
-              <div style={{ display: 'flex', gap: '4px' }}>
-                {TIMEFRAMES.map((tf) => (
-                  <button
-                    key={tf.id}
-                    type="button"
-                    className={`btn ${selectedTimeframe === tf.id ? 'btn-primary' : 'btn-secondary'}`}
-                    style={{ padding: '6px 12px', fontSize: '12px' }}
-                    onClick={() => setSelectedTimeframe(tf.id)}
-                  >
-                    {tf.id}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <button
-              type="button"
-              className="btn btn-secondary"
-              style={{ fontSize: '13px', padding: '8px 14px' }}
-              onClick={handleSyncMarket}
-              disabled={isSyncing}
-            >
-              {isSyncing ? 'Sincronizando...' : '🔄 Actualizar Historial (14 días)'}
-            </button>
-          </div>
-
-          {/* Gráfico Interactivo de Mercado */}
-          <div
-            style={{
-              background: 'rgba(15, 23, 42, 0.6)',
-              borderRadius: '16px',
-              padding: '20px',
-              border: '1px solid rgba(255, 255, 255, 0.08)',
-              marginBottom: '24px',
-            }}
-          >
-            {isLoadingCandles ? (
-              <div style={{ textAlign: 'center', padding: '60px', color: '#94a3b8' }}>
-                Cargando datos de mercado en vivo...
-              </div>
-            ) : (
-              <MarketChart
-                candles={candles}
-                livePrice={livePrice}
-                symbol={selectedSymbol}
-                timeframe={selectedTimeframe}
-              />
-            )}
-          </div>
-
-          {/* Estadísticas Clave en Español */}
-          {marketStats && (
-            <div className="kpi-grid">
-              <div className="kpi-card">
-                <span className="kpi-label">Precio Actual</span>
-                <span className="kpi-value" style={{ color: '#38bdf8' }}>
-                  ${safeLoc(marketStats.currentPrice, { minimumFractionDigits: 2 })}
-                </span>
-                {lastTickTime && (
-                  <span style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>
-                    Último tick: {new Date(lastTickTime).toLocaleTimeString()}
-                  </span>
-                )}
-              </div>
-
-              <div className="kpi-card">
-                <span className="kpi-label">Variación de la Vela</span>
-                <span
-                  className="kpi-value"
-                  style={{ color: marketStats.change >= 0 ? '#10b981' : '#ef4444' }}
-                >
-                  {marketStats.change >= 0 ? '+' : ''}
-                  {safeFix(marketStats.change)}%
-                </span>
-              </div>
-
-              <div className="kpi-card">
-                <span className="kpi-label">Rango Máximo del Día</span>
-                <span className="kpi-value" style={{ color: '#10b981' }}>
-                  ${safeFix(marketStats.high24h)}
-                </span>
-              </div>
-
-              <div className="kpi-card">
-                <span className="kpi-label">Rango Mínimo del Día</span>
-                <span className="kpi-value" style={{ color: '#ef4444' }}>
-                  ${safeFix(marketStats.low24h)}
-                </span>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ====================================================================
-          PESTAÑA 3: CARTERA & OPERACIONES MANUALES
-          ==================================================================== */}
-      {activeTab === 'portfolio' && (
-        <div>
-          {/* Panel de Operación Rápida con 1 Clic */}
-          <div className="panel" style={{ padding: '24px', marginBottom: '24px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-              <div>
-                <h3 style={{ margin: 0, fontSize: '18px', fontWeight: 800 }}>
-                  ⚡ Operación Rápida con 1 Clic
-                </h3>
-                <p style={{ margin: '4px 0 0', fontSize: '13px', color: '#94a3b8' }}>
-                  Compra o vende fácilmente en modo {executionMode === 'PAPER' ? 'Simulado' : 'Real'}.
-                </p>
-              </div>
-
-              {executionMode === 'PAPER' && (
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  style={{ fontSize: '12px' }}
-                  onClick={handleResetPaperAccount}
-                >
-                  🔄 Reiniciar Saldo ($10,000 USDT)
-                </button>
-              )}
-            </div>
-
-            {/* Selector de Monto */}
-            <div style={{ maxWidth: '400px', marginBottom: '16px' }}>
-              <span style={{ fontSize: '13px', color: '#94a3b8', fontWeight: 600 }}>
-                Monto a Operar en Dólares (USD):
-              </span>
-              <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
-                {[100, 250, 500, 1000].map((amt) => (
-                  <button
-                    key={amt}
-                    type="button"
-                    className={`btn ${orderAmountUsd === amt ? 'btn-primary' : 'btn-secondary'}`}
-                    style={{ flex: 1, padding: '6px', fontSize: '13px' }}
-                    onClick={() => setOrderAmountUsd(amt)}
-                  >
-                    ${amt}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Botones Grandes Comprar / Vender */}
-            <div className="quick-order-box">
-              <button
-                type="button"
-                className="order-big-btn buy"
-                onClick={() => handleQuickTrade('BUY')}
-                disabled={isSubmittingOrder}
-              >
-                <span>🟢 COMPRAR {selectedSymbol.split('/')[0]}</span>
-                <span style={{ fontSize: '12px', opacity: 0.9 }}>
-                  Monto: ${orderAmountUsd} USD a precio de mercado
-                </span>
-              </button>
-
-              <button
-                type="button"
-                className="order-big-btn sell"
-                onClick={() => handleQuickTrade('SELL')}
-                disabled={isSubmittingOrder}
-              >
-                <span>🔴 VENDER {selectedSymbol.split('/')[0]}</span>
-                <span style={{ fontSize: '12px', opacity: 0.9 }}>
-                  Monto: ${orderAmountUsd} USD a precio de mercado
-                </span>
-              </button>
-            </div>
-          </div>
-
-          {/* Tabla de Posiciones Abiertas */}
-          <div className="panel" style={{ padding: '24px' }}>
-            <h3 style={{ margin: '0 0 16px', fontSize: '18px', fontWeight: 800 }}>
-              📊 Posiciones Abiertas Actualmente
-            </h3>
-
-            {!portfolio?.positions || portfolio.positions.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '30px', color: '#94a3b8', fontSize: '14px' }}>
-                No tienes ninguna posición abierta en este momento. Utiliza los botones de compra arriba o enciende el bot autónomo.
-              </div>
-            ) : (
-              <div className="table-container">
-                <table className="candles-table">
-                  <thead>
-                    <tr>
-                      <th style={{ textAlign: 'left' }}>Activo</th>
-                      <th>Tipo</th>
-                      <th>Cantidad</th>
-                      <th>Precio Entrada</th>
-                      <th>Precio Actual</th>
-                      <th>Ganancia / Pérdida</th>
-                      <th>Acción</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {portfolio.positions.map((pos) => {
-                      const pnlPos = safeNum(pos.unrealized_pnl) >= 0;
-                      return (
-                        <tr key={pos.id}>
-                          <td style={{ textAlign: 'left', fontWeight: 700 }}>{pos.symbol}</td>
-                          <td>
-                            <span
-                              style={{
-                                padding: '3px 8px',
-                                borderRadius: '4px',
-                                fontSize: '11px',
-                                fontWeight: 800,
-                                backgroundColor: pos.side === 'BUY' ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)',
-                                color: pos.side === 'BUY' ? '#10b981' : '#ef4444',
-                              }}
-                            >
-                              {pos.side === 'BUY' ? 'COMPRA' : 'VENTA'}
-                            </span>
-                          </td>
-                          <td>{pos.quantity}</td>
-                          <td>${safeFix(pos.entry_price)}</td>
-                          <td style={{ color: '#38bdf8', fontWeight: 600 }}>${safeFix(pos.current_price)}</td>
-                          <td style={{ color: pnlPos ? '#10b981' : '#ef4444', fontWeight: 700 }}>
-                            {pnlPos ? '+' : ''}${safeFix(pos.unrealized_pnl)} ({pnlPos ? '+' : ''}{safeFix(pos.unrealized_pnl_pct)}%)
-                          </td>
-                          <td>
-                            <button
-                              type="button"
-                              className="btn btn-secondary"
-                              style={{ padding: '4px 10px', fontSize: '11px' }}
-                              onClick={() => handleClosePosition(pos.id)}
-                            >
-                              Cerrar Posición
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ====================================================================
-          PESTAÑA 4: COMITÉ DE ANALISTAS IA (VISUAL & FÁCIL)
           ==================================================================== */}
       {activeTab === 'agents' && (
         <div className="panel" style={{ padding: '24px' }}>
@@ -1576,7 +1540,319 @@ export default function App() {
       )}
 
       {/* ====================================================================
-          PESTAÑA 5: CONFIGURACIÓN & CLAVES (SIN RUIDO)
+          PESTAÑA 5: MLOPS / APRENDIZAJE CONTINUO
+          ==================================================================== */}
+      {activeTab === 'mlops' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          <div className="panel" style={{ padding: '24px' }}>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '18px',
+                flexWrap: 'wrap',
+                gap: '12px',
+              }}
+            >
+              <div>
+                <h3 style={{ margin: 0, fontSize: '18px', fontWeight: 800 }}>
+                  📊 MLOps & Aprendizaje Continuo
+                </h3>
+                <p style={{ margin: '4px 0 0', fontSize: '13px', color: '#94a3b8' }}>
+                  Atribución real de resultados a las decisiones del comité. Sin datos simulados:
+                  solo órdenes y decisiones persistidas en el journal.
+                </p>
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+                <select
+                  className="select-input"
+                  style={{ padding: '8px 12px', fontSize: '13px' }}
+                  value={mlopsMode}
+                  onChange={(e) => setMlopsMode(e.target.value as 'all' | 'paper' | 'real')}
+                >
+                  <option value="all">Todos los modos</option>
+                  <option value="paper">Paper</option>
+                  <option value="real">Real</option>
+                </select>
+
+                <select
+                  className="select-input"
+                  style={{ padding: '8px 12px', fontSize: '13px' }}
+                  value={mlopsSymbol}
+                  onChange={(e) => setMlopsSymbol(e.target.value)}
+                >
+                  <option value="">Todos los símbolos</option>
+                  {AVAILABLE_SYMBOLS.map((symbol) => (
+                    <option key={symbol.id} value={symbol.id}>
+                      {symbol.icon} {symbol.name}
+                    </option>
+                  ))}
+                </select>
+
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={refreshMlopsPerformance}
+                  disabled={isLoadingMlops}
+                >
+                  {isLoadingMlops ? 'Actualizando...' : '🔄 Actualizar'}
+                </button>
+              </div>
+            </div>
+
+            {!mlopsPerformance ? (
+              <p style={{ color: '#94a3b8', fontSize: '14px' }}>
+                {isLoadingMlops ? 'Calculando métricas...' : 'Sin métricas disponibles todavía.'}
+              </p>
+            ) : !mlopsPerformance.data_available ? (
+              <div
+                style={{
+                  padding: '14px 18px',
+                  borderRadius: '10px',
+                  background: 'rgba(245, 158, 11, 0.12)',
+                  border: '1px solid rgba(245, 158, 11, 0.45)',
+                  color: '#fbbf24',
+                  fontSize: '13px',
+                }}
+              >
+                La base de datos no está disponible en este momento. Las métricas se
+                reconstruirán cuando vuelva la conexión.
+              </div>
+            ) : (
+              <>
+                <div className="kpi-grid">
+                  <div className="kpi-card">
+                    <div className="kpi-label">Decisiones analizadas</div>
+                    <div className="kpi-value">{safeLoc(mlopsPerformance.total_decisions)}</div>
+                  </div>
+                  <div className="kpi-card">
+                    <div className="kpi-label">Ejecutadas</div>
+                    <div className="kpi-value">{safeLoc(mlopsPerformance.executed)}</div>
+                  </div>
+                  <div className="kpi-card">
+                    <div className="kpi-label">Resueltas</div>
+                    <div className="kpi-value">{safeLoc(mlopsPerformance.resolved)}</div>
+                  </div>
+                  <div className="kpi-card">
+                    <div className="kpi-label">Tasa de acierto</div>
+                    <div className="kpi-value positive">
+                      {safeFix(mlopsPerformance.win_rate_pct, 1)}%
+                    </div>
+                  </div>
+                  <div className="kpi-card">
+                    <div className="kpi-label">PnL neto realizado</div>
+                    <div
+                      className={`kpi-value ${
+                        safeNum(mlopsPerformance.net_pnl) >= 0 ? 'positive' : 'negative'
+                      }`}
+                    >
+                      ${safeLoc(mlopsPerformance.net_pnl)}
+                    </div>
+                  </div>
+                  <div className="kpi-card">
+                    <div className="kpi-label">Factor de beneficio</div>
+                    <div className="kpi-value">
+                      {mlopsPerformance.profit_factor === null
+                        ? '—'
+                        : safeFix(mlopsPerformance.profit_factor, 2)}
+                    </div>
+                  </div>
+                  <div className="kpi-card">
+                    <div className="kpi-label">Puntuación media del comité</div>
+                    <div className="kpi-value">
+                      {safeFix(safeNum(mlopsPerformance.avg_confidence) * 100, 1)}%
+                    </div>
+                  </div>
+                  <div className="kpi-card">
+                    <div className="kpi-label">Órdenes sin atribuir</div>
+                    <div className="kpi-value">{safeLoc(mlopsPerformance.unattributed_orders)}</div>
+                  </div>
+                </div>
+
+                <p style={{ margin: '14px 0 0', fontSize: '12px', color: '#64748b' }}>
+                  Solo se puntúan decisiones con entrada y salida completas. El Risk Manager se
+                  excluye de la precisión direccional. Las comisiones en BNB no se convierten
+                  automáticamente. Las tasas por rango son descriptivas, no una calibración ni
+                  una probabilidad de éxito.
+                </p>
+              </>
+            )}
+          </div>
+
+          {mlopsPerformance?.data_available && (
+            <>
+              <div className="panel" style={{ padding: '24px' }}>
+                <h3 style={{ margin: '0 0 14px', fontSize: '16px', fontWeight: 800 }}>
+                  🧠 Precisión por agente
+                </h3>
+                {mlopsPerformance.by_agent.length === 0 ? (
+                  <p style={{ color: '#94a3b8', fontSize: '13px' }}>
+                    Aún no hay decisiones cerradas para evaluar a los agentes.
+                  </p>
+                ) : (
+                  <div className="table-container">
+                    <table className="candles-table">
+                      <thead>
+                        <tr>
+                          <th>Agente</th>
+                          <th>Acierto</th>
+                          <th>Aciertos / evaluadas</th>
+                          <th>Abstenciones</th>
+                          <th>Puntuación media del agente</th>
+                          <th>Latencia media</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {mlopsPerformance.by_agent.map((agent) => (
+                          <tr key={agent.agent_type}>
+                            <td>{AGENT_LABELS[agent.agent_type] ?? agent.agent_type}</td>
+                            <td>{safeFix(agent.hit_rate_pct, 1)}%</td>
+                            <td>
+                              {agent.correct} / {agent.decisions_scored}
+                            </td>
+                            <td>{agent.abstained}</td>
+                            <td>{safeFix(safeNum(agent.avg_confidence) * 100, 1)}%</td>
+                            <td>{safeFix(agent.avg_processing_time_ms, 0)} ms</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+                  gap: '20px',
+                }}
+              >
+                <div className="panel" style={{ padding: '24px' }}>
+                  <h3 style={{ margin: '0 0 14px', fontSize: '16px', fontWeight: 800 }}>
+                    🎯 Rendimiento por señal
+                  </h3>
+                  {mlopsPerformance.by_signal.length === 0 ? (
+                    <p style={{ color: '#94a3b8', fontSize: '13px' }}>Sin datos todavía.</p>
+                  ) : (
+                    <div className="table-container">
+                      <table className="candles-table">
+                        <thead>
+                          <tr>
+                            <th>Señal</th>
+                            <th>Decisiones</th>
+                            <th>Acierto</th>
+                            <th>PnL neto</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {mlopsPerformance.by_signal.map((item) => (
+                            <tr key={item.signal}>
+                              <td>{SIGNAL_LABELS[item.signal] ?? item.signal}</td>
+                              <td>{item.decisions}</td>
+                              <td>
+                                {safeFix(item.hit_rate_pct, 1)}% ({item.correct}/{item.resolved})
+                              </td>
+                              <td
+                                style={{
+                                  color: safeNum(item.net_pnl) >= 0 ? '#10b981' : '#ef4444',
+                                }}
+                              >
+                                ${safeLoc(item.net_pnl)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                <div className="panel" style={{ padding: '24px' }}>
+                  <h3 style={{ margin: '0 0 14px', fontSize: '16px', fontWeight: 800 }}>
+                    💹 Rendimiento por símbolo
+                  </h3>
+                  {mlopsPerformance.by_symbol.length === 0 ? (
+                    <p style={{ color: '#94a3b8', fontSize: '13px' }}>Sin datos todavía.</p>
+                  ) : (
+                    <div className="table-container">
+                      <table className="candles-table">
+                        <thead>
+                          <tr>
+                            <th>Símbolo</th>
+                            <th>Decisiones</th>
+                            <th>Win rate</th>
+                            <th>PnL neto</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {mlopsPerformance.by_symbol.map((item) => (
+                            <tr key={item.symbol}>
+                              <td>{item.symbol}</td>
+                              <td>{item.decisions}</td>
+                              <td>
+                                {safeFix(item.win_rate_pct, 1)}% ({item.resolved} resueltas)
+                              </td>
+                              <td
+                                style={{
+                                  color: safeNum(item.net_pnl) >= 0 ? '#10b981' : '#ef4444',
+                                }}
+                              >
+                                ${safeLoc(item.net_pnl)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="panel" style={{ padding: '24px' }}>
+                <h3 style={{ margin: '0 0 14px', fontSize: '16px', fontWeight: 800 }}>
+                  📈 Resultados por rango de puntuación
+                </h3>
+                <div className="table-container">
+                  <table className="candles-table">
+                    <thead>
+                      <tr>
+                        <th>Rango de puntuación</th>
+                        <th>Decisiones cerradas</th>
+                        <th>Aciertos</th>
+                        <th>Tasa de acierto</th>
+                        <th>Evidencia</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {mlopsPerformance.confidence_buckets.map((bucket) => (
+                        <tr key={`${bucket.lower}-${bucket.upper}`}>
+                          <td>
+                            {safeFix(bucket.lower * 100, 0)}% – {safeFix(bucket.upper * 100, 0)}%
+                          </td>
+                          <td>{bucket.decisions}</td>
+                          <td>{bucket.correct}</td>
+                          <td>{safeFix(bucket.hit_rate_pct, 1)}%</td>
+                          <td>
+                            {bucket.sample_sufficient
+                              ? `Exploratoria (n=${bucket.decisions})`
+                              : `Muestra insuficiente (${bucket.decisions}/${bucket.minimum_sample_size})`}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ====================================================================
+          PESTAÑA 6: CONFIGURACIÓN & CLAVES (SIN RUIDO)
           ==================================================================== */}
       {activeTab === 'settings' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -1681,7 +1957,89 @@ export default function App() {
             )}
           </div>
 
+          {/* Control de ejecución administrado desde la app */}
+          {runtimeTradingConfig && (
+            <div className="panel" style={{ padding: '24px' }}>
+              <details className="advanced-options">
+              <summary>Entorno, límites y protecciones</summary>
+              <div className="advanced-options-content">
+              <p style={{ margin: '0 0 16px', fontSize: '13px', color: '#94a3b8' }}>
+                Opciones para usuarios avanzados. Los límites de riesgo y las claves se conservan separados por entorno.
+              </p>
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+                <label className="input-group" style={{ minWidth: '190px' }}>
+                  <span className="input-label">Red del exchange</span>
+                  <select
+                    className="select-input"
+                    value={runtimeTradingConfig.trading_environment}
+                    disabled={isSavingRuntimeConfig}
+                    onChange={async (event) => {
+                      const environment = event.target.value as 'testnet' | 'mainnet';
+                      if (environment === 'mainnet') {
+                        if (!runtimeTradingConfig?.credentials.mainnet) {
+                          toast.error('Primero guarda y prueba tus claves Mainnet en el panel de credenciales.');
+                          return;
+                        }
+                      }
+                      await saveRuntimeConfig({ trading_environment: environment }, environment === 'mainnet');
+                    }}
+                  >
+                    <option value="testnet">Testnet (recomendado)</option>
+                    <option value="mainnet">Mainnet (dinero real)</option>
+                  </select>
+                </label>
+                <label className="input-group" style={{ minWidth: '150px' }}>
+                  <span className="input-label">Máximo por orden (USDT)</span>
+                  <input className="text-input" type="number" min="1" step="1" value={runtimeMaxNotional} onChange={(event) => setRuntimeMaxNotional(event.target.value)} />
+                </label>
+                <label className="input-group" style={{ minWidth: '220px', flex: 1 }}>
+                  <span className="input-label">Allowlist de símbolos</span>
+                  <input className="text-input" value={runtimeAllowedSymbols} onChange={(event) => setRuntimeAllowedSymbols(event.target.value)} placeholder="BTC/USDT, ETH/USDT" />
+                </label>
+              </div>
+              <div style={{ display: 'flex', gap: '18px', flexWrap: 'wrap', margin: '15px 0', fontSize: '13px' }}>
+                <label style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <input type="checkbox" checked={runtimeTradingConfig.allow_mainnet_trading} onChange={(event) => {
+                    void saveRuntimeConfig({ allow_mainnet_trading: event.target.checked }, event.target.checked);
+                  }} />
+                  <span>Segundo opt-in: permitir Mainnet</span>
+                </label>
+                <label style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <input type="checkbox" checked={runtimeAutonomousReal} onChange={(event) => setRuntimeAutonomousReal(event.target.checked)} />
+                  <span>Permitir ejecución real autónoma</span>
+                </label>
+                <label style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <input type="checkbox" checked={runtimeOcoEnabled} onChange={(event) => setRuntimeOcoEnabled(event.target.checked)} />
+                  <span>Protección OCO nativa (Binance Spot)</span>
+                </label>
+                <span style={{ color: '#10b981', fontWeight: 700 }}>Confirmación manual por orden: siempre activa</span>
+              </div>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={isSavingRuntimeConfig}
+                onClick={() => void saveRuntimeConfig({
+                  real_trading_max_notional: Number(runtimeMaxNotional),
+                  real_trading_allowed_symbols: runtimeAllowedSymbols.split(',').map((symbol) => symbol.trim()).filter(Boolean),
+                  enable_autonomous_real_trading: runtimeAutonomousReal,
+                  real_trading_oco_enabled: runtimeOcoEnabled,
+                  require_manual_confirmation: true,
+                })}
+              >
+                {isSavingRuntimeConfig ? 'Guardando…' : 'Guardar límites y protecciones'}
+              </button>
+              <span style={{ marginLeft: '12px', color: '#94a3b8', fontSize: '12px' }}>
+                Claves Testnet: {runtimeTradingConfig.credentials.testnet ? 'configuradas' : 'faltan'} · Mainnet: {runtimeTradingConfig.credentials.mainnet ? 'configuradas' : 'faltan'}
+              </span>
+              </div>
+              </details>
+            </div>
+          )}
+
           {/* Trading Real y Alertas */}
+          <details className="advanced-options">
+            <summary>Diagnóstico, protecciones y alertas</summary>
+            <div className="advanced-options-content" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
           <div className="panel" style={{ padding: '24px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', gap: '12px', flexWrap: 'wrap' }}>
               <div>
@@ -1834,20 +2192,346 @@ export default function App() {
               </div>
               <div className="kpi-grid">
                 <div className="kpi-card" style={{ padding: '12px' }}>
-                  <span className="kpi-label">Pérdida Diaria Máx. Permitida</span>
-                  <span className="kpi-value">{safeFix(riskStatus.portfolio_daily_pnl_pct)}%</span>
+                  <span className="kpi-label">Pérdida Diaria Actual / Límite</span>
+                  <span className="kpi-value">
+                    {safeFix(riskStatus.daily_loss_pct)}% / {safeFix(riskStatus.max_daily_loss_pct)}%
+                  </span>
                 </div>
                 <div className="kpi-card" style={{ padding: '12px' }}>
-                  <span className="kpi-label">Drawdown Máximo de Cuenta</span>
-                  <span className="kpi-value">{safeFix(riskStatus.portfolio_drawdown_pct)}%</span>
+                  <span className="kpi-label">Drawdown Actual / Límite</span>
+                  <span className="kpi-value">
+                    {safeFix(riskStatus.current_drawdown_pct)}% / {safeFix(riskStatus.max_drawdown_pct)}%
+                  </span>
                 </div>
                 <div className="kpi-card" style={{ padding: '12px' }}>
-                  <span className="kpi-label">Posiciones Simultáneas Máx.</span>
-                  <span className="kpi-value">{riskStatus.max_allowed_positions} posiciones</span>
+                  <span className="kpi-label">Posiciones Abiertas / Máx.</span>
+                  <span className="kpi-value">
+                    {safeNum(riskStatus.open_positions_count)} / {safeNum(riskStatus.max_open_positions)}
+                  </span>
+                </div>
+                <div className="kpi-card" style={{ padding: '12px' }}>
+                  <span className="kpi-label">Exposición Bruta / Límite</span>
+                  <span className="kpi-value">
+                    {safeLoc(riskStatus.gross_exposure_usd, { maximumFractionDigits: 2 })} USDT
+                    {safeNum(riskStatus.current_equity_usd) > 0 && (
+                      <> ({safeFix((safeNum(riskStatus.gross_exposure_usd) / safeNum(riskStatus.current_equity_usd)) * 100)}%)</>
+                    )}
+                    {' / '}{safeFix(riskStatus.max_portfolio_exposure_pct, 0)}%
+                  </span>
                 </div>
               </div>
             </div>
           )}
+
+          {/* Drift de rendimiento (solo lectura) */}
+          {driftReport && (
+            <div className="panel" style={{ padding: '24px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+                <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 800 }}>
+                  📉 Drift de Rendimiento (solo lectura)
+                </h3>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <span
+                    style={{
+                      padding: '3px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 800,
+                      backgroundColor:
+                        driftReport.status === 'degraded'
+                          ? 'rgba(239, 68, 68, 0.2)'
+                          : driftReport.status === 'watch'
+                            ? 'rgba(245, 158, 11, 0.2)'
+                            : driftReport.status === 'stable'
+                              ? 'rgba(16, 185, 129, 0.2)'
+                              : 'rgba(148, 163, 184, 0.2)',
+                      color:
+                        driftReport.status === 'degraded'
+                          ? '#ef4444'
+                          : driftReport.status === 'watch'
+                            ? '#f59e0b'
+                            : driftReport.status === 'stable'
+                              ? '#10b981'
+                              : '#94a3b8',
+                    }}
+                  >
+                    {driftReport.status === 'degraded'
+                      ? 'DEGRADADO'
+                      : driftReport.status === 'watch'
+                        ? 'VIGILAR'
+                        : driftReport.status === 'stable'
+                          ? 'ESTABLE'
+                          : 'DATOS INSUFICIENTES'}
+                  </span>
+                  <button
+                    onClick={refreshDrift}
+                    style={{
+                      padding: '4px 10px',
+                      borderRadius: '6px',
+                      border: '1px solid rgba(255,255,255,0.15)',
+                      background: 'transparent',
+                      color: 'inherit',
+                      fontSize: '11px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Actualizar
+                  </button>
+                </div>
+              </div>
+              <div className="kpi-grid">
+                <div className="kpi-card" style={{ padding: '12px' }}>
+                  <span className="kpi-label">Muestra reciente / base</span>
+                  <span className="kpi-value">
+                    {safeNum(driftReport.recent.sample_size)} / {safeNum(driftReport.baseline.sample_size)}
+                  </span>
+                </div>
+                <div className="kpi-card" style={{ padding: '12px' }}>
+                  <span className="kpi-label">Acierto reciente / base</span>
+                  <span className="kpi-value">
+                    {safeMetric(driftReport.recent.win_rate_pct)}% / {safeMetric(driftReport.baseline.win_rate_pct)}%
+                  </span>
+                </div>
+                <div className="kpi-card" style={{ padding: '12px' }}>
+                  <span className="kpi-label">Retorno neto medio reciente / base</span>
+                  <span className="kpi-value">
+                    {safeMetric(driftReport.recent.avg_net_pnl_pct, 4)}% / {safeMetric(driftReport.baseline.avg_net_pnl_pct, 4)}%
+                  </span>
+                </div>
+                <div className="kpi-card" style={{ padding: '12px' }}>
+                  <span className="kpi-label">Profit factor reciente / base</span>
+                  <span className="kpi-value">
+                    {safeMetric(driftReport.recent.profit_factor)} / {safeMetric(driftReport.baseline.profit_factor)}
+                  </span>
+                </div>
+              </div>
+              <p style={{ margin: '12px 0 0', fontSize: '12px', opacity: 0.8 }}>
+                {driftReport.reasons.join(' · ')}
+              </p>
+              <p style={{ margin: '6px 0 0', fontSize: '11px', opacity: 0.55 }}>
+                {driftReport.disclaimer} No suspende trading ni ajusta el tamaño de las posiciones.
+              </p>
+            </div>
+          )}
+
+          {/* Oportunidades en sombra y coste de IA (solo lectura) */}
+          <div className="panel" style={{ padding: '24px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+              <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 800 }}>
+                🔎 Oportunidades en Sombra y Coste de IA
+              </h3>
+              <span
+                style={{
+                  padding: '3px 10px',
+                  borderRadius: '6px',
+                  fontSize: '11px',
+                  fontWeight: 800,
+                  backgroundColor: 'rgba(59, 130, 246, 0.2)',
+                  color: '#3b82f6',
+                }}
+              >
+                SOLO LECTURA · SIN EJECUCIÓN
+              </span>
+            </div>
+
+            {!latestShadowScan ? (
+              <p style={{ margin: 0, fontSize: '13px', opacity: 0.75 }}>
+                Todavía no hay escaneos shadow persistidos. El escáner no envía órdenes ni llama al LLM.
+              </p>
+            ) : (
+              <>
+                <div className="kpi-grid" style={{ marginBottom: '14px' }}>
+                  <div className="kpi-card" style={{ padding: '12px' }}>
+                    <span className="kpi-label">Decisión de política</span>
+                    <span
+                      className="kpi-value"
+                      style={{
+                        fontSize: '14px',
+                        color: opportunityAssessment?.decision === 'eligible_for_manual_review' ? '#f59e0b' : '#10b981',
+                      }}
+                    >
+                      {opportunityAssessment
+                        ? opportunityAssessment.decision === 'eligible_for_manual_review'
+                          ? 'REVISIÓN MANUAL'
+                          : 'ABSTENERSE'
+                        : 'SIN EVALUAR'}
+                    </span>
+                  </div>
+                  <div className="kpi-card" style={{ padding: '12px' }}>
+                    <span className="kpi-label">Candidato señalado</span>
+                    <span className="kpi-value" style={{ fontSize: '14px' }}>
+                      {opportunityAssessment?.selected_symbol || 'Ninguno'}
+                    </span>
+                  </div>
+                  <div className="kpi-card" style={{ padding: '12px' }}>
+                    <span className="kpi-label">Evaluaciones maduras</span>
+                    <span className="kpi-value" style={{ fontSize: '14px' }}>
+                      {safeNum(opportunityAssessment?.evidence?.matured_evaluations)}
+                    </span>
+                  </div>
+                  <div className="kpi-card" style={{ padding: '12px' }}>
+                    <span className="kpi-label">Evidencia neta media</span>
+                    <span className="kpi-value" style={{ fontSize: '14px' }}>
+                      {opportunityAssessment?.evidence?.mean_top_minus_alternatives_net_pct == null
+                        ? 'Sin datos'
+                        : `${safeFix(opportunityAssessment.evidence.mean_top_minus_alternatives_net_pct, 4)} pp`}
+                    </span>
+                  </div>
+                </div>
+
+                <div style={{ overflowX: 'auto', marginBottom: '12px' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                    <thead>
+                      <tr style={{ textAlign: 'left', opacity: 0.7 }}>
+                        <th style={{ padding: '6px 8px' }}>#</th>
+                        <th style={{ padding: '6px 8px' }}>Símbolo</th>
+                        <th style={{ padding: '6px 8px' }}>Movimiento</th>
+                        <th style={{ padding: '6px 8px' }}>Spread</th>
+                        <th style={{ padding: '6px 8px' }}>Neto tras coste</th>
+                        <th style={{ padding: '6px 8px' }}>Elegible</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {latestShadowScan.candidates.map((candidate) => {
+                        const assessed = opportunityAssessment?.candidates.find(
+                          (item) => item.symbol === candidate.symbol
+                        );
+                        return (
+                          <tr key={candidate.symbol} style={{ borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+                            <td style={{ padding: '6px 8px' }}>{candidate.rank ?? '-'}</td>
+                            <td style={{ padding: '6px 8px', fontWeight: 700 }}>{candidate.symbol}</td>
+                            <td style={{ padding: '6px 8px' }}>
+                              {candidate.observed_movement_less_spread_pct == null
+                                ? 'Sin datos'
+                                : `${safeFix(candidate.observed_movement_less_spread_pct, 4)}%`}
+                            </td>
+                            <td style={{ padding: '6px 8px' }}>
+                              {candidate.quoted_spread_pct == null
+                                ? 'No disponible'
+                                : `${safeFix(candidate.quoted_spread_pct, 4)}%`}
+                            </td>
+                            <td style={{ padding: '6px 8px' }}>
+                              {assessed?.cost_adjusted_movement_pct == null
+                                ? 'Sin datos'
+                                : `${safeFix(assessed.cost_adjusted_movement_pct, 4)}%`}
+                            </td>
+                            <td style={{ padding: '6px 8px', color: assessed?.eligible ? '#10b981' : '#f59e0b' }}>
+                              {assessed ? (assessed.eligible ? 'Sí' : 'No') : '-'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                <p style={{ margin: '0 0 10px', fontSize: '12px', opacity: 0.8 }}>
+                  {opportunityAssessment?.selection_reason ||
+                    'La política se abstiene por defecto hasta que existan datos frescos, spread acotado y evidencia neta madura.'}
+                </p>
+                <p style={{ margin: 0, fontSize: '11px', opacity: 0.6 }}>
+                  {opportunityAssessment?.evidence?.interpretation ||
+                    'Movimiento de precio descriptivo; no es P&L realizado ni probabilidad de beneficio.'}
+                </p>
+              </>
+            )}
+
+            <div style={{ marginTop: '14px' }}>
+              <h4 style={{ margin: '0 0 8px', fontSize: '13px', fontWeight: 800 }}>
+                🧠 Memoria de investigación vigente ({selectedSymbol})
+              </h4>
+              {!researchContext || researchContext.notes.length === 0 ? (
+                <p style={{ margin: 0, fontSize: '12px', opacity: 0.7 }}>
+                  Sin notas vigentes para este ámbito. La memoria no altera señales ni riesgo.
+                </p>
+              ) : (
+                <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '12px', lineHeight: 1.5 }}>
+                  {researchContext.notes.map((note) => (
+                    <li key={note.id}>
+                      <strong>{note.title}</strong>{' '}
+                      <span style={{ opacity: 0.7 }}>
+                        [{note.kind} · {note.validation_status}
+                        {note.timeframe ? ` · ${note.timeframe}` : ''}]
+                      </span>
+                      <div style={{ opacity: 0.8 }}>{note.statement}</div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p style={{ margin: '6px 0 0', fontSize: '11px', opacity: 0.55 }}>
+                {researchContext?.disclaimer ||
+                  'Contexto de solo lectura: no es una señal, probabilidad ni autorización para operar.'}{' '}
+                Solo se envía a la IA si el operador activa el opt-in y la nota está validada como
+                «supported».
+              </p>
+            </div>
+
+            <div
+              style={{
+                marginTop: '16px',
+                paddingTop: '12px',
+                borderTop: '1px solid rgba(255,255,255,0.08)',
+                display: 'flex',
+                gap: '24px',
+                flexWrap: 'wrap',
+                fontSize: '12px',
+              }}
+            >
+              <span>
+                <strong>IA:</strong>{' '}
+                {llmStatus?.mode === 'llm_with_fallback'
+                  ? `${llmStatus.primary_provider ?? 'n/d'} (fallback: ${(llmStatus.fallback_providers || []).join(', ') || 'ninguno'})`
+                  : 'Fallback determinista'}
+              </span>
+              <span>
+                <strong>Tokens hoy:</strong>{' '}
+                {safeNum(llmStatus?.usage?.tokens_used)}
+                {safeNum(llmStatus?.usage?.daily_token_budget) > 0
+                  ? ` / ${safeNum(llmStatus?.usage?.daily_token_budget)}`
+                  : ' (sin tope)'}
+              </span>
+              <span>
+                <strong>Llamadas:</strong> {safeNum(llmStatus?.usage?.requests)}
+              </span>
+              <span>
+                <strong>Fallbacks:</strong> {safeNum(llmStatus?.usage?.fallbacks)}
+              </span>
+              <span>
+                <strong>Coste IA est.:</strong>{' '}
+                {llmStatus?.usage?.pricing?.configured
+                  ? safeUsd(llmStatus?.usage?.estimated_cost_usd)
+                  : 'tarifas sin configurar'}
+              </span>
+              <span style={{ color: llmStatus?.usage?.budget_exhausted ? '#ef4444' : '#10b981' }}>
+                {llmStatus?.usage?.budget_exhausted ? 'Presupuesto agotado' : 'Presupuesto disponible'}
+              </span>
+            </div>
+            {Object.keys(llmStatus?.usage?.by_agent ?? {}).length > 0 && (
+              <div
+                style={{
+                  marginTop: '10px',
+                  display: 'flex',
+                  gap: '16px',
+                  flexWrap: 'wrap',
+                  fontSize: '11px',
+                  color: '#94a3b8',
+                }}
+              >
+                {Object.entries(llmStatus?.usage?.by_agent ?? {}).map(([agent, bucket]) => (
+                  <span key={agent}>
+                    <strong>{agent}</strong>: {safeNum(bucket.total_tokens)} tok
+                    {' · '}
+                    {safeNum(bucket.requests)} llamadas
+                    {' · '}
+                    {bucket.estimated_cost_usd == null
+                      ? 'coste n/d'
+                      : safeUsd(bucket.estimated_cost_usd)}
+                    {safeNum(bucket.failures) > 0 ? ` · ${safeNum(bucket.failures)} fallos` : ''}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
 
           {/* Salud de los Servicios del Sistema */}
           <div className="panel" style={{ padding: '24px' }}>
@@ -1878,6 +2562,8 @@ export default function App() {
               ))}
             </div>
           </div>
+            </div>
+          </details>
         </div>
       )}
     </div>

@@ -80,7 +80,7 @@ Analyze the following market indicators for {task.symbol}:
 Output STRICT JSON with the following structure:
 {{
   "signal": "strong_buy" | "buy" | "neutral" | "sell" | "strong_sell",
-  "confidence": float between 0.0 and 1.0,
+  "confidence": 0.0,
   "reasoning": "Detailed technical explanation (minimum 50 characters)",
   "key_factors": [
     {{"name": "factor name", "impact": "bullish" | "bearish" | "neutral", "weight": 0.0-1.0, "description": "detail"}}
@@ -89,7 +89,11 @@ Output STRICT JSON with the following structure:
   "stop_loss": float,
   "take_profit": float
 }}
+
+The confidence field is only your heuristic signal-strength score, not a calibrated probability of success.
 """
+            if task.research_context:
+                prompt = f"{prompt}\n\n{task.research_context}"
             try:
                 llm_req = LLMRequest(
                     messages=[
@@ -99,8 +103,9 @@ Output STRICT JSON with the following structure:
                         ),
                         LLMMessage(role="user", content=prompt),
                     ],
-                    model="gpt-4o-mini",
+                    model="",
                     temperature=0.1,
+                    response_format="json",
                     metadata={"agent_type": self.agent_type.value},
                 )
                 llm_res = await self.llm.complete(llm_req)

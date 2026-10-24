@@ -44,12 +44,11 @@ async def record_execution(
     try:
         await repo.save_order(order)
 
-        # Persist the trade associated with this order (rejected orders have none).
-        trade = next(
-            (t for t in trading_service.get_trades(mode) if t.order_id == order.id),
-            None,
-        )
-        if trade is not None:
+        # Persist the trade(s) associated with this order. Partially filled
+        # orders can produce several fills, and skipping them would make the
+        # journal under-report exposure after a restart.
+        trades = [t for t in trading_service.get_trades(mode) if t.order_id == order.id]
+        for trade in trades:
             await repo.save_trade(trade)
 
         # Reconcile open positions: upsert current ones, drop closed ones.

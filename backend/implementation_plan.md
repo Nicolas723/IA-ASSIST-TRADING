@@ -43,9 +43,9 @@
 | Paper trading | Simulación completa | `PaperExchange` + journal durable + **rehidratación al reiniciar** | ✅ |
 | Comité IA | Multi-agente + LLM opcional | Técnico, Price Action, Risk Manager, Coordinador (determinista; LLM opcional) | ✅ |
 | Auditoría | `DecisionLog` total | `decision_logs` (payload JSON + columnas indexables) leído por `/api/v1/audit` | ✅ |
-| Dashboard | Centro de control | React por pestañas (Asistente, Mercado, Cartera, Comité, Config) | ✅ |
+| Dashboard | Centro de control | React por pestañas (Asistente, Mercado, Cartera, Comité, MLOps, Config) | ✅ |
 | Trading real (Fase 8) | Binance/Bybit real + alertas | **Implementado**: ejecución real/testnet vía CCXT con interlocks, guardián SL/TP local, OCO nativo de Binance spot (opt-in), rehidratación/reconciliación del ledger real, idempotencia, alertas Telegram/webhook/email y panel UI | ✅ Completada |
-| MLOps / aprendizaje (Fase 9) | Métricas + feedback continuo | Observabilidad básica; sin bucle de aprendizaje | ⏳ Pendiente |
+| MLOps / aprendizaje (Fase 9) | Métricas + feedback continuo | Atribución por `coordinator_decision_id`, resultados y métricas por agente/señal/símbolo; gateway LLM con proveedor principal/fallback; controles runtime paper/real y testnet/mainnet | 🟡 MLOps inicial implementado; aprendizaje online todavía no implementado |
 | Infra prod | `docker-compose.prod.yml`, nginx/SSL | Solo `infra/docker/docker-compose.yml` (dev) | ⏳ Pendiente |
 
 **Divergencias clave respecto al plan original**
@@ -393,8 +393,10 @@ ai-trading-assistant/
 | ✅ Fase 8 | Trading real + alertas | **Completada** |
 | ✅ Fase 8.1 | Endurecimiento real: rehidratación, reconciliación, idempotencia y smoke test | **Completada** |
 | ✅ Fase 8.2 | OCO nativo de Binance spot: flag opt-in, cancelación segura, reconciliación, descubrimiento al reiniciar y detección de piernas ejecutadas | **Completada y validada en testnet** |
-| ⏳ Fase 9 | MLOps + aprendizaje continuo | **Pendiente** |
+| 🟡 Fase 9.1 | Atribución y métricas MLOps, endpoints y panel | **Implementada; migración aplicada en la base local** |
+| 🟡 IA | Gateway LLM conectado al comité; proveedor principal, fallback ordenado y fallback determinista | **Implementado; requiere configurar claves del proveedor** |
+| 🟡 Operación | Configuración runtime de modo, entorno y límites desde la app; vault separado por testnet/mainnet | **Implementada y con pruebas locales** |
 
 ---
 
-*Estado: Fases 0–6, 8, 8.1 y 8.2 completadas y validadas en testnet; Fase 7 parcial (sin tests de frontend); alertas Telegram configuradas y probadas; Fase 9 pendiente — 2026-10-23*
+*Estado: Fases 0–6, 8, 8.1 y 8.2 completadas y validadas en testnet; Fase 7 parcial; incremento inicial de Fase 9 y controles runtime implementados. Pendiente aplicar migración y validar en el entorno integrado — 2026-10-23*

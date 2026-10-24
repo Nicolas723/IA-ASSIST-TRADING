@@ -5,7 +5,7 @@ Simulates order fills, slippage, maker/taker fees, and maintains real-time paper
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -37,6 +37,7 @@ class PlaceOrderRequest(BaseModel):
     stop_loss: float | None = None
     take_profit: float | None = None
     strategy_id: UUID | None = None
+    coordinator_decision_id: UUID | None = None
     client_order_id: str | None = None
     notes: str = ""
 
@@ -60,6 +61,8 @@ class PaperExchange:
         self.realized_pnl = Decimal("0")
         self.total_fees_paid = Decimal("0")
         self.peak_equity = self.initial_balance
+        self._daily_start_equity = self.initial_balance
+        self._daily_reference_date: date | None = datetime.now(tz=UTC).date()
 
     def reset_account(self, initial_balance: float = 10000.0) -> None:
         self.initial_balance = Decimal(str(initial_balance))
@@ -70,6 +73,8 @@ class PaperExchange:
         self.realized_pnl = Decimal("0")
         self.total_fees_paid = Decimal("0")
         self.peak_equity = self.initial_balance
+        self._daily_start_equity = self.initial_balance
+        self._daily_reference_date = datetime.now(tz=UTC).date()
         logger.info("paper_exchange_reset", initial_balance=initial_balance)
 
     def restore(
@@ -81,6 +86,9 @@ class PaperExchange:
         available_balance: Decimal | None = None,
         realized_pnl: Decimal | None = None,
         peak_equity: Decimal | None = None,
+        daily_pnl: Decimal | None = None,
+        snapshot_equity: Decimal | None = None,
+        snapshot_updated_at: datetime | None = None,
     ) -> None:
         """
         Rehydrate the virtual exchange from the durable journal.
@@ -104,6 +112,14 @@ class PaperExchange:
             self.peak_equity = self.available_balance
 
         self.total_fees_paid = sum((trade.commission for trade in trades), Decimal("0"))
+        today = datetime.now(tz=UTC).date()
+        if snapshot_updated_at is not None and snapshot_updated_at.date() == today:
+            self._daily_reference_date = today
+            self._daily_start_equity = (snapshot_equity or self.available_balance) - (
+                daily_pnl or Decimal("0")
+            )
+        else:
+            self._daily_reference_date = None
 
         logger.info(
             "paper_exchange_restored",
@@ -122,6 +138,20 @@ class PaperExchange:
         order_id = uuid4()
         mkt_price_dec = Decimal(str(current_market_price))
         qty_dec = Decimal(str(req.quantity))
+
+        # A closing order inherits the decision that opened the position, so the
+        # realised result can be attributed back to the AI committee decision.
+        matching_pos_key: UUID | None = None
+        matching_position: Position | None = None
+        if req.side == OrderSide.SELL:
+            matching_pos_key = next(
+                (k for k, p in self.positions.items() if p.symbol == req.symbol), None
+            )
+            if matching_pos_key is not None:
+                matching_position = self.positions[matching_pos_key]
+        coordinator_decision_id = req.coordinator_decision_id or (
+            matching_position.coordinator_decision_id if matching_position else None
+        )
 
         # Apply slippage
         if req.side == OrderSide.BUY:
@@ -149,6 +179,8 @@ class PaperExchange:
                     stop_price=Decimal(str(req.stop_loss)) if req.stop_loss else None,
                     status=OrderStatus.REJECTED,
                     rejection_reason=f"Insufficient funds: Required ${total_required:.2f}, Available ${self.available_balance:.2f}",
+                    strategy_id=req.strategy_id,
+                    coordinator_decision_id=coordinator_decision_id,
                     created_at=now,
                     notes=req.notes,
                 )
@@ -173,6 +205,7 @@ class PaperExchange:
             commission=fee,
             status=OrderStatus.FILLED,
             strategy_id=req.strategy_id,
+            coordinator_decision_id=coordinator_decision_id,
             created_at=now,
             submitted_at=now,
             filled_at=now,
@@ -193,6 +226,7 @@ class PaperExchange:
             commission=fee,
             commission_asset="USDT",
             strategy_id=req.strategy_id,
+            coordinator_decision_id=coordinator_decision_id,
             executed_at=now,
         )
         self.trades.append(trade)
@@ -216,6 +250,7 @@ class PaperExchange:
                 stop_loss=Decimal(str(req.stop_loss)) if req.stop_loss else None,
                 take_profit=Decimal(str(req.take_profit)) if req.take_profit else None,
                 strategy_id=req.strategy_id,
+                coordinator_decision_id=coordinator_decision_id,
                 opened_at=now,
                 updated_at=now,
             )
@@ -223,10 +258,7 @@ class PaperExchange:
 
         elif req.side == OrderSide.SELL:
             # Close existing position matching symbol if any
-            matching_pos_key = next(
-                (k for k, p in self.positions.items() if p.symbol == req.symbol), None
-            )
-            if matching_pos_key:
+            if matching_pos_key is not None:
                 pos = self.positions.pop(matching_pos_key)
                 pnl = (exec_price - pos.entry_price) * pos.quantity - fee
                 self.realized_pnl += pnl
@@ -256,6 +288,8 @@ class PaperExchange:
             side=OrderSide.SELL,
             order_type=OrderType.MARKET,
             quantity=float(pos.quantity),
+            strategy_id=pos.strategy_id,
+            coordinator_decision_id=pos.coordinator_decision_id,
             notes=f"Manual Close of Position {str(position_id)[:8]}",
         )
         return self.place_order(sell_order_req, current_market_price)
@@ -276,6 +310,11 @@ class PaperExchange:
         positions_notional = sum((p.notional_value for p in positions_list), Decimal("0"))
         total_equity = self.available_balance + positions_notional + unrealized_pnl
 
+        today = datetime.now(tz=UTC).date()
+        if self._daily_reference_date != today:
+            self._daily_reference_date = today
+            self._daily_start_equity = total_equity
+
         if total_equity > self.peak_equity:
             self.peak_equity = total_equity
 
@@ -289,6 +328,7 @@ class PaperExchange:
             base_currency="USDT",
             positions=positions_list,
             total_realized_pnl=self.realized_pnl,
+            daily_pnl=total_equity - self._daily_start_equity,
             peak_value=self.peak_equity,
             updated_at=datetime.now(tz=UTC),
         )

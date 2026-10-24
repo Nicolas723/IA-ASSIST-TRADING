@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
@@ -70,8 +72,10 @@ class FakeRisk:
 
     def __init__(self, allowed: bool = True) -> None:
         self.allowed = allowed
+        self.last_request: Any = None
 
     def validate_order(self, request: Any) -> Any:
+        self.last_request = request
         return SimpleNamespace(
             is_allowed=self.allowed,
             violation_reasons=[] if self.allowed else ["Riesgo máximo excedido"],
@@ -85,6 +89,8 @@ class FakeAdapter:
         self.balances = {"USDT": 10_000.0, "BTC": 1.0}
         self.last_place_kwargs: dict[str, Any] = {}
         self.place_calls = 0
+        self.order_status = OrderStatus.FILLED
+        self.filled_quantity_override: Decimal | None = None
         self.fail_on_sell = False
         self.fail_oco_create = False
         self.fail_oco_cancel = False
@@ -92,6 +98,10 @@ class FakeAdapter:
         self.oco_create_calls: list[dict[str, Any]] = []
         self.oco_cancel_calls: list[tuple[str, str]] = []
         self.oco_fetch_calls: list[tuple[str, str]] = []
+        self.fetched_order: Order | None = None
+        self.fetch_order_calls: list[dict[str, Any]] = []
+        self.open_orders: list[Order] = []
+        self.fetch_open_orders_calls: list[str | None] = []
         self.oco_create_response: dict[str, Any] = {
             "orderListId": 777,
             "listOrderStatus": "EXECUTING",
@@ -110,13 +120,25 @@ class FakeAdapter:
     async def fetch_free_balance(self, asset: str) -> float:
         return self.free_balance
 
+    async def fetch_order(
+        self, symbol: str, *, client_order_id: str | None = None, order_id: str | None = None
+    ) -> Order | None:
+        self.fetch_order_calls.append(
+            {"symbol": symbol, "client_order_id": client_order_id, "order_id": order_id}
+        )
+        return self.fetched_order
+
+    async def fetch_open_orders(self, symbol: str | None = None) -> list[Order]:
+        self.fetch_open_orders_calls.append(symbol)
+        return list(self.open_orders)
+
     async def place_order(self, **kwargs: Any) -> Order:
         self.last_place_kwargs = kwargs
         self.place_calls += 1
         side = kwargs["side"]
         if self.fail_on_sell and side == OrderSide.SELL:
             raise RuntimeError("sell failed")
-        quantity = Decimal(str(kwargs["quantity"]))
+        quantity = self.filled_quantity_override or Decimal(str(kwargs["quantity"]))
         price = Decimal("50_000") if side == OrderSide.BUY else Decimal("51_000")
         return Order(
             symbol=kwargs["symbol"],
@@ -125,7 +147,7 @@ class FakeAdapter:
             side=side,
             order_type=kwargs["order_type"],
             quantity=quantity,
-            status=OrderStatus.FILLED,
+            status=self.order_status,
             filled_quantity=quantity,
             average_fill_price=price,
             commission=Decimal("1"),
@@ -201,6 +223,7 @@ def buy_request(
     stop_loss: float | None = 49_000,
     take_profit: float | None = 55_000,
     client_order_id: str | None = None,
+    coordinator_decision_id=None,
 ) -> PlaceOrderRequest:
     return PlaceOrderRequest(
         symbol=symbol,
@@ -210,6 +233,7 @@ def buy_request(
         stop_loss=stop_loss,
         take_profit=take_profit,
         client_order_id=client_order_id,
+        coordinator_decision_id=coordinator_decision_id,
     )
 
 
@@ -353,6 +377,203 @@ async def test_place_order_records_position_trade_and_alert() -> None:
     assert alerts.calls[0][2] == AlertSeverity.SUCCESS
 
 
+async def test_partially_filled_buy_is_tracked_with_filled_quantity() -> None:
+    service, adapter = make_service()
+    adapter.order_status = OrderStatus.PARTIALLY_FILLED
+    adapter.filled_quantity_override = Decimal("0.04")
+
+    order = await service.place_order(
+        buy_request(quantity=0.1), current_market_price=50_000, confirm=True
+    )
+
+    assert order.status == OrderStatus.PARTIALLY_FILLED
+    assert len(service.get_positions()) == 1
+    assert service.get_positions()[0].quantity == Decimal("0.04")
+    assert service.get_positions()[0].stop_loss == Decimal("49000.0")
+    assert len(service.get_trades()) == 1
+    assert service.get_trades()[0].quantity == Decimal("0.04")
+    assert adapter.closed
+
+
+def make_fetched_order(
+    *,
+    status: OrderStatus,
+    filled: Decimal,
+    price: Decimal,
+    commission: Decimal,
+    client_order_id: str = "ata-restart",
+    quantity: Decimal = Decimal("0.1"),
+) -> Order:
+    return Order(
+        symbol="BTC/USDT",
+        exchange=Exchange.BINANCE,
+        mode=ExecutionMode.REAL,
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        quantity=quantity,
+        status=status,
+        filled_quantity=filled,
+        average_fill_price=price,
+        commission=commission,
+        client_order_id=client_order_id,
+    )
+
+
+async def test_restored_open_order_books_only_new_fills_once() -> None:
+    service, adapter = make_service()
+    local = Order(
+        symbol="BTC/USDT",
+        exchange=Exchange.BINANCE,
+        mode=ExecutionMode.REAL,
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        quantity=Decimal("0.1"),
+        status=OrderStatus.OPEN,
+        client_order_id="ata-restart",
+        stop_loss=Decimal("49000"),
+        take_profit=Decimal("55000"),
+    )
+    service.restore(positions=[], orders=[local], trades=[])
+    service._on_reconcile = AsyncMock()  # type: ignore[method-assign]
+
+    adapter.fetched_order = make_fetched_order(
+        status=OrderStatus.PARTIALLY_FILLED,
+        filled=Decimal("0.04"),
+        price=Decimal("50000"),
+        commission=Decimal("0.4"),
+    )
+    assert await service.reconcile_open_orders() == 1
+
+    assert service.get_orders()[0].status == OrderStatus.PARTIALLY_FILLED
+    assert service.get_positions()[0].quantity == Decimal("0.04")
+    assert [trade.quantity for trade in service.get_trades()] == [Decimal("0.04")]
+
+    adapter.fetched_order = make_fetched_order(
+        status=OrderStatus.FILLED,
+        filled=Decimal("0.1"),
+        price=Decimal("50000"),
+        commission=Decimal("1.0"),
+    )
+    assert await service.reconcile_open_orders() == 1
+
+    assert service.get_orders()[0].status == OrderStatus.FILLED
+    assert service.get_positions()[0].quantity == Decimal("0.1")
+    assert [trade.quantity for trade in service.get_trades()] == [
+        Decimal("0.04"),
+        Decimal("0.06"),
+    ]
+    assert service._on_reconcile.await_count == 2
+
+    # A third poll has nothing left to reconcile and must not duplicate fills.
+    assert await service.reconcile_open_orders() == 0
+    assert len(service.get_trades()) == 2
+
+
+async def test_open_order_without_client_id_is_not_reconciled_by_guess() -> None:
+    service, adapter = make_service()
+    local = Order(
+        symbol="BTC/USDT",
+        exchange=Exchange.BINANCE,
+        mode=ExecutionMode.REAL,
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        quantity=Decimal("0.1"),
+        status=OrderStatus.OPEN,
+    )
+    service.restore(positions=[], orders=[local], trades=[])
+    adapter.fetched_order = make_fetched_order(
+        status=OrderStatus.FILLED,
+        filled=Decimal("0.1"),
+        price=Decimal("50000"),
+        commission=Decimal("1"),
+        client_order_id="",
+    )
+
+    assert await service.reconcile_open_orders() == 0
+    assert service.get_orders()[0].status == OrderStatus.OPEN
+    assert service.get_positions() == []
+
+
+async def test_discovery_adopts_only_own_untracked_open_orders() -> None:
+    service, adapter = make_service()
+    service._on_execution = AsyncMock()  # type: ignore[method-assign]
+    own = make_fetched_order(
+        status=OrderStatus.PARTIALLY_FILLED,
+        filled=Decimal("0.04"),
+        price=Decimal("50000"),
+        commission=Decimal("0.4"),
+        client_order_id="ata-crash-window",
+    )
+    foreign = make_fetched_order(
+        status=OrderStatus.OPEN,
+        filled=Decimal("0"),
+        price=Decimal("50000"),
+        commission=Decimal("0"),
+        client_order_id="manual-order",
+    )
+    tracked = make_fetched_order(
+        status=OrderStatus.OPEN,
+        filled=Decimal("0"),
+        price=Decimal("50000"),
+        commission=Decimal("0"),
+        client_order_id="ata-already-known",
+    )
+    service.restore(positions=[], orders=[tracked], trades=[])
+    adapter.open_orders = [own, foreign, tracked]
+
+    assert await service.discover_untracked_orders() == 1
+
+    assert [order.client_order_id for order in service.get_orders()] == [
+        "ata-already-known",
+        "ata-crash-window",
+    ]
+    assert service.get_positions()[0].quantity == Decimal("0.04")
+    assert [trade.quantity for trade in service.get_trades()] == [Decimal("0.04")]
+    service._on_execution.assert_awaited_once()
+    assert adapter.closed
+
+
+async def test_discovery_is_idempotent_across_restarts() -> None:
+    service, adapter = make_service()
+    own = make_fetched_order(
+        status=OrderStatus.OPEN,
+        filled=Decimal("0"),
+        price=Decimal("50000"),
+        commission=Decimal("0"),
+        client_order_id="ata-crash-window",
+    )
+    adapter.open_orders = [own]
+
+    assert await service.discover_untracked_orders() == 1
+    assert await service.discover_untracked_orders() == 0
+    assert len(service.get_orders()) == 1
+
+
+async def test_real_order_and_close_preserve_decision_attribution() -> None:
+    service, _ = make_service()
+    decision_id = uuid4()
+
+    order = await service.place_order(
+        buy_request(coordinator_decision_id=decision_id),
+        current_market_price=50_000,
+        confirm=True,
+    )
+    assert order.coordinator_decision_id == decision_id
+    assert service.get_positions()[0].coordinator_decision_id == decision_id
+    assert service.get_trades()[0].coordinator_decision_id == decision_id
+
+    position = service.get_positions()[0]
+    sell = await service.close_position(
+        position_id=position.id,
+        current_market_price=51_000,
+        confirm=True,
+    )
+
+    assert sell is not None
+    assert sell.coordinator_decision_id == decision_id
+    assert service.get_trades()[-1].coordinator_decision_id == decision_id
+
+
 async def test_place_order_risk_rejection_does_not_record_position() -> None:
     service, _ = make_service(risk=FakeRisk(allowed=False))
 
@@ -360,6 +581,17 @@ async def test_place_order_risk_rejection_does_not_record_position() -> None:
         await service.place_order(buy_request(), current_market_price=50_000, confirm=True)
 
     assert service.get_positions() == []
+
+
+async def test_live_preflight_includes_existing_portfolio_exposure() -> None:
+    risk = FakeRisk()
+    service, _ = make_service(risk=risk)
+
+    await service.place_order(buy_request(quantity=0.1), current_market_price=50_000, confirm=True)
+    await service.place_order(buy_request(quantity=0.1), current_market_price=50_000, confirm=True)
+
+    assert risk.last_request.current_symbol_exposure_usd == pytest.approx(5_000)
+    assert risk.last_request.current_total_exposure_usd == pytest.approx(5_000)
 
 
 async def test_close_position_sells_and_removes_position() -> None:
@@ -1088,7 +1320,7 @@ async def test_autonomous_engine_blocks_real_mode_by_default(monkeypatch: Any) -
     engine = AutonomousEngine()
     engine.config.execution_mode = "real"
 
-    with pytest.raises(DomainValidationError, match="Autonomous real trading is disabled"):
+    with pytest.raises(DomainValidationError, match="bot autónomo en modo real está deshabilitado"):
         await engine.start()
 
 

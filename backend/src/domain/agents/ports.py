@@ -10,6 +10,7 @@ import abc
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from datetime import datetime
     from uuid import UUID
 
     from src.domain.agents.entities import CoordinatorDecision
@@ -38,6 +39,7 @@ class DecisionRepositoryPort(abc.ABC):
         self,
         symbol: SymbolStr | None = None,
         limit: int = 20,
+        since: datetime | None = None,
     ) -> list[CoordinatorDecision]:
-        """List decisions, newest first, optionally filtered by symbol."""
+        """List decisions, newest first, optionally filtered by symbol/date."""
         ...

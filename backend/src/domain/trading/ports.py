@@ -12,6 +12,7 @@ import abc
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from datetime import datetime
     from uuid import UUID
 
     from src.domain.market.entities import Exchange, SymbolStr
@@ -53,6 +54,23 @@ class TradingRepositoryPort(abc.ABC):
         limit: int = 100,
     ) -> list[Order]:
         """List orders, newest first, optionally filtered."""
+        ...
+
+    @abc.abstractmethod
+    async def list_orders_for_attribution(
+        self,
+        mode: ExecutionMode | None = None,
+        symbol: SymbolStr | None = None,
+        since: datetime | None = None,
+        decision_id: UUID | None = None,
+        limit: int = 5000,
+    ) -> list[Order]:
+        """
+        List filled orders for decision/outcome attribution.
+
+        Unlike ``list_orders`` this is deliberately scoped to filled executions
+        and supports filtering by the linked coordinator decision.
+        """
         ...
 
     # -- Trades -------------------------------------------------------------

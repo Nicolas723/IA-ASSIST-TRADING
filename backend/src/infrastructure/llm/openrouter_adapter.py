@@ -23,25 +23,13 @@ class OpenRouterAdapter(BaseLLMAdapter):
     def __init__(self) -> None:
         settings = get_settings()
         self._client = AsyncOpenAI(
-            api_key=settings.openai.api_key,  # Using fallback if openrouter key not specified? No, let's use the actual settings.
-            base_url="https://openrouter.ai/api/v1",
+            api_key=settings.openrouter.api_key,
+            base_url=settings.openrouter.base_url,
             timeout=60.0,
             max_retries=0,
         )
 
-        # Override with actual OpenRouter key
-        # Assuming settings have openrouter config, or we fallback to openai key if not set.
-        # But settings model doesn't currently define OpenRouter explicitly, let's add it via settings override logic if needed,
-        # Wait, the settings has OpenRouter: settings.openrouter.api_key? Let's check settings.py
-        # Yes, OPENROUTER_API_KEY is in .env.example, let's assume it was added to settings.
-        # I did not add OpenRouter settings to pydantic model in settings.py, let's assume I did or we use env vars.
-        # Actually I missed OpenRouterSettings in settings.py, let's patch it or just use fallback to openai key if openrouter is not defined.
-        # Let's import os to get it if missing in settings.
-        import os
-
-        openrouter_key = os.getenv("OPENROUTER_API_KEY")
-        if openrouter_key:
-            self._client.api_key = openrouter_key
+        self._default_model = settings.openrouter.default_model
 
     @property
     def provider(self) -> LLMProvider:
@@ -62,7 +50,7 @@ class OpenRouterAdapter(BaseLLMAdapter):
                 messages.append({"role": msg.role, "content": msg.content})
 
             response = await self._client.chat.completions.create(
-                model=request.model or "meta-llama/llama-3-8b-instruct:free",
+                model=request.model or self._default_model,
                 messages=messages,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,

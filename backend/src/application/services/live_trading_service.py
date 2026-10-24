@@ -14,10 +14,10 @@ import asyncio
 import contextlib
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
@@ -47,7 +47,6 @@ from src.shared.logging.setup import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
-    from uuid import UUID
 
     from src.application.services.alert_service import AlertService
     from src.application.services.risk_service import RiskService
@@ -67,6 +66,7 @@ class LiveTradingStatus(BaseModel):
 
     enabled: bool
     execution_mode: str
+    environment: str = "testnet"
     exchange: str
     testnet: bool
     mainnet_allowed: bool
@@ -75,6 +75,7 @@ class LiveTradingStatus(BaseModel):
     max_notional: Decimal
     require_manual_confirmation: bool
     autonomous_real_enabled: bool
+    available_environments: list[str] = Field(default_factory=list)
     open_positions: int = 0
     guard_running: bool = False
     protection_mode: str = "local_guard"
@@ -95,12 +96,17 @@ class OcoProtection(BaseModel):
     take_profit: Decimal | None = None
     stop_loss: Decimal | None = None
     stop_limit_price: Decimal | None = None
+    coordinator_decision_id: UUID | None = None
     status: str = "EXECUTING"
     created_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
 
 
 class LiveTradingService:
     """Execute real orders through CCXT while enforcing platform safeguards."""
+
+    # Every order created by this service carries this prefix. It is the only
+    # safe basis for adopting exchange-side orders during startup discovery.
+    OWN_CLIENT_ORDER_PREFIX = "ata-"
 
     def __init__(
         self,
@@ -114,12 +120,18 @@ class LiveTradingService:
         self.alert_service = alert_service
         self.settings = settings or get_settings()
 
+        setter = getattr(self.vault_service, "set_active_environment", None)
+        if callable(setter):
+            setter(self.settings.trading_environment.value)
+
         self._positions: dict[str, Position] = {}
         self._orders: list[Order] = []
         self._trades: list[Trade] = []
         self._usdt_balance: Decimal | None = None
         self._realized_pnl = Decimal("0")
         self._peak_value = Decimal("0")
+        self._daily_start_equity = Decimal("0")
+        self._daily_reference_date: date | None = datetime.now(tz=UTC).date()
         self._lock = asyncio.Lock()
         self._closing: set[UUID] = set()
         self._order_ids: set[UUID] = set()
@@ -149,7 +161,15 @@ class LiveTradingService:
 
     def status(self, exchange: Exchange | str | None = None) -> LiveTradingStatus:
         exchange_id = self._exchange(exchange)
+        environment = self.settings.trading_environment.value
         summary = self.vault_service.vault.get_credential_summary(exchange_id.value)
+        available_environments: list[str] = []
+        env_lister = getattr(self.vault_service.vault, "list_environments", None)
+        if callable(env_lister):
+            try:
+                available_environments = list(env_lister(exchange_id.value))
+            except Exception:
+                available_environments = []
         oco_enabled = self.settings.real_trading_oco_enabled and exchange_id == Exchange.BINANCE
         if not oco_enabled:
             protection_mode = "local_guard"
@@ -162,14 +182,16 @@ class LiveTradingService:
         return LiveTradingStatus(
             enabled=self.settings.real_trading_enabled,
             execution_mode=self.settings.execution_mode.value,
+            environment=environment,
             exchange=exchange_id.value,
-            testnet=summary.is_testnet if summary else True,
+            testnet=(summary.is_testnet if summary else environment == "testnet"),
             mainnet_allowed=self.settings.allow_mainnet_trading,
             credentials_configured=summary is not None,
             allowed_symbols=list(self.settings.real_trading_allowed_symbols),
             max_notional=self.settings.real_trading_max_notional,
             require_manual_confirmation=self.settings.require_manual_confirmation,
             autonomous_real_enabled=self.settings.enable_autonomous_real_trading,
+            available_environments=available_environments,
             open_positions=len(self._positions),
             guard_running=self._guard_task is not None and not self._guard_task.done(),
             protection_mode=protection_mode,
@@ -192,14 +214,18 @@ class LiveTradingService:
     def _assert_can_trade(self, exchange: Exchange, confirm: bool) -> None:
         if not self.settings.real_trading_enabled:
             raise SecurityError(
-                "Real trading is disabled. Set EXECUTION_MODE=real and ENABLE_REAL_TRADING=true."
+                "Real trading is disabled. Actívalo en Configuración > Control de ejecución."
             )
         summary = self.vault_service.vault.get_credential_summary(exchange.value)
         if summary is None:
-            raise SecurityError(f"No credentials configured for {exchange.value}.")
+            environment = self.settings.trading_environment.value
+            raise SecurityError(
+                f"No hay credenciales {environment} configuradas para {exchange.value}."
+            )
         if not summary.is_testnet and not self.settings.allow_mainnet_trading:
             raise SecurityError(
-                "Mainnet credentials detected. Set ALLOW_MAINNET_TRADING=true to trade real funds."
+                "Mainnet seleccionado. Activa la segunda confirmación "
+                "(ALLOW_MAINNET_TRADING) en Configuración > Control de ejecución."
             )
         if self.settings.require_manual_confirmation and not confirm:
             raise SecurityError(
@@ -247,6 +273,9 @@ class LiveTradingService:
         available_balance: Decimal | None = None,
         realized_pnl: Decimal | None = None,
         peak_value: Decimal | None = None,
+        daily_pnl: Decimal | None = None,
+        snapshot_equity: Decimal | None = None,
+        snapshot_updated_at: datetime | None = None,
     ) -> None:
         """Replace the in-memory ledger with the journal snapshot."""
         self._positions = {
@@ -267,6 +296,14 @@ class LiveTradingService:
             self._realized_pnl = realized_pnl
         if peak_value is not None:
             self._peak_value = peak_value
+        today = datetime.now(tz=UTC).date()
+        if snapshot_updated_at is not None and snapshot_updated_at.date() == today:
+            self._daily_reference_date = today
+            self._daily_start_equity = (snapshot_equity or self._usdt_balance or Decimal("0")) - (
+                daily_pnl or Decimal("0")
+            )
+        else:
+            self._daily_reference_date = None
         self._last_reconcile = 0.0
         self._oco_protections = {}
         self._oco_discovery_failed = set()
@@ -371,6 +408,7 @@ class LiveTradingService:
             commission=Decimal("0"),
             commission_asset="USDT",
             client_order_id=protection.list_client_order_id,
+            coordinator_decision_id=protection.coordinator_decision_id,
             submitted_at=now,
             filled_at=now,
             notes=f"Binance OCO {protection.order_list_id} executed ({leg_type or 'LEG'})",
@@ -503,6 +541,7 @@ class LiveTradingService:
             take_profit=order.take_profit,
             stop_loss=order.stop_loss,
             stop_limit_price=stop_limit,
+            coordinator_decision_id=order.coordinator_decision_id,
             status=self._oco_status(response) or "EXECUTING",
         )
         self._oco_protections[order.symbol] = protection
@@ -673,6 +712,7 @@ class LiveTradingService:
                         quantity=position.quantity,
                         take_profit=position.take_profit,
                         stop_loss=position.stop_loss,
+                        coordinator_decision_id=position.coordinator_decision_id,
                         status=self._oco_status(item) or "EXECUTING",
                     )
                     discovered += 1
@@ -735,7 +775,9 @@ class LiveTradingService:
         exchange_id = self._exchange(exchange)
         symbol = req.symbol.replace("-", "/").replace("_", "/").upper()
         notional = Decimal(str(current_market_price)) * Decimal(str(req.quantity))
-        client_order_id = req.client_order_id or f"ata-{uuid4().hex[:24]}"
+        client_order_id = req.client_order_id or (
+            f"{self.OWN_CLIENT_ORDER_PREFIX}{uuid4().hex[:24]}"
+        )
         if len(client_order_id) > 36:
             raise ValidationError("client_order_id must be at most 36 characters.")
 
@@ -768,6 +810,7 @@ class LiveTradingService:
                 self._usdt_balance = usdt
 
                 if self.risk_service is not None:
+                    portfolio = self.get_portfolio()
                     risk_request = OrderRiskCheckRequest(
                         symbol=symbol,
                         side=req.side.value,
@@ -778,8 +821,10 @@ class LiveTradingService:
                         take_profit=req.take_profit,
                         account_balance=float(usdt),
                         current_open_positions_count=len(self._positions),
+                        current_total_exposure_usd=float(portfolio.gross_exposure_usd),
+                        current_symbol_exposure_usd=float(portfolio.exposure_usd(symbol)),
                         current_daily_loss_pct=self.risk_service.current_daily_loss_pct,
-                        current_drawdown_pct=float(self.get_portfolio().current_drawdown_pct),
+                        current_drawdown_pct=float(portfolio.current_drawdown_pct),
                     )
                     result = self.risk_service.validate_order(risk_request)
                     if not result.is_allowed:
@@ -809,6 +854,12 @@ class LiveTradingService:
                 "stop_loss": Decimal(str(req.stop_loss)) if req.stop_loss else None,
                 "take_profit": Decimal(str(req.take_profit)) if req.take_profit else None,
                 "strategy_id": req.strategy_id,
+                "coordinator_decision_id": req.coordinator_decision_id
+                or (
+                    self._positions[symbol].coordinator_decision_id
+                    if symbol in self._positions
+                    else None
+                ),
                 "client_order_id": order.client_order_id or client_order_id,
                 "notes": req.notes or order.notes,
             }
@@ -912,6 +963,7 @@ class LiveTradingService:
         self._assert_oco_discovery_known(exchange_id)
         async with self._lock:
             self._assert_oco_discovery_known(exchange_id)
+            position = self._positions.get(symbol)
             adapter = self._adapter(exchange_id)
             try:
                 oco_exit = await self._cancel_oco_for_symbol(symbol, adapter)
@@ -927,6 +979,10 @@ class LiveTradingService:
             finally:
                 await adapter.close()
 
+        if order.coordinator_decision_id is None and position is not None:
+            order = order.model_copy(
+                update={"coordinator_decision_id": position.coordinator_decision_id}
+            )
         self._record(order)
         await self._alert(
             "Posición real cerrada",
@@ -948,13 +1004,40 @@ class LiveTradingService:
         self._orders.append(order)
         if order.client_order_id:
             self._client_order_ids[order.client_order_id] = order
-        if order.status != OrderStatus.FILLED:
+        if order.status not in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
             return
 
         fill_price = order.average_fill_price
         if fill_price is None:
             return
+        executed_quantity = order.filled_quantity
+        if executed_quantity is None:
+            if order.status == OrderStatus.PARTIALLY_FILLED:
+                logger.error(
+                    "live_partial_fill_missing_quantity",
+                    order_id=str(order.id),
+                    symbol=order.symbol,
+                )
+                return
+            executed_quantity = order.quantity
+        if executed_quantity <= 0:
+            logger.warning(
+                "live_fill_non_positive_quantity",
+                order_id=str(order.id),
+                status=order.status.value,
+            )
+            return
 
+        self._apply_fill(order, executed_quantity, fill_price, order.commission)
+
+    def _apply_fill(
+        self,
+        order: Order,
+        executed_quantity: Decimal,
+        fill_price: Decimal,
+        commission: Decimal,
+    ) -> None:
+        """Book an executed quantity into trades, cash, and the position ledger."""
         self._trades.append(
             Trade(
                 order_id=order.id,
@@ -962,20 +1045,21 @@ class LiveTradingService:
                 exchange=order.exchange,
                 mode=ExecutionMode.REAL,
                 side=order.side,
-                quantity=order.filled_quantity or order.quantity,
+                quantity=executed_quantity,
                 price=fill_price,
-                commission=order.commission,
+                commission=commission,
                 commission_asset=order.commission_asset,
                 strategy_id=order.strategy_id,
+                coordinator_decision_id=order.coordinator_decision_id,
             )
         )
 
-        notional = fill_price * (order.filled_quantity or order.quantity)
+        notional = fill_price * executed_quantity
         if self._usdt_balance is not None:
             if order.side == OrderSide.BUY:
-                self._usdt_balance -= notional + order.commission
+                self._usdt_balance -= notional + commission
             else:
-                self._usdt_balance += notional - order.commission
+                self._usdt_balance += notional - commission
 
         existing = self._positions.get(order.symbol)
         if order.side == OrderSide.BUY:
@@ -986,32 +1070,196 @@ class LiveTradingService:
                     mode=ExecutionMode.REAL,
                     side=PositionSide.LONG,
                     entry_price=fill_price,
-                    quantity=order.filled_quantity or order.quantity,
+                    quantity=executed_quantity,
                     current_price=fill_price,
-                    total_commission=order.commission,
+                    total_commission=commission,
                     stop_loss=order.stop_loss,
                     take_profit=order.take_profit,
+                    coordinator_decision_id=order.coordinator_decision_id,
                 )
             else:
-                total_qty = existing.quantity + (order.filled_quantity or order.quantity)
+                total_qty = existing.quantity + executed_quantity
                 weighted = (
-                    existing.entry_price * existing.quantity
-                    + fill_price * (order.filled_quantity or order.quantity)
+                    existing.entry_price * existing.quantity + fill_price * executed_quantity
                 ) / total_qty
                 existing.entry_price = weighted
                 existing.quantity = total_qty
-                existing.total_commission += order.commission
+                existing.total_commission += commission
                 existing.stop_loss = order.stop_loss or existing.stop_loss
                 existing.take_profit = order.take_profit or existing.take_profit
+                existing.coordinator_decision_id = (
+                    existing.coordinator_decision_id or order.coordinator_decision_id
+                )
                 existing.updated_at = datetime.now(tz=UTC)
         elif existing is not None:
-            sold = order.filled_quantity or order.quantity
-            self._realized_pnl += (fill_price - existing.entry_price) * sold - order.commission
-            existing.quantity -= sold
+            self._realized_pnl += (
+                fill_price - existing.entry_price
+            ) * executed_quantity - commission
+            existing.quantity -= executed_quantity
             if existing.quantity <= Decimal("0.00000001"):
                 del self._positions[order.symbol]
             else:
                 existing.updated_at = datetime.now(tz=UTC)
+
+    def _apply_order_update(self, local: Order, fetched: Order) -> bool:
+        """Merge an exchange order snapshot into a tracked local order.
+
+        Only the newly executed quantity is booked, so polling the same order
+        repeatedly is idempotent.
+        """
+        changed = False
+        previous_filled = local.filled_quantity or Decimal("0")
+        new_filled = fetched.filled_quantity or Decimal("0")
+        if new_filled > previous_filled:
+            price = fetched.average_fill_price or local.average_fill_price
+            if price is None:
+                logger.warning(
+                    "live_reconcile_fill_without_price",
+                    order_id=str(local.id),
+                    symbol=local.symbol,
+                )
+            else:
+                delta = new_filled - previous_filled
+                commission = max(
+                    Decimal("0"),
+                    (fetched.commission or Decimal("0")) - (local.commission or Decimal("0")),
+                )
+                self._apply_fill(local, delta, price, commission)
+                local.filled_quantity = new_filled
+                local.average_fill_price = price
+                local.commission = max(
+                    local.commission or Decimal("0"), fetched.commission or Decimal("0")
+                )
+                changed = True
+        if fetched.status != local.status:
+            local.status = fetched.status
+            changed = True
+        now = datetime.now(tz=UTC)
+        if local.status == OrderStatus.FILLED and local.filled_at is None:
+            local.filled_at = fetched.filled_at or now
+        elif local.status == OrderStatus.CANCELLED and local.cancelled_at is None:
+            local.cancelled_at = fetched.cancelled_at or now
+        return changed
+
+    async def reconcile_open_orders(self) -> int:
+        """Refresh open/partially-filled orders from the exchange.
+
+        Restored orders may have kept executing while the process was down.
+        Polling by client order id recovers those fills exactly once and lets
+        the caller persist the merged ledger.
+        """
+        if not self.settings.real_trading_enabled:
+            return 0
+        pending = [
+            order
+            for order in self._orders
+            if order.status in (OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED)
+        ]
+        updated = 0
+        for order in pending:
+            if not order.client_order_id:
+                logger.warning(
+                    "live_reconcile_missing_client_order_id",
+                    order_id=str(order.id),
+                    symbol=order.symbol,
+                )
+                continue
+            adapter: LiveExchangeAdapter | None = None
+            try:
+                adapter = self._adapter(order.exchange)
+                fetched = await adapter.fetch_order(
+                    order.symbol, client_order_id=order.client_order_id
+                )
+            except Exception as exc:
+                logger.warning(
+                    "live_open_order_reconcile_failed",
+                    order_id=str(order.id),
+                    symbol=order.symbol,
+                    error=str(exc),
+                )
+                continue
+            finally:
+                if adapter is not None:
+                    await adapter.close()
+            if fetched is None:
+                continue
+            if self._apply_order_update(order, fetched):
+                updated += 1
+                if self._on_execution is not None:
+                    try:
+                        await self._on_execution(order)
+                    except Exception as exc:
+                        logger.warning(
+                            "live_reconciled_order_persist_failed",
+                            order_id=str(order.id),
+                            error=str(exc),
+                        )
+        if updated and self._on_reconcile is not None:
+            try:
+                await self._on_reconcile()
+            except Exception as exc:
+                logger.warning("live_reconcile_persist_failed", error=str(exc))
+        return updated
+
+    async def discover_untracked_orders(self) -> int:
+        """Adopt exchange open orders created by this system but absent locally.
+
+        Attribution relies on the ``ata-`` client order id prefix, so unrelated
+        manual orders are never adopted. Only still-open orders are visible; an
+        order that filled completely before this call cannot be recovered here.
+        """
+        if not self.settings.real_trading_enabled:
+            return 0
+        try:
+            exchange_id = self._exchange()
+        except Exception as exc:
+            logger.warning("live_order_discovery_unavailable", error=str(exc))
+            return 0
+
+        imported = 0
+        adapter: LiveExchangeAdapter | None = None
+        try:
+            adapter = self._adapter(exchange_id)
+            for symbol in self.settings.real_trading_allowed_symbols:
+                try:
+                    open_orders = await adapter.fetch_open_orders(symbol)
+                except Exception as exc:
+                    logger.warning(
+                        "live_open_order_discovery_failed",
+                        symbol=symbol,
+                        error=str(exc),
+                    )
+                    continue
+                for order in open_orders:
+                    client_id = order.client_order_id
+                    if not client_id or not client_id.startswith(self.OWN_CLIENT_ORDER_PREFIX):
+                        continue
+                    if client_id in self._client_order_ids:
+                        continue
+                    self._record(order)
+                    imported += 1
+                    if self._on_execution is not None:
+                        try:
+                            await self._on_execution(order)
+                        except Exception as exc:
+                            logger.warning(
+                                "live_discovered_order_persist_failed",
+                                order_id=str(order.id),
+                                error=str(exc),
+                            )
+        except Exception as exc:
+            logger.warning("live_order_discovery_failed", error=str(exc))
+            return imported
+        finally:
+            if adapter is not None:
+                await adapter.close()
+        if imported:
+            logger.warning(
+                "live_untracked_orders_imported",
+                count=imported,
+                exchange=exchange_id.value,
+            )
+        return imported
 
     def update_market_prices(
         self,
@@ -1042,7 +1290,12 @@ class LiveTradingService:
         )
         total = usdt + positions_value
         self._peak_value = max(self._peak_value, total)
-        return Portfolio(
+        today = datetime.now(tz=UTC).date()
+        if self._daily_reference_date != today:
+            self._daily_reference_date = today
+            self._daily_start_equity = total
+        daily_pnl = total - self._daily_start_equity
+        portfolio = Portfolio(
             mode=mode,
             exchange=self.get_positions(mode)[0].exchange
             if positions
@@ -1052,8 +1305,21 @@ class LiveTradingService:
             locked_balance=Decimal("0"),
             positions=positions,
             total_realized_pnl=self._realized_pnl,
+            daily_pnl=daily_pnl,
             peak_value=self._peak_value,
         )
+        if self.risk_service is not None:
+            daily_start_equity = total - daily_pnl
+            self.risk_service.current_daily_loss_pct = (
+                float(-daily_pnl / daily_start_equity * 100)
+                if daily_pnl < 0 and daily_start_equity > 0
+                else 0.0
+            )
+            self.risk_service.current_drawdown_pct = float(portfolio.current_drawdown_pct)
+            self.risk_service.open_positions_count = portfolio.position_count
+            self.risk_service.current_equity_usd = float(total)
+            self.risk_service.current_gross_exposure_usd = float(portfolio.gross_exposure_usd)
+        return portfolio
 
     async def reconcile_positions(self) -> list[str]:
         """
@@ -1228,14 +1494,16 @@ class LiveTradingService:
                 ):
                     await self.discover_oco_protections()
 
-                if self._positions and self.settings.real_trading_enabled:
+                if self.settings.real_trading_enabled:
                     now = time.monotonic()
                     if (
                         now - self._last_reconcile
                         >= self.settings.real_trading_reconcile_interval_seconds
                     ):
                         self._last_reconcile = now
-                        await self.reconcile_positions()
+                        if self._positions:
+                            await self.reconcile_positions()
+                        await self.reconcile_open_orders()
 
                 if (
                     self._positions

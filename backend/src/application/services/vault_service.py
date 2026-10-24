@@ -49,18 +49,30 @@ class VaultService:
     def list_credentials(self) -> list[EncryptedCredential]:
         return self.vault.list_configured_exchanges()
 
-    def delete_credential(self, exchange: str) -> bool:
-        return self.vault.delete_credential(exchange)
+    def set_active_environment(self, environment: str) -> None:
+        self.vault.set_active_environment(environment)
 
-    async def test_connection(self, exchange: str = "binance") -> ConnectionTestResult:
-        creds = self.vault.get_decrypted_credential(exchange)
+    def delete_credential(self, exchange: str, is_testnet: bool | None = None) -> bool:
+        environment = None
+        if is_testnet is not None:
+            environment = "testnet" if is_testnet else "mainnet"
+        return self.vault.delete_credential(exchange, environment=environment)
+
+    async def test_connection(
+        self, exchange: str = "binance", is_testnet: bool | None = None
+    ) -> ConnectionTestResult:
+        environment = None
+        if is_testnet is not None:
+            environment = "testnet" if is_testnet else "mainnet"
+        creds = self.vault.get_decrypted_credential(exchange, environment=environment)
         if not creds:
+            env_label = f" ({environment})" if environment else ""
             raise ValueError(
-                f"No credentials configured for {exchange}. Please save API keys first."
+                f"No credentials configured for {exchange}{env_label}. Please save API keys first."
             )
 
         api_key, secret, passphrase = creds
-        summary = self.vault.get_credential_summary(exchange)
+        summary = self.vault.get_credential_summary(exchange, environment=environment)
         is_testnet = summary.is_testnet if summary else True
 
         try:

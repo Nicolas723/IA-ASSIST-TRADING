@@ -131,6 +131,10 @@ class AgentTask(BaseModel):
     timeframes_to_analyze: list[str] = Field(default=["1h", "4h", "1d"])
     lookback_candles: int = Field(default=200, ge=10)
 
+    # Historical research context, already formatted with its own guardrails.
+    # It is untrusted data: it must never override signals, risk, or output schema.
+    research_context: str = ""
+
     # Task metadata
     priority: int = Field(default=5, ge=1, le=10)  # 10 = highest priority
     timeout_seconds: float = Field(default=30.0)
@@ -154,7 +158,14 @@ class AgentOutput(BaseModel):
 
     # Core decision
     signal: SignalDirection
-    confidence: Confidence = Field(ge=0.0, le=1.0)
+    confidence: Confidence = Field(
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Agent-reported heuristic score in [0, 1]. It is not a calibrated probability "
+            "of a profitable trade or of the signal being correct."
+        ),
+    )
 
     # Explanation (MANDATORY — no black-box decisions)
     reasoning: str = Field(
@@ -199,7 +210,14 @@ class CoordinatorDecision(BaseModel):
 
     # Aggregated decision
     final_signal: SignalDirection
-    aggregate_confidence: Confidence = Field(ge=0.0, le=1.0)
+    aggregate_confidence: Confidence = Field(
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Magnitude of the committee's weighted directional score in [0, 1]. "
+            "It is not a calibrated probability of success."
+        ),
+    )
 
     # Weighted contributions from each agent
     agent_outputs: list[AgentOutput] = Field(default_factory=list)

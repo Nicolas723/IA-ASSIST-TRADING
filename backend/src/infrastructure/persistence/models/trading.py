@@ -77,6 +77,7 @@ class OrderModel(Base):
     __table_args__ = (
         Index("ix_orders_symbol_status", "symbol", "status"),
         Index("ix_orders_mode_created", "mode", "created_at"),
+        Index("ix_orders_coordinator_decision", "coordinator_decision_id"),
     )
 
 
@@ -100,11 +101,13 @@ class TradeModel(Base):
     commission_asset: Mapped[str] = mapped_column(String(10), nullable=False, default="USDT")
 
     strategy_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    coordinator_decision_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
     executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
         Index("ix_trades_symbol_executed", "symbol", "executed_at"),
         Index("ix_trades_order_id", "order_id"),
+        Index("ix_trades_coordinator_decision", "coordinator_decision_id"),
     )
 
 
@@ -136,6 +139,7 @@ class PositionModel(Base):
     take_profit: Mapped[Decimal | None] = mapped_column(DECIMAL(20, 8), nullable=True)
 
     strategy_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    coordinator_decision_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

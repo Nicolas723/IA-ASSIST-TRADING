@@ -14,6 +14,10 @@ Design decisions:
 
 from __future__ import annotations
 
+import json
+import logging
+import os
+import sys
 from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
@@ -27,6 +31,26 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # found regardless of the current working directory or where the project lives.
 # Layout: backend/src/shared/config/settings.py  ->  parents[3] == backend/
 _ENV_FILE_PATH = Path(__file__).resolve().parents[3] / ".env"
+
+# Runtime overrides are persisted next to the encrypted credential vault so they
+# can be changed from the UI without editing .env or restarting the backend.
+_DEFAULT_RUNTIME_CONFIG_PATH = _ENV_FILE_PATH.parent / "vault" / ".runtime_config.json"
+
+# Only these fields are allowed to be overridden from the UI. Keeping this list
+# explicit prevents accidental persistence of secrets or unrelated settings.
+RUNTIME_TRADING_FIELDS = (
+    "execution_mode",
+    "enable_real_trading",
+    "require_manual_confirmation",
+    "real_trading_max_notional",
+    "real_trading_allowed_symbols",
+    "allow_mainnet_trading",
+    "enable_autonomous_real_trading",
+    "real_trading_oco_enabled",
+    "trading_environment",
+)
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +68,11 @@ class ExecutionMode(StrEnum):
     BACKTEST = "backtest"
     PAPER = "paper"
     REAL = "real"
+
+
+class TradingEnvironment(StrEnum):
+    TESTNET = "testnet"
+    MAINNET = "mainnet"
 
 
 class LogFormat(StrEnum):
@@ -99,7 +128,7 @@ class OpenAISettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OPENAI_", extra="ignore")
 
     api_key: str = Field(default="")
-    default_model: str = Field(default="gpt-4o")
+    default_model: str = Field(default="gpt-4o-mini")
     max_tokens: int = Field(default=4096)
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
 
@@ -122,9 +151,18 @@ class GeminiSettings(BaseSettings):
 class OllamaSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OLLAMA_", extra="ignore")
 
+    enabled: bool = Field(default=False)
     base_url: str = Field(default="http://localhost:11434")
     default_model: str = Field(default="llama3.2")
     embedding_model: str = Field(default="nomic-embed-text")
+
+
+class OpenRouterSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="OPENROUTER_", extra="ignore")
+
+    api_key: str = Field(default="")
+    base_url: str = Field(default="https://openrouter.ai/api/v1")
+    default_model: str = Field(default="openai/gpt-4o-mini")
 
 
 class RiskSettings(BaseSettings):
@@ -136,6 +174,9 @@ class RiskSettings(BaseSettings):
     open_positions: int = Field(default=10, ge=1)
     max_drawdown_pct: Decimal = Field(default=Decimal("10.0"), gt=Decimal("0"))
     max_risk_per_trade_pct: Decimal = Field(default=Decimal("1.5"), gt=Decimal("0"))
+    portfolio_exposure_pct: Decimal = Field(
+        default=Decimal("100.0"), gt=Decimal("0"), le=Decimal("100")
+    )
     max_open_positions: int = Field(default=5, ge=1)
 
 
@@ -211,13 +252,32 @@ class Settings(BaseSettings):
     anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
+    openrouter: OpenRouterSettings = Field(default_factory=OpenRouterSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     agent_llm: AgentLLMConfig = Field(default_factory=AgentLLMConfig)
+    llm_primary_provider: LLMProvider = Field(default=LLMProvider.OPENAI)
+    llm_fallback_providers: list[LLMProvider] = Field(
+        default_factory=lambda: [
+            LLMProvider.GOOGLE,
+            LLMProvider.ANTHROPIC,
+            LLMProvider.OPENROUTER,
+        ]
+    )
+    llm_fallback_enabled: bool = Field(default=True)
+    # Optional per-process daily token cap. 0 disables the cap. The counter is
+    # in-memory and resets at UTC midnight or on restart.
+    llm_daily_token_budget: int = Field(default=0, ge=0)
+    # Optional cost estimate. Rates are USD per one million tokens and default
+    # to 0 ("unknown") because provider pricing changes and is model-specific.
+    # The gateway only reports an estimate when at least one rate is set.
+    llm_input_cost_per_million_usd: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    llm_output_cost_per_million_usd: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
 
     # -------------------------------------------------------------------------
     # Trading
     # -------------------------------------------------------------------------
     execution_mode: ExecutionMode = Field(default=ExecutionMode.PAPER)
+    trading_environment: TradingEnvironment = Field(default=TradingEnvironment.TESTNET)
     enable_real_trading: bool = Field(default=False)
     require_manual_confirmation: bool = Field(default=True)
     paper_trading_initial_balance: Decimal = Field(default=Decimal("10000.0"))
@@ -237,6 +297,37 @@ class Settings(BaseSettings):
     real_trading_oco_stop_limit_buffer_pct: Decimal = Field(
         default=Decimal("0.1"), ge=Decimal("0"), le=Decimal("5")
     )
+
+    # Bounded background shadow data collection (public market data only).
+    shadow_scan_autorun: bool = Field(default=False)
+    shadow_scan_symbols: list[str] = Field(
+        default_factory=lambda: [
+            "BTC/USDT",
+            "ETH/USDT",
+            "BNB/USDT",
+            "SOL/USDT",
+            "XRP/USDT",
+        ],
+        min_length=1,
+        max_length=5,
+    )
+    # One scan per 1h evaluation horizon, limiting mechanical overlap.
+    shadow_scan_interval_seconds: int = Field(default=3600, ge=3600, le=86400)
+    # Conservative round-trip estimate (fees + slippage) used only to describe
+    # shadow returns net of trading costs. It is not a realised P&L figure.
+    shadow_round_trip_cost_pct: Decimal = Field(
+        default=Decimal("0.25"), ge=Decimal("0"), le=Decimal("5")
+    )
+    # Read-only opportunity gate thresholds. These never route orders; they only
+    # decide whether a shadow candidate may be surfaced for manual review.
+    opportunity_min_net_edge_pct: Decimal = Field(
+        default=Decimal("0.10"), ge=Decimal("0"), le=Decimal("10")
+    )
+    opportunity_max_quoted_spread_pct: Decimal = Field(
+        default=Decimal("0.10"), ge=Decimal("0"), le=Decimal("5")
+    )
+    opportunity_max_scan_age_seconds: int = Field(default=900, ge=0, le=86_400)
+    opportunity_min_validated_evaluations: int = Field(default=30, ge=1, le=10_000)
 
     # -------------------------------------------------------------------------
     # Notifications / alerts
@@ -305,7 +396,18 @@ class Settings(BaseSettings):
     data_historical_days: int = Field(default=365, ge=1)
     data_candle_timeframes: list[str] = Field(default=["1m", "5m", "15m", "1h", "4h", "1d"])
     default_symbols: list[str] = Field(default=["BTC/USDT", "ETH/USDT", "SOL/USDT"])
+    # Public market-data source. Execution stays Binance-only and independently gated.
+    market_data_exchange: str = Field(default="binance", pattern="^(binance|bybit)$")
     cache_ttl_seconds: int = Field(default=300)
+
+    # -------------------------------------------------------------------------
+    # Research memory
+    # -------------------------------------------------------------------------
+    # Opt-in: research notes reach LLM prompts only when enabled, only when
+    # ``supported`` and current, and always inside a guarded data block.
+    research_context_in_prompts: bool = Field(default=False)
+    research_context_max_notes: int = Field(default=5, ge=1, le=20)
+    research_context_max_chars: int = Field(default=1200, ge=200, le=8000)
 
     # -------------------------------------------------------------------------
     # Computed properties
@@ -356,6 +458,80 @@ class Settings(BaseSettings):
         # real trading auth is checked at the service layer
         return v
 
+    @field_validator("shadow_scan_symbols")
+    @classmethod
+    def validate_shadow_scan_symbols(cls, values: list[str]) -> list[str]:
+        symbols = [item.strip().upper().replace("-", "/").replace("_", "/") for item in values]
+        if any("/" not in item for item in symbols):
+            raise ValueError("Shadow scan symbols must use BASE/QUOTE notation.")
+        if len(set(symbols)) != len(symbols):
+            raise ValueError("Shadow scan symbols must be unique.")
+        return symbols
+
+
+# ---------------------------------------------------------------------------
+# Runtime overrides (UI-managed configuration)
+# ---------------------------------------------------------------------------
+
+
+def runtime_config_path() -> Path:
+    """Return the JSON file used for UI-managed trading overrides."""
+    configured = os.getenv("RUNTIME_CONFIG_PATH", "").strip()
+    return Path(configured) if configured else _DEFAULT_RUNTIME_CONFIG_PATH
+
+
+def load_runtime_overrides(path: Path | None = None) -> dict[str, Any]:
+    """
+    Read UI-managed trading overrides from disk.
+
+    During tests the default runtime file is ignored so a developer's local
+    configuration cannot make the suite non-deterministic. Tests that exercise
+    this loader pass an explicit ``path`` or set ``RUNTIME_CONFIG_PATH``.
+    """
+    if path is None:
+        explicit = os.getenv("RUNTIME_CONFIG_PATH", "").strip()
+        if not explicit and "pytest" in sys.modules:
+            return {}
+        path = runtime_config_path()
+
+    if not path.exists():
+        return {}
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("runtime_config_load_failed path=%s error=%s", path, exc)
+        return {}
+
+    if not isinstance(raw, dict):
+        logger.warning("runtime_config_invalid_payload path=%s", path)
+        return {}
+
+    return {key: value for key, value in raw.items() if key in RUNTIME_TRADING_FIELDS}
+
+
+def _validated_with_overrides(base: Settings, overrides: dict[str, Any]) -> Settings:
+    data = base.model_dump()
+    data.update(overrides)
+    return Settings.model_validate(data)
+
+
+def apply_runtime_overrides(target: Settings, overrides: dict[str, Any]) -> Settings:
+    """
+    Apply validated overrides in-place.
+
+    Services hold a reference to the cached Settings instance, so mutating it is
+    what makes a configuration change effective immediately without a restart.
+    """
+    filtered = {key: value for key, value in overrides.items() if key in RUNTIME_TRADING_FIELDS}
+    if not filtered:
+        return target
+
+    validated = _validated_with_overrides(target, filtered)
+    for field_name in Settings.model_fields:
+        setattr(target, field_name, getattr(validated, field_name))
+    return target
+
 
 # ---------------------------------------------------------------------------
 # Singleton accessor
@@ -369,8 +545,17 @@ def get_settings() -> Settings:
 
     Using lru_cache ensures settings are parsed from environment
     only once per process. In tests, clear with get_settings.cache_clear().
+    UI-managed trading overrides are merged on top of the .env values.
     """
-    return Settings()
+    base = Settings()
+    overrides = load_runtime_overrides()
+    if not overrides:
+        return base
+    try:
+        return _validated_with_overrides(base, overrides)
+    except Exception as exc:
+        logger.warning("runtime_config_apply_failed error=%s", exc)
+        return base
 
 
 # Convenient alias

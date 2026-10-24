@@ -189,6 +189,7 @@ class Trade(BaseModel):
     commission_asset: str
 
     strategy_id: UUID | None = None
+    coordinator_decision_id: UUID | None = None
     executed_at: datetime = Field(default_factory=datetime.utcnow)
 
     @computed_field  # type: ignore[prop-decorator]
@@ -219,6 +220,7 @@ class Position(BaseModel):
     total_commission: Decimal = Field(default=Decimal("0"))
 
     strategy_id: UUID | None = None
+    coordinator_decision_id: UUID | None = None
     opened_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -297,3 +299,27 @@ class Portfolio(BaseModel):
     @property
     def position_count(self) -> int:
         return len(self.positions)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def gross_exposure_usd(self) -> Decimal:
+        """Mark-to-market notional of every open position."""
+        return self.exposure_usd()
+
+    def exposure_usd(self, symbol: str | None = None) -> Decimal:
+        """Notional exposure, optionally filtered to a single symbol.
+
+        Uses the last known price when available so exposure reflects current
+        market value instead of the original entry notional.
+        """
+        total = Decimal("0")
+        for position in self.positions:
+            if symbol is not None and position.symbol != symbol:
+                continue
+            price = (
+                position.current_price
+                if position.current_price > Decimal("0")
+                else position.entry_price
+            )
+            total += price * position.quantity
+        return total

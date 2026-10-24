@@ -114,8 +114,6 @@ class AgentCoordinator:
 
         consensus_level = 1.0 - (len(dissenting) / len(outputs)) if outputs else 1.0
         aggregate_confidence = min(1.0, max(0.0, abs(normalized_score)))
-        if aggregate_confidence < 0.4:
-            aggregate_confidence = 0.65  # baseline confidence
 
         # Extract recommended price targets from agents
         rec_entry = None
@@ -140,7 +138,11 @@ class AgentCoordinator:
         ]
         reasoning_summary = " | ".join(reasons)
 
-        action_rec = f"Executive Committee Verdict: {final_signal.value.replace('_', ' ').upper()} with {round(aggregate_confidence * 100)}% conviction."
+        action_rec = (
+            f"Executive Committee Verdict: {final_signal.value.replace('_', ' ').upper()} "
+            f"(committee signal-strength score: {round(aggregate_confidence * 100)}%). "
+            "This score is not a probability of success."
+        )
 
         return CoordinatorDecision(
             id=uuid4(),

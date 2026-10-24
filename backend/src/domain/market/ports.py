@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from datetime import datetime
     from decimal import Decimal
 
-    from src.domain.market.entities import Candle, Exchange, SymbolStr, Tick, Timeframe
+    from src.domain.market.entities import Candle, Exchange, OrderBook, SymbolStr, Tick, Timeframe
 
 
 class MarketDataPort(abc.ABC):
@@ -48,6 +48,11 @@ class MarketDataPort(abc.ABC):
         This is a real-time instant snapshot and does NOT depend on the last
         closed candle, so it changes tick-by-tick within the current period.
         """
+        ...
+
+    @abc.abstractmethod
+    async def fetch_order_book(self, symbol: SymbolStr, limit: int = 5) -> OrderBook:
+        """Fetch a bounded, read-only order-book snapshot for spread observation."""
         ...
 
     @abc.abstractmethod

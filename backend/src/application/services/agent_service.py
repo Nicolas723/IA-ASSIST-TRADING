@@ -5,11 +5,12 @@ AgentService — Application Layer for AI Agent Orchestration and Multi-Agent Co
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 
 from pydantic import BaseModel
 
+from src.application.services.research_context import format_research_context
 from src.domain.agents.coordinator import AgentCoordinator
 from src.domain.agents.entities import (
     AgentTask,
@@ -17,13 +18,53 @@ from src.domain.agents.entities import (
     CoordinatorDecision,
 )
 from src.domain.market.entities import Exchange, MarketContext, Timeframe
+from src.shared.config.settings import get_settings
 from src.shared.logging.setup import get_logger
 
 if TYPE_CHECKING:
     from src.application.services.market_data_service import MarketDataService
     from src.domain.agents.ports import DecisionRepositoryPort
+    from src.domain.market.entities import Candle
+    from src.domain.research.entities import ResearchNote
 
 logger = get_logger(__name__)
+
+
+class ResearchContextPort(Protocol):
+    """Read-only access to current research notes."""
+
+    async def list_context(
+        self,
+        *,
+        symbol: str | None = None,
+        timeframe: str | None = None,
+        limit: int = 20,
+    ) -> list[ResearchNote]: ...
+
+
+def validate_market_data_freshness(
+    candles: list[Candle], timeframe: Timeframe, now: datetime | None = None
+) -> None:
+    """Reject an analysis input when its newest candle is materially stale."""
+    if not candles:
+        raise ValueError("Cannot validate freshness without market candles.")
+
+    latest_timestamp = max(candles, key=lambda candle: candle.timestamp).timestamp
+    if latest_timestamp.tzinfo is None:
+        latest_timestamp = latest_timestamp.replace(tzinfo=UTC)
+    current_time = now or datetime.now(tz=UTC)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=UTC)
+
+    age_seconds = (current_time - latest_timestamp).total_seconds()
+    maximum_age_seconds = timeframe.seconds * 2
+    if age_seconds < -5:
+        raise ValueError("Market data timestamp is in the future; refusing analysis.")
+    if age_seconds > maximum_age_seconds:
+        raise ValueError(
+            f"Market data is stale: latest candle is {int(age_seconds)} seconds old "
+            f"(maximum {maximum_age_seconds})."
+        )
 
 
 class AgentInfo(BaseModel):
@@ -43,10 +84,12 @@ class AgentService:
         coordinator: AgentCoordinator | None = None,
         market_service: MarketDataService | None = None,
         decision_repository: DecisionRepositoryPort | None = None,
+        research_repository: ResearchContextPort | None = None,
     ) -> None:
         self.coordinator = coordinator or AgentCoordinator()
         self.market_service = market_service
         self.decision_repository = decision_repository
+        self.research_repository = research_repository
         self._decision_history: list[CoordinatorDecision] = []
 
     def list_agents(self) -> list[AgentInfo]:
@@ -101,6 +144,11 @@ class AgentService:
                 f"No market data available for {normalized_symbol} to run AI analysis."
             )
 
+        try:
+            validate_market_data_freshness(candles, tf)
+        except ValueError as exc:
+            raise ValueError(f"Market data for {normalized_symbol} is unusable: {exc}") from exc
+
         # 2. Build MarketContext
         context = MarketContext(
             symbol=normalized_symbol,
@@ -117,6 +165,7 @@ class AgentService:
             market_context=context,
             timeframes_to_analyze=[timeframe],
             lookback_candles=max(len(candles), 10),
+            research_context=await self._research_context_for(normalized_symbol, timeframe),
         )
 
         # 4. Run Coordinator
@@ -146,6 +195,38 @@ class AgentService:
         )
 
         return decision
+
+    async def _research_context_for(self, symbol: str, timeframe: str) -> str:
+        """Load guarded research context only when explicitly enabled.
+
+        A repository failure degrades to an empty context: research memory must
+        never block or alter the deterministic trading path.
+        """
+        settings = get_settings()
+        if not settings.research_context_in_prompts or self.research_repository is None:
+            return ""
+        try:
+            notes = await self.research_repository.list_context(
+                symbol=symbol,
+                timeframe=timeframe,
+                limit=settings.research_context_max_notes,
+            )
+        except Exception as exc:  # pragma: no cover - defensive DB fallback
+            logger.warning("research_context_unavailable", symbol=symbol, error=str(exc))
+            return ""
+        context = format_research_context(
+            notes,
+            max_notes=settings.research_context_max_notes,
+            max_chars=settings.research_context_max_chars,
+        )
+        if context:
+            logger.info(
+                "research_context_included_in_prompt",
+                symbol=symbol,
+                timeframe=timeframe,
+                characters=len(context),
+            )
+        return context
 
     def get_audit_history(self, limit: int = 20) -> list[CoordinatorDecision]:
         return self._decision_history[:limit]

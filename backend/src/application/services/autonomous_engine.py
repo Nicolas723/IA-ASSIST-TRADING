@@ -11,10 +11,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from src.domain.market.entities import Timeframe
 from src.domain.notifications.entities import AlertSeverity
+from src.domain.risk.entities import PositionSizeRequest, RiskProfile
+from src.domain.risk.position_sizer import PositionSizer
 from src.domain.trading.entities import (
     ExecutionMode,
     Order,
@@ -46,14 +48,21 @@ LiveJournalCallback = Callable[["Order"], Awaitable[bool]]
 class AutonomousBotConfig(BaseModel):
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
-    interval_seconds: int = Field(default=15, ge=2, le=3600)
+    interval_seconds: int = Field(default=60, ge=2, le=3600)
     execution_mode: str = "paper"  # "paper" or "real"
+    confirm_real_trading: bool = False
     min_confidence_pct: float = Field(default=60.0, ge=10.0, le=99.0)
     risk_per_trade_pct: float = Field(default=2.0, ge=0.1, le=20.0)
     max_open_positions: int = Field(default=3, ge=1, le=10)
     auto_execute: bool = True
     stop_loss_pct: float = Field(default=2.0, ge=0.5, le=15.0)
     take_profit_pct: float = Field(default=4.0, ge=0.5, le=30.0)
+
+    @model_validator(mode="after")
+    def validate_reward_risk_ratio(self) -> AutonomousBotConfig:
+        if self.take_profit_pct < self.stop_loss_pct * 1.5:
+            raise ValueError("take_profit_pct must be at least 1.5 times stop_loss_pct")
+        return self
 
 
 class AutonomousLogEntry(BaseModel):
@@ -217,8 +226,12 @@ class AutonomousEngine:
             settings = get_settings()
             if not settings.real_trading_enabled or not settings.enable_autonomous_real_trading:
                 raise ValidationError(
-                    "Autonomous real trading is disabled. Set EXECUTION_MODE=real, "
-                    "ENABLE_REAL_TRADING=true and ENABLE_AUTONOMOUS_REAL_TRADING=true."
+                    "El bot autónomo en modo real está deshabilitado. Activa "
+                    "Modo Real y 'Bot autónomo real' en Configuración > Control de ejecución."
+                )
+            if not self.config.confirm_real_trading:
+                raise ValidationError(
+                    "Confirma explícitamente el inicio de la sesión autónoma en modo real."
                 )
             if self.live_trading_service is None:
                 raise ValidationError("LiveTradingService is not wired into the engine.")
@@ -491,13 +504,29 @@ class AutonomousEngine:
         self.last_confidence = round(confidence_pct, 1)
 
         log_msg = (
-            f"AI Committee Verdict: {signal_str.upper()} ({confidence_pct:.1f}% conf, {decision.consensus_level}) "
+            f"AI Committee Verdict: {signal_str.upper()} "
+            f"(signal-strength score {confidence_pct:.1f}%, not success probability; "
+            f"consensus {decision.consensus_level}) "
             f"@ ${current_price:,.2f}"
         )
 
         # 4. Check if signal meets execution threshold
         is_actionable = signal_str.upper() in ("BUY", "STRONG_BUY", "SELL", "STRONG_SELL")
         meets_confidence = confidence_pct >= self.config.min_confidence_pct
+
+        if not decision.risk_approved:
+            risk_reasons = (
+                "; ".join(f"{flag.code}: {flag.description}" for flag in decision.all_risk_flags)
+                or "El comité no aprobó la entrada."
+            )
+            self.add_log(
+                level="WARNING",
+                message=f"{log_msg} — Operación abstendida por Risk Manager: {risk_reasons}",
+                signal=signal_str.upper(),
+                confidence_pct=confidence_pct,
+                price=current_price,
+            )
+            return
 
         if not is_actionable or not meets_confidence:
             self.add_log(
@@ -526,6 +555,7 @@ class AutonomousEngine:
         try:
             portfolio = service.get_portfolio(mode)
             open_positions = service.get_positions(mode)
+            order_side = OrderSide.BUY if "BUY" in signal_str.upper() else OrderSide.SELL
 
             if len(open_positions) >= self.config.max_open_positions:
                 self.add_log(
@@ -537,28 +567,81 @@ class AutonomousEngine:
                 )
                 return
 
-            # Check if we already have an open position in the same symbol
-            for pos in open_positions:
-                if pos.symbol == symbol:
+            # Spot automation only manages positions it opened and tracks.
+            # A SELL signal must never liquidate an unrelated wallet balance.
+            symbol_position = next(
+                (position for position in open_positions if position.symbol == symbol),
+                None,
+            )
+            if order_side == OrderSide.SELL:
+                if symbol_position is None:
                     self.add_log(
                         level="INFO",
-                        message=f"{log_msg} — Position already active for {symbol}. Order skipped.",
+                        message=(
+                            f"{log_msg} — No hay posición del bot para cerrar; "
+                            "se omite la venta para no tocar saldo externo."
+                        ),
                         signal=signal_str.upper(),
                         confidence_pct=confidence_pct,
                         price=current_price,
                     )
                     return
 
-            # Sizing calculation based on risk %
+                if mode == ExecutionMode.REAL and self.live_trading_service is not None:
+                    closed_order = await self.live_trading_service.close_position(
+                        position_id=symbol_position.id,
+                        current_market_price=current_price,
+                        mode=mode,
+                        confirm=True,
+                        exchange=symbol_position.exchange,
+                    )
+                elif self.trading_service is not None:
+                    closed_order = self.trading_service.close_position(
+                        position_id=symbol_position.id,
+                        current_market_price=current_price,
+                        mode=ExecutionMode.PAPER,
+                    )
+                else:
+                    closed_order = None
+
+                if closed_order is not None:
+                    await self._persist_execution(closed_order, mode)
+                    self.trades_executed += 1
+                    self.add_log(
+                        level="SUCCESS",
+                        message=(
+                            f"Salida por señal IA: {symbol} cerrada a "
+                            f"${current_price:,.2f} ({signal_str.upper()})."
+                        ),
+                        signal=signal_str.upper(),
+                        confidence_pct=confidence_pct,
+                        price=current_price,
+                        order_id=str(closed_order.id)[:8],
+                    )
+                    if mode != ExecutionMode.REAL:
+                        await self._notify(
+                            "Salida por señal IA (paper)",
+                            f"Posición {symbol} cerrada por señal {signal_str.upper()}.",
+                            AlertSeverity.INFO,
+                            {"symbol": symbol, "mode": mode.value},
+                        )
+                return
+
+            if symbol_position is not None:
+                self.add_log(
+                    level="INFO",
+                    message=f"{log_msg} — Ya existe una posición del bot en {symbol}; se omite otra compra.",
+                    signal=signal_str.upper(),
+                    confidence_pct=confidence_pct,
+                    price=current_price,
+                )
+                return
+
+            # Size by loss at the stop, not by allocating risk% of equity as
+            # notional. The shared RiskService profile also caps risk and
+            # per-asset allocation; the Risk Guard in TradingService remains
+            # the independent final preflight.
             balance = float(portfolio.total_balance)
-            allocated_capital = balance * (self.config.risk_per_trade_pct / 100.0)
-            quantity = round(allocated_capital / current_price, 4)
-
-            if quantity <= 0:
-                quantity = 0.001
-
-            order_side = OrderSide.BUY if "BUY" in signal_str.upper() else OrderSide.SELL
-
             # Calculate SL and TP prices
             if order_side == OrderSide.BUY:
                 stop_loss = round(current_price * (1 - self.config.stop_loss_pct / 100.0), 2)
@@ -566,6 +649,40 @@ class AutonomousEngine:
             else:
                 stop_loss = round(current_price * (1 + self.config.stop_loss_pct / 100.0), 2)
                 take_profit = round(current_price * (1 - self.config.take_profit_pct / 100.0), 2)
+
+            sizing_request = PositionSizeRequest(
+                symbol=symbol,
+                account_balance=balance,
+                risk_percentage=self.config.risk_per_trade_pct,
+                entry_price=current_price,
+                stop_loss_price=stop_loss,
+                take_profit_price=take_profit,
+            )
+            if self.risk_service is not None:
+                sizing = self.risk_service.calculate_position_size(sizing_request)
+            else:
+                risk_settings = get_settings().risk
+                sizing = PositionSizer.calculate(
+                    sizing_request,
+                    RiskProfile(
+                        max_daily_loss_pct=float(risk_settings.daily_loss_pct),
+                        max_drawdown_pct=float(risk_settings.max_drawdown_pct),
+                        max_risk_per_trade_pct=float(risk_settings.max_risk_per_trade_pct),
+                        max_position_size_pct=float(risk_settings.position_size_pct),
+                        max_portfolio_exposure_pct=float(risk_settings.portfolio_exposure_pct),
+                        max_open_positions=int(risk_settings.max_open_positions),
+                    ),
+                )
+            quantity = round(sizing.recommended_units, 6)
+            if not sizing.is_valid_setup or quantity <= 0:
+                self.add_log(
+                    level="WARNING",
+                    message=(f"{log_msg} — Entrada omitida por sizing/riesgo: {sizing.notes}"),
+                    signal=signal_str.upper(),
+                    confidence_pct=confidence_pct,
+                    price=current_price,
+                )
+                return
 
             place_req = PlaceOrderRequest(
                 symbol=symbol,
@@ -575,6 +692,8 @@ class AutonomousEngine:
                 price=current_price,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
+                coordinator_decision_id=decision.id,
+                client_order_id=f"ata-{decision.id.hex[:24]}",
             )
 
             if mode == ExecutionMode.REAL and self.live_trading_service is not None:

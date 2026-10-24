@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from src.application.services.vault_service import ConnectionTestResult, VaultService
@@ -22,6 +22,7 @@ class StoreKeyBody(BaseModel):
 
 class TestConnectionBody(BaseModel):
     exchange: str = "binance"
+    is_testnet: bool | None = None
 
 
 @router.get(
@@ -65,7 +66,9 @@ async def test_live_connection(
 ) -> ConnectionTestResult:
     """Decrypts credentials in-memory, executes ping, and tests balance querying."""
     try:
-        return await vault_service.test_connection(exchange=body.exchange)
+        return await vault_service.test_connection(
+            exchange=body.exchange, is_testnet=body.is_testnet
+        )
     except Exception as exc:
         raise HTTPException(
             status_code=400, detail=f"Exchange connection test failed: {exc}"
@@ -75,9 +78,15 @@ async def test_live_connection(
 @router.delete("/keys/{exchange}", summary="Delete exchange credentials")
 async def delete_keys(
     exchange: str,
+    is_testnet: bool | None = Query(default=None),
     vault_service: VaultService = Depends(get_vault_service),
 ) -> dict[str, str]:
-    deleted = vault_service.delete_credential(exchange)
+    deleted = vault_service.delete_credential(exchange, is_testnet=is_testnet)
     if not deleted:
-        raise HTTPException(status_code=404, detail=f"No credentials found for {exchange}")
+        label = (
+            exchange
+            if is_testnet is None
+            else (f"{exchange} ({'testnet' if is_testnet else 'mainnet'})")
+        )
+        raise HTTPException(status_code=404, detail=f"No credentials found for {label}")
     return {"message": f"Credentials for {exchange} wiped from vault."}

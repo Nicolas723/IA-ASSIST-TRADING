@@ -67,6 +67,9 @@ async def hydrate_paper_exchange(
         available_balance=snapshot.available_balance if snapshot is not None else None,
         realized_pnl=snapshot.total_realized_pnl if snapshot is not None else None,
         peak_equity=snapshot.peak_value if snapshot is not None else None,
+        daily_pnl=snapshot.daily_pnl if snapshot is not None else None,
+        snapshot_equity=snapshot.total_balance if snapshot is not None else None,
+        snapshot_updated_at=snapshot.updated_at if snapshot is not None else None,
     )
 
     report = HydrationReport(
@@ -133,6 +136,9 @@ async def hydrate_live_trading_service(
         available_balance=snapshot.available_balance if snapshot is not None else None,
         realized_pnl=snapshot.total_realized_pnl if snapshot is not None else None,
         peak_value=snapshot.peak_value if snapshot is not None else None,
+        daily_pnl=snapshot.daily_pnl if snapshot is not None else None,
+        snapshot_equity=snapshot.total_balance if snapshot is not None else None,
+        snapshot_updated_at=snapshot.updated_at if snapshot is not None else None,
     )
 
     report = LiveHydrationReport(

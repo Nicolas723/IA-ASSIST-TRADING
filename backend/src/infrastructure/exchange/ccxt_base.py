@@ -11,7 +11,16 @@ from typing import TYPE_CHECKING
 
 import ccxt.async_support as ccxt
 
-from src.domain.market.entities import OHLCV, Candle, Exchange, SymbolStr, Tick, Timeframe
+from src.domain.market.entities import (
+    OHLCV,
+    Candle,
+    Exchange,
+    OrderBook,
+    OrderBookLevel,
+    SymbolStr,
+    Tick,
+    Timeframe,
+)
 from src.domain.market.ports import MarketDataPort
 from src.shared.exceptions.domain import ExchangeError, ExchangeRateLimitError
 from src.shared.logging.setup import get_logger
@@ -99,6 +108,40 @@ class CcxtBaseAdapter(MarketDataPort):
                 exchange=self.exchange_id.value,
             )
         return Decimal(str(last))
+
+    async def fetch_order_book(self, symbol: SymbolStr, limit: int = 5) -> OrderBook:
+        """Fetch only a shallow public order-book snapshot; never places an order."""
+        try:
+            raw = await self._client.fetch_order_book(symbol, limit=limit)
+            timestamp_ms = raw.get("timestamp")
+            timestamp = (
+                datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC)
+                if timestamp_ms is not None
+                else datetime.now(UTC)
+            )
+            return OrderBook(
+                symbol=symbol,
+                exchange=self._exchange_id,
+                timestamp=timestamp,
+                bids=[
+                    OrderBookLevel(price=Decimal(str(level[0])), quantity=Decimal(str(level[1])))
+                    for level in raw.get("bids", [])[:limit]
+                ],
+                asks=[
+                    OrderBookLevel(price=Decimal(str(level[0])), quantity=Decimal(str(level[1])))
+                    for level in raw.get("asks", [])[:limit]
+                ],
+            )
+        except ccxt.RateLimitExceeded as exc:
+            raise ExchangeRateLimitError(str(exc), exchange=self.exchange_id.value) from exc
+        except ccxt.NetworkError as exc:
+            raise ExchangeError(
+                f"Order-book network error: {exc}", exchange=self.exchange_id.value
+            ) from exc
+        except Exception as exc:
+            raise ExchangeError(
+                f"Error fetching order book: {exc}", exchange=self.exchange_id.value
+            ) from exc
 
     async def stream_candles(
         self, symbol: SymbolStr, timeframe: Timeframe

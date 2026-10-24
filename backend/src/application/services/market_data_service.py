@@ -24,7 +24,7 @@ from src.shared.logging.setup import get_logger
 if TYPE_CHECKING:
     from decimal import Decimal
 
-    from src.domain.market.entities import Candle, Timeframe
+    from src.domain.market.entities import Candle, OrderBook, Timeframe
     from src.domain.market.ports import CandleRepositoryPort, MarketDataPort
 
 logger = get_logger(__name__)
@@ -117,6 +117,10 @@ class MarketDataService:
         price = await self._exchange.fetch_last_price(symbol)
         logger.info("market_data_latest_price", symbol=symbol, price=float(price))
         return price
+
+    async def get_order_book(self, symbol: str, limit: int = 5) -> OrderBook:
+        """Return a shallow public quote snapshot for descriptive spread measurement."""
+        return await self._exchange.fetch_order_book(symbol=symbol, limit=limit)
 
     async def sync_symbol(
         self,

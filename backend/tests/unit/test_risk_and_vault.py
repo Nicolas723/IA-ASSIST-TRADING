@@ -49,7 +49,26 @@ def test_credential_vault_encryption(tmp_path: Path):
     all_creds = vault.list_configured_exchanges()
     assert len(all_creds) == 1
 
+    # Testnet and mainnet credentials coexist without replacing each other.
+    mainnet_cred = vault.store_credential(
+        exchange="binance",
+        api_key="mainnetKey123456",
+        api_secret="mainnetSecret123456",
+        is_testnet=False,
+    )
+    assert mainnet_cred.is_testnet is False
+    assert len(vault.list_configured_exchanges()) == 2
+    assert vault.get_credential_summary("binance", environment="testnet") == cred
+    assert vault.get_credential_summary("binance", environment="mainnet") == mainnet_cred
+    assert vault.list_environments("binance") == ["mainnet", "testnet"]
+
+    vault.set_active_environment("mainnet")
+    assert vault.get_decrypted_credential("binance")[0] == "mainnetKey123456"
+
     # Test delete
+    assert vault.delete_credential("binance", environment="testnet") is True
+    assert vault.get_decrypted_credential("binance", environment="testnet") is None
+    assert vault.get_decrypted_credential("binance", environment="mainnet") is not None
     assert vault.delete_credential("binance") is True
     assert vault.get_decrypted_credential("binance") is None
 
@@ -110,3 +129,84 @@ def test_risk_service_order_validation():
     result = risk_service.validate_order(valid_req)
     assert result.is_allowed is True
     assert len(result.violation_reasons) == 0
+
+
+@pytest.mark.unit
+def test_drawdown_guard_rejects_buy_above_remaining_asset_allocation():
+    guard = DrawdownGuard(profile=RiskProfile(max_position_size_pct=10.0))
+    request = OrderRiskCheckRequest(
+        symbol="BTC/USDT",
+        side="BUY",
+        price=100.0,
+        quantity=2.0,
+        stop_loss=98.0,
+        take_profit=104.0,
+        account_balance=1000.0,
+        current_symbol_exposure_usd=90.0,
+    )
+
+    result = guard.validate_order(request)
+
+    assert not result.is_allowed
+    assert any("per-asset allocation" in reason for reason in result.violation_reasons)
+
+
+@pytest.mark.unit
+def test_drawdown_guard_rejects_buy_above_portfolio_exposure_cap():
+    guard = DrawdownGuard(profile=RiskProfile(max_portfolio_exposure_pct=50.0))
+    request = OrderRiskCheckRequest(
+        symbol="ETH/USDT",
+        side="BUY",
+        price=100.0,
+        quantity=4.0,
+        stop_loss=98.0,
+        take_profit=104.0,
+        account_balance=1000.0,
+        current_total_exposure_usd=480.0,
+    )
+
+    result = guard.validate_order(request)
+
+    assert not result.is_allowed
+    assert any("portfolio exposure capacity" in reason for reason in result.violation_reasons)
+
+
+@pytest.mark.unit
+def test_drawdown_guard_does_not_block_sell_for_exposure_capacity():
+    guard = DrawdownGuard(profile=RiskProfile(max_position_size_pct=10.0))
+    request = OrderRiskCheckRequest(
+        symbol="BTC/USDT",
+        side="SELL",
+        price=100.0,
+        quantity=5.0,
+        stop_loss=100.1,
+        account_balance=1000.0,
+        current_total_exposure_usd=500.0,
+        current_symbol_exposure_usd=500.0,
+    )
+
+    result = guard.validate_order(request)
+
+    assert result.is_allowed
+    assert result.max_allowed_quantity > 0
+
+
+@pytest.mark.unit
+def test_risk_service_does_not_overwrite_more_conservative_request_state():
+    risk_service = RiskService()
+    request = OrderRiskCheckRequest(
+        symbol="BTC/USDT",
+        side="BUY",
+        price=100.0,
+        quantity=0.1,
+        stop_loss=98.0,
+        take_profit=104.0,
+        account_balance=1000.0,
+        current_drawdown_pct=risk_service.guard.profile.max_drawdown_pct,
+    )
+
+    result = risk_service.validate_order(request)
+
+    assert not result.is_allowed
+    assert risk_service.guard.kill_switch_active
+    assert any("drawdown" in reason.lower() for reason in result.violation_reasons)

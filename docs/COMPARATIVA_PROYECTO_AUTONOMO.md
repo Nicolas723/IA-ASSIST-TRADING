@@ -1,0 +1,116 @@
+# Comparativa: visión objetivo vs. estado actual
+
+## Conclusión ejecutiva
+
+El repositorio es una base funcional de trading autónomo centrada principalmente en Binance/cripto: tiene datos OHLCV, comité técnico/de acción del precio/riesgo, modo paper y adaptadores de ejecución real, límites, auditoría de decisiones, atribución inicial de resultados, optimización walk-forward y gateway LLM multi-proveedor. **Aún no es** el sistema de investigación, selección multimercado, memoria acumulativa y mejora demostrable descrito en el proyecto. La presencia de un LLM no implica aprendizaje: hoy no hay un ciclo que valide y despliegue modelos/estrategias a partir de resultados.
+
+El código actual y los cambios locales sin commit fueron tratados como trabajo existente; esta comparativa no los revierte.
+
+## Matriz de brechas
+
+| Área del documento | Estado observado | Brecha principal |
+|---|---|---|
+| Análisis de mercado | Parcial | El comité analiza un símbolo/temporalidad por solicitud; el ciclo autónomo tiene un `symbol` único. No hay universo global que puntúe alternativas simultáneas. |
+| Multimercado | Inicial | Hay abstracciones/adaptadores orientados a exchanges y Binance spot operativo. `GET /api/v1/market/coverage` declara explícitamente qué está implementado: Binance spot está soportado de extremo a extremo y Bybit solo como fuente de datos públicos (OHLCV, ticker y libro); forex, acciones, índices, materias primas y futuros figuran como `not_implemented`. |
+| Selección de oportunidades | Parcial | Hay un ranking shadow descriptivo y una política de abstención con puertas explícitas (frescura, spread, coste, evidencia neta) que solo permite revisión manual; no hay asignación de capital ni ejecución automática. |
+| Investigación y patrones | Parcial | Existen backtesting y optimización con división in/out-of-sample; no hay laboratorio autónomo de hipótesis, fuentes externas verificables ni aprobación de estrategias. |
+| IA y fallback | Parcial | Gateway y fallback de proveedores conectados al comité. Los agentes LLM solo cubren análisis técnico y acción del precio; la cadena de proveedores requiere credenciales y pruebas operativas. |
+| Incertidumbre | Brecha prioritaria | El coordinador sustituía puntuaciones agregadas bajas por 0.65. Esto distorsiona confianza y puede convertir señales débiles en elegibles por umbral. Ya se retiró ese suelo artificial en `coordinator.py`; la confianza aún no está calibrada como probabilidad. |
+| Ejecución y conciliación | Parcial | Existen paper/live, journal y reconciliación de órdenes abiertas por `client_order_id` tras reinicio, con fills parciales idempotentes e importación al arranque de órdenes propias (`ata-`) nunca journalizadas. Falta recuperar órdenes ya cerradas sin registro y demostrar recuperación completa ante discrepancias cuenta/registro. |
+| Riesgo global | Parcial | Hay guard/circuit breaker y límites por activo y exposición bruta agregada en el preflight; falta una fuente persistente/conciliada con el exchange, concentración y correlación de cartera. El guard por sí solo no demuestra límites globales. |
+| Aprendizaje | Inicial | `LearningService` atribuye resultados y métricas; no actualiza pesos ni aprende estrategias. No debe habilitar cambios automáticos al comité. |
+| Memoria persistente | Parcial | Existe una memoria de investigación versionada (`research_notes`) con procedencia, vigencia, ámbito, evidencia y estado de validación; las correcciones crean una revisión nueva y marcan la anterior como superseded. `GET /api/v1/research/context` devuelve contexto vigente por símbolo/temporalidad. Los agentes LLM pueden recibirlo solo con `RESEARCH_CONTEXT_IN_PROMPTS=true`, limitado a notas `supported` vigentes, en un bloque marcado como datos no confiables y con tamaño acotado; no altera riesgo, ejecución ni el esquema de salida. |
+| Eficiencia/coste IA | Parcial | Hay telemetría de tokens por agente y proveedor, latencia, fallos, fallbacks y un coste estimado configurable por tarifas; un presupuesto diario opcional bloquea llamadas al agotarse (contador en memoria, reinicia a medianoche UTC o al reiniciar). Faltan caché semántica, presupuesto por ciclo/estrategia y medición del valor incremental de cada llamada. |
+| Régimen y drift | Parcial | `GET /api/v1/mlops/drift` compara la ventana reciente de resultados cerrados con la anterior y publica `insufficient_data`/`stable`/`watch`/`degraded` con señales de tasa de acierto y retorno neto medio. Es solo lectura: no suspende trading ni ajusta sizing, y una muestra pequeña no se interpreta como cambio de régimen. Falta un detector de régimen de mercado y una política de suspensión validada. |
+| Transparencia | Parcial | Hay UI simplificada, logs y endpoints MLOps/runtime; el panel de riesgo muestra pérdida diaria, drawdown, posiciones y exposición bruta frente a sus límites, el panel de oportunidades muestra el ranking shadow, la decisión de abstención y el uso de tokens del LLM, y el panel de drift muestra ventanas, señales y estado sin suspender nada. Faltan estado de estrategias/investigaciones y coste monetario exacto por proveedor. |
+| Autonomía segura | Parcial | Hay controles runtime, opt-in real/Mainnet y circuit breaker; faltan pruebas operativas prolongadas y evidencia objetiva para progresar de nivel. |
+
+## Correcciones aplicadas durante el desarrollo continuo
+
+- La ruta autónoma ahora respeta el veto `risk_approved` del comité antes de considerar una entrada y dimensiona la posición por pérdida teórica al stop, limitada por el perfil de riesgo; no sustituye el preflight independiente de `TradingService`.
+- `RiskService` ya no sobrescribe métricas de cartera más conservadoras con su estado en memoria desactualizado. El modo Paper calcula P&L diario de equity, lo persiste en snapshots y lo restaura al reiniciar en el mismo día UTC.
+- Sharpe/Sortino en backtests se anualizan por la temporalidad configurada, no como si cada vela fuera diaria.
+- Las órdenes autónomas derivan un `client_order_id` estable de la decisión auditada; el ledger live incorpora también cantidades realmente ejecutadas en fills parciales. Esto reduce duplicados y evita ignorar una exposición parcial, pero no sustituye la conciliación de órdenes abiertas con el exchange tras un crash.
+- El preflight de Paper y Live envía la exposición actual por activo y la exposición bruta total; el límite por activo ya no se evalúa aislando cada orden. `MAX_POSITION_SIZE_PCT` y `MAX_PORTFOLIO_EXPOSURE_PCT` acotan la posición acumulada y la cartera, respectivamente. Sigue faltando conciliación de exposición con el exchange y correlación entre activos.
+- Tras reiniciar, el guard consulta al exchange las órdenes `open`/`partially_filled` restauradas usando su `client_order_id` y contabiliza solo el delta ejecutado, por lo que repetir el sondeo no duplica fills. El journal guarda ahora todos los fills parciales de una orden. Además, el arranque importa órdenes abiertas del exchange cuyo `client_order_id` empieza por `ata-` y que no estén en el registro, atribuyéndolas sin adivinar. Límite conocido: una orden que se llenó por completo antes de la importación no se puede recuperar por este mecanismo.
+- Las evaluaciones shadow registran el retorno bruto y el neto tras un coste de ida y vuelta configurable (`SHADOW_ROUND_TRIP_COST_PCT`), además de un estado `net_evidence_status`. Sigue siendo movimiento de precio descriptivo, no P&L realizado.
+- El gateway LLM aplica un tope diario opcional de tokens (`LLM_DAILY_TOKEN_BUDGET`) y expone uso/restante en `/api/v1/agents/llm/status`; al agotarse, los agentes caen a su análisis determinista. La telemetría desglosa tokens, llamadas, fallos, latencia media, fallbacks y coste estimado por agente y proveedor; el coste usa tarifas opcionales por millón de tokens y devuelve `null` si no están configuradas. Los contadores no son durables entre procesos.
+- El endpoint `/api/v1/risk/status` y el panel de riesgo muestran equity, exposición bruta y límites reales; antes la UI leía nombres de campo que el backend no devolvía y podía mostrar ceros.
+- `POST /api/v1/agents/scan/shadow/{scan_id}/assessment` aplica una política de abstención explícita sobre un escaneo persistido: exige snapshot fresco, precio y spread conocidos, spread bajo el límite, movimiento neto de spread y coste por encima del margen mínimo, y suficientes evaluaciones netas maduras. Solo puede devolver `eligible_for_manual_review` o `abstain`; `execution_enabled` y `automatic_routing` permanecen en `false` y no existe ruta hacia órdenes. El panel de la interfaz muestra ese estado junto al uso de tokens del LLM.
+- La memoria de investigación expone `/api/v1/research/notes` (crear, listar, obtener, superseder, cambiar estado) y `/api/v1/research/context` (notas vigentes por símbolo/temporalidad). La interfaz muestra esas notas junto al panel de oportunidades con la etiqueta de solo lectura. Los agentes no las consumen por defecto: con `RESEARCH_CONTEXT_IN_PROMPTS=true` se añaden solo notas `supported` vigentes, dentro de un bloque delimitado que las declara datos no confiables y con un máximo de notas/caracteres. Una nota nunca puede cambiar por sí sola señales, sizing ni el veto de riesgo.
+- `GET /api/v1/market/coverage` publica la cobertura real por clase de activo. Evita que la interfaz o los informes sugieran soporte multimercado inexistente: solo Binance spot está soportado de extremo a extremo, y la ejecución sigue sujeta a sus propios flags.
+- La ingesta pública de datos puede seleccionarse entre Binance y Bybit con `MARKET_DATA_EXCHANGE`; ambas rutas usan CCXT y escriben velas bajo su propio exchange. La ruta Bybit tiene un adaptador dedicado y pruebas de mapeo sin red, pero su conectividad live no se ha validado en este entorno. Bybit no tiene ejecución, conciliación de posiciones ni OCO, y la cobertura lo declara como `market_data_supported` con `execution_available=false`.
+- `GET /api/v1/mlops/drift` compara una ventana reciente de resultados cerrados y atribuidos contra la ventana anterior. Devuelve `insufficient_data` si no hay muestra mínima, y `stable`/`watch`/`degraded` según la caída de tasa de acierto y retorno neto medio. Es estrictamente descriptivo y de solo lectura: no suspende trading, no redimensiona posiciones ni modifica pesos de agentes.
+
+## Fases recomendadas
+
+### Fase 0 — Seguridad y medición (primero)
+- Revocar cualquier secreto expuesto y verificar configuración sin imprimir credenciales.
+- Eliminar puntuaciones artificiales y documentar que `confidence` no es probabilidad.
+- Medir calibración, resultados netos con costes, calidad de ejecución y uso/coste de IA.
+- Establecer contratos de datos, criterios de abstención y pruebas deterministas.
+
+### Fase 1 — Selección multimercado en sombra (sin órdenes)
+- Configurar un universo explícito y limitado de símbolos compatibles.
+- Obtener cotizaciones/datos actuales, validar frescura y analizar candidatos en paralelo con límites de concurrencia.
+- Producir un ranking explicable basado en señales, datos, costes disponibles y restricciones; no enviar órdenes.
+- Persistir snapshots y resultados para comparar selección vs. alternativas y evaluar utilidad antes de activar ejecución.
+
+### Fase 2 — Simulación y laboratorio de estrategias
+- Separar investigación de runtime; incorporar comisiones, spread/slippage y restricciones de mercado.
+- Walk-forward/holdout temporal, referencias, robustez por régimen y controles de sesgo/sobreajuste.
+- Versionar hipótesis, datasets, parámetros y resultados. No promover automáticamente estrategias.
+
+### Fase 3 — Cartera global y ejecución resiliente
+- Conciliar saldos, órdenes y posiciones reales al inicio y periódicamente; idempotencia y recuperación ante fallos.
+- Aplicar límites agregados por cartera/activo/mercado y correlación mediante Risk Guard independiente.
+- Simular el ciclo completo y ensayar errores antes de Testnet; mantener suspendidas nuevas entradas si el estado no concuerda.
+
+### Fase 4 — Memoria, feedback y eficiencia
+- Memoria estructurada de investigación/resultados con procedencia, vigencia y estados hecho/hipótesis/validado.
+- Atribución y evaluación incremental, calibración por estrategia/régimen y monitor de degradación.
+- Caché/reutilización, presupuesto de llamadas y escalado a LLM solo ante eventos relevantes.
+- Cambios de estrategia únicamente en shadow/paper, con promoción explícita, versionado y rollback.
+
+### Fase 5 — Expansión multimercado y autonomía adaptativa
+- Incorporar cada clase de activo mediante adaptadores específicos, horarios, costes y controles regulatorios/técnicos.
+- Operación real limitada solo después de criterios cuantitativos acordados; ampliar autonomía por evidencia, nunca por confianza declarada por el modelo.
+
+## Trabajo realizado en Fase 0
+
+Se retiró en `backend/src/domain/agents/coordinator.py` el fallback que elevaba las puntuaciones agregadas bajas a 65%. Los contratos de API documentan que la confianza individual es heurística y que la puntuación agregada es la magnitud del voto ponderado, no una probabilidad. La respuesta del comité, los textos de interfaz y las instrucciones del LLM también aclaran ese significado. La puntuación todavía gobierna el umbral configurado, pero no debe interpretarse como probabilidad de éxito.
+
+`AgentService` ahora rechaza datos cuyo candle más reciente exceda dos intervalos de la temporalidad solicitada; así no se analiza un mercado con datos claramente obsoletos. `.gitignore` excluye `.env` y la bóveda. El gateway recoge tokens por proveedor/modelo en métricas Prometheus; aún no calcula coste monetario porque no existe una tabla de precios versionada, así que no se debe reportar un coste USD ficticio.
+
+Los rangos de resultados direccionales ahora muestran `Muestra insuficiente` por debajo de 30 cierres y `Exploratoria` a partir de ese umbral. Es una etiqueta descriptiva para evitar conclusiones con muestras pequeñas; **30 observaciones no prueban calibración ni robustez**. Las tasas se refieren al acierto direccional, no a rentabilidad neta.
+
+Como primer incremento de la Fase 1 se añadió `POST /api/v1/agents/scan/shadow`. Acepta un universo explícito de 1 a 5 símbolos Binance, obtiene hasta 100 velas por candidato, rechaza datos insuficientes/obsoletos, calcula únicamente variación observada y ordena por movimiento absoluto. Es secuencial para no ejecutar consultas concurrentes sobre la misma sesión de base de datos ni generar ráfagas al exchange. No llama al LLM ni tiene dependencia de ejecución. **No es aún un selector de oportunidades**: no descuenta costes, no estima probabilidad ni riesgo de cartera.
+
+El código guarda snapshots en `shadow_scan_runs` mediante la migración `e6f7091a2b3c`, y `GET /api/v1/agents/scan/shadow/history` expone el historial acotado. La migración de evaluaciones `f7a8b9c0d1e2` también está aplicada y es el head actual. El rol de PostgreSQL del contenedor quedó alineado con la credencial de desarrollo definida en Docker Compose; la configuración `.env` del backend local puede usar otro valor y debe sincronizarse antes de ejecutar Alembic desde el host. Esto permite evaluación temporal descriptiva; no debe interpretarse el ranking como rentabilidad ni se conecta a trading.
+
+Se verificó el flujo real en sombra con BTC/USDT y ETH/USDT: ambas cotizaciones se analizaron, el resultado indicó `execution_enabled=false` y el snapshot apareció en el historial persistido. La prueba consultó velas públicas de Binance; no usó LLM ni ejecutó operaciones.
+
+La capacidad de evaluación está aislada del scanner y de la ejecución: `POST /api/v1/agents/scan/shadow/{scan_id}/evaluate?horizon_candles=24` evalúa cada snapshot en cuanto madura, sin exigir un historial de 30 muestras; compara el rank 1 con alternativas y con el retorno equiponderado del universo. La ruta `evaluate-horizons` facilita medición secuencial a varios horizontes, y `/evaluations/summary` separa conteos brutos de ventanas no solapadas. El umbral de 30 clasifica únicamente la solidez de una **validación estadística agregada**: no bloquea el ranking ni la evaluación descriptiva continua del ciclo actual (`blocks_current_shadow_scan=false`). El conteo no garantiza independencia estadística. Los retornos son brutos, sin costes, y no equivalen a P&L ni rentabilidad; esta clasificación tampoco habilita trading real.
+
+El scanner ahora consulta también un order book público superficial por símbolo y registra `quoted_spread_pct` cuando bid/ask son válidos y la cotización no excede 60 segundos de antigüedad. `observed_movement_less_spread_pct` resta ese spread observado al movimiento histórico absoluto solo como contraste descriptivo; no cambia el ranking ni es retorno futuro. No incluye comisión, impacto de tamaño/slippage, financiación ni el spread histórico en el horizonte de evaluación; si falta order book, marca el coste como no disponible en lugar de asumir cero. El cálculo y el precio de entrada usan únicamente velas ya cerradas, excluyendo la vela activa.
+
+Las evaluaciones anclan ahora el horizonte al cierre de la vela de entrada, no al instante de arranque del proceso. `evaluation_anchor_at` expone ese ancla y el resumen de no-solapamiento la prefiere, con fallback al timestamp del scan para registros antiguos. Esto reduce el desfase artificial entre vela de entrada y vela futura; sigue siendo movimiento bruto descriptivo y no retorno neto.
+
+El recopilador continuo opcional (`SHADOW_SCAN_AUTORUN`) solo arranca con `APP_ENV=development`, escanea como máximo cinco símbolos en `1h` y evalúa cada snapshot individual cuando madura. El intervalo mínimo validado es 3600 s; usa datos públicos, no depende de componentes de ejecución y cancela su tarea al cerrar FastAPI. Está habilitado en el `.env` local de desarrollo; no se habilita por defecto en otras instalaciones. El primer ciclo real local persistió cinco símbolos y `execution_enabled=false`. Alcanzar 30 horas permitiría clasificar la muestra acumulada como exploratoria, pero **no es requisito para operar cada ciclo shadow ni para producir su ranking descriptivo**; sigue sin ser evidencia de rentabilidad ni autorización para habilitar trading real.
+
+La prueba operativa de 2026-10-24 confirmó dos escaneos de 1 minuto: uno de BTC/USDT individual (sin alternativa para comparar) y otro de BTC/USDT+ETH/USDT con ambos precios futuros medidos. En este último, el rank 1 tuvo retorno bruto `0.018135%`, la alternativa `0.027167%`, y la diferencia top-menos-alternativas fue `-0.009032` puntos porcentuales. El agregado quedó con 1 comparación válida y estado `insufficient`; es una observación aislada, no una conclusión de desempeño. Las respuestas indicaron `execution_enabled=false`; no hubo llamadas LLM ni órdenes.
+
+Antes de seguir probando, se detectó que `.env` no era la única fuente de configuración: `vault/.runtime_config.json` reactivaba modo real. Ambos controles quedaron deshabilitados (paper, sin real, mainnet, trading autónomo real ni OCO), y `/api/v1/trading/real/status` confirmó `enabled=false`. La credencial vault sigue configurada; los flags deshabilitados son el control efectivo. La interfaz de configuración puede reactivarlos explícitamente, así que verificar el endpoint de estado forma parte del checklist previo a pruebas.
+
+## Criterios para salir de la fase de sombra
+
+1. Datos frescos y fallos de mercado identificados; un candidato con datos incompletos no se puede clasificar como oportunidad.
+2. Ranking reproducible, con factores y motivos de abstención visibles; no tratar `confidence` como probabilidad.
+3. Sin ruta del scanner a órdenes reales.
+4. Resultados persistidos y comparables contra baseline y selección aleatoria apropiada.
+5. Costes/latencia/cobertura medidos; errores de proveedor LLM no bloquean la supervisión de riesgo.
+6. Pruebas que demuestren que los límites existentes siguen siendo independientes del análisis.
+
+## Seguridad de credenciales
+
+Las claves que se cargaron en `backend/.env` aparecieron accidentalmente en una salida de diagnóstico de esta sesión. Deben considerarse comprometidas: revocarlas en cada proveedor, crear reemplazos y mantenerlas únicamente en el archivo local ignorado por Git/secret manager. No se realizó ninguna llamada de prueba a proveedores.

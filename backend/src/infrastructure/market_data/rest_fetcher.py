@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from datetime import datetime
     from decimal import Decimal
 
-    from src.domain.market.entities import Candle, Exchange, Tick, Timeframe
+    from src.domain.market.entities import Candle, Exchange, OrderBook, Tick, Timeframe
 
 logger = get_logger(__name__)
 
@@ -162,6 +162,24 @@ class RetryingMarketDataFetcher(MarketDataPort):
             raise last_error
         raise ExchangeError(
             f"Unable to fetch last price for {symbol}", exchange=self.exchange_id.value
+        )
+
+    async def fetch_order_book(self, symbol: str, limit: int = 5) -> OrderBook:
+        """Retry transient failures fetching the small public order-book snapshot."""
+        last_error: Exception | None = None
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                return await self._inner.fetch_order_book(symbol, limit=limit)
+            except ExchangeRateLimitError as exc:
+                last_error = exc
+                await asyncio.sleep(self._base_delay * (self._backoff_factor**attempt) * 2)
+            except ExchangeError as exc:
+                last_error = exc
+                if attempt < self._max_retries:
+                    await asyncio.sleep(self._base_delay * self._backoff_factor ** (attempt - 1))
+        raise ExchangeError(
+            f"Order-book request failed after {self._max_retries} attempts: {last_error}",
+            exchange=self.exchange_id.value,
         )
 
     @property

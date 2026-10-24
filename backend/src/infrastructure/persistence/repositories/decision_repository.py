@@ -18,6 +18,7 @@ from src.infrastructure.persistence.models.audit import DecisionLogModel
 from src.infrastructure.persistence.repositories.trading_repository import _ensure_utc
 
 if TYPE_CHECKING:
+    from datetime import datetime
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -70,10 +71,13 @@ class SqlDecisionRepository(DecisionRepositoryPort):
         self,
         symbol: SymbolStr | None = None,
         limit: int = 20,
+        since: datetime | None = None,
     ) -> list[CoordinatorDecision]:
         stmt: Any = select(DecisionLogModel)
         if symbol is not None:
             stmt = stmt.where(DecisionLogModel.symbol == symbol)
+        if since is not None:
+            stmt = stmt.where(DecisionLogModel.created_at >= _ensure_utc(since))
         stmt = stmt.order_by(DecisionLogModel.created_at.desc()).limit(limit)
         result = await self._session.execute(stmt)
         return [model_to_decision(m) for m in result.scalars().all()]

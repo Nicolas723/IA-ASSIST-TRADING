@@ -9,11 +9,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.application.services.market_data_service import MarketDataService
+from src.application.services.risk_service import RiskService
 from src.application.services.trading_service import TradingService
 from src.application.services.vault_service import VaultService
 from src.domain.market.entities import OHLCV, Candle, Exchange, Timeframe
 from src.domain.trading.entities import ExecutionMode, Order, OrderSide, OrderStatus, OrderType
-from src.infrastructure.exchange.paper import PlaceOrderRequest
+from src.infrastructure.exchange.paper import PaperExchange, PlaceOrderRequest
+from src.shared.exceptions.domain import RiskViolationError
 
 
 def create_sample_candle() -> Candle:
@@ -79,6 +81,79 @@ def test_trading_service_place_order():
 
     assert result.status == OrderStatus.FILLED
     assert result.symbol == "BTC/USDT"
+
+
+def test_paper_daily_equity_loss_updates_risk_state_and_survives_restore():
+    paper = PaperExchange(initial_balance=10_000, fee_rate=0, slippage=0)
+    risk = RiskService()
+    service = TradingService(paper_exchange=paper, risk_service=risk)
+    request = PlaceOrderRequest(
+        symbol="BTC/USDT",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        quantity=Decimal("1"),
+        stop_loss=Decimal("99"),
+        take_profit=Decimal("102"),
+    )
+
+    service.place_order(request, current_market_price=100)
+    service.update_market_prices({"BTC/USDT": 98})
+    portfolio = service.get_portfolio()
+
+    assert portfolio.daily_pnl == Decimal("-2.0")
+    assert risk.current_daily_loss_pct == pytest.approx(0.02)
+    assert portfolio.gross_exposure_usd == Decimal("98")
+    assert risk.current_gross_exposure_usd == pytest.approx(98)
+    status = risk.get_status()
+    assert status.gross_exposure_usd == pytest.approx(98)
+    assert status.current_equity_usd == pytest.approx(9998)
+    assert status.max_portfolio_exposure_pct > 0
+
+    restored = PaperExchange(initial_balance=10_000, fee_rate=0, slippage=0)
+    restored.restore(
+        positions=service.get_positions(),
+        orders=service.get_orders(),
+        trades=service.get_trades(),
+        available_balance=portfolio.available_balance,
+        realized_pnl=portfolio.total_realized_pnl,
+        peak_equity=portfolio.peak_value,
+        daily_pnl=portfolio.daily_pnl,
+        snapshot_equity=portfolio.total_balance,
+        snapshot_updated_at=portfolio.updated_at,
+    )
+
+    assert restored.get_portfolio().daily_pnl == Decimal("-2.0")
+
+
+def test_paper_preflight_counts_existing_exposure_before_new_buy():
+    paper = PaperExchange(initial_balance=10_000, fee_rate=0, slippage=0)
+    risk = RiskService()
+    service = TradingService(paper_exchange=paper, risk_service=risk)
+
+    service.place_order(
+        PlaceOrderRequest(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            quantity=Decimal("1"),
+            stop_loss=Decimal("99"),
+            take_profit=Decimal("102"),
+        ),
+        current_market_price=100,
+    )
+
+    with pytest.raises(RiskViolationError, match="per-asset allocation"):
+        service.place_order(
+            PlaceOrderRequest(
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                quantity=Decimal("5"),
+                stop_loss=Decimal("99.5"),
+                take_profit=Decimal("101"),
+            ),
+            current_market_price=100,
+        )
 
 
 def test_vault_service_list_credentials():

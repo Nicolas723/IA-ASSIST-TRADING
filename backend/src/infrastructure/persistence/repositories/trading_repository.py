@@ -155,6 +155,7 @@ def trade_to_model(trade: Trade) -> TradeModel:
         commission=trade.commission,
         commission_asset=trade.commission_asset,
         strategy_id=trade.strategy_id,
+        coordinator_decision_id=trade.coordinator_decision_id,
         executed_at=_ensure_utc(trade.executed_at),
     )
 
@@ -172,6 +173,7 @@ def model_to_trade(model: TradeModel) -> Trade:
         commission=_dec_required(model.commission),
         commission_asset=model.commission_asset,
         strategy_id=model.strategy_id,
+        coordinator_decision_id=model.coordinator_decision_id,
         executed_at=model.executed_at,
     )
 
@@ -194,6 +196,7 @@ def position_to_model(position: Position) -> PositionModel:
         stop_loss=position.stop_loss,
         take_profit=position.take_profit,
         strategy_id=position.strategy_id,
+        coordinator_decision_id=position.coordinator_decision_id,
         opened_at=_ensure_utc(position.opened_at),
         updated_at=_ensure_utc(position.updated_at),
     )
@@ -214,6 +217,7 @@ def model_to_position(model: PositionModel) -> Position:
         stop_loss=_dec(model.stop_loss),
         take_profit=_dec(model.take_profit),
         strategy_id=model.strategy_id,
+        coordinator_decision_id=model.coordinator_decision_id,
         opened_at=model.opened_at,
         updated_at=model.updated_at,
     )
@@ -247,6 +251,27 @@ class SqlTradingRepository(TradingRepositoryPort):
             stmt = stmt.where(OrderModel.mode == mode.value)
         if symbol is not None:
             stmt = stmt.where(OrderModel.symbol == symbol)
+        stmt = stmt.order_by(OrderModel.created_at.desc()).limit(limit)
+        result = await self._session.execute(stmt)
+        return [model_to_order(m) for m in result.scalars().all()]
+
+    async def list_orders_for_attribution(
+        self,
+        mode: ExecutionMode | None = None,
+        symbol: SymbolStr | None = None,
+        since: datetime | None = None,
+        decision_id: UUID | None = None,
+        limit: int = 5000,
+    ) -> list[Order]:
+        stmt = select(OrderModel).where(OrderModel.status == OrderStatus.FILLED.value)
+        if mode is not None:
+            stmt = stmt.where(OrderModel.mode == mode.value)
+        if symbol is not None:
+            stmt = stmt.where(OrderModel.symbol == symbol)
+        if since is not None:
+            stmt = stmt.where(OrderModel.created_at >= _ensure_utc(since))
+        if decision_id is not None:
+            stmt = stmt.where(OrderModel.coordinator_decision_id == decision_id)
         stmt = stmt.order_by(OrderModel.created_at.desc()).limit(limit)
         result = await self._session.execute(stmt)
         return [model_to_order(m) for m in result.scalars().all()]

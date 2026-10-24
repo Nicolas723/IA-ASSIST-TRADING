@@ -7,10 +7,13 @@ from decimal import Decimal
 
 import pytest
 
+from src.domain.agents.base import BaseAgent
 from src.domain.agents.coordinator import AgentCoordinator
 from src.domain.agents.entities import (
+    AgentOutput,
     AgentTask,
     AgentType,
+    SignalDirection,
 )
 from src.domain.agents.specialists.price_action_analyst import PriceActionAnalystAgent
 from src.domain.agents.specialists.risk_manager import RiskManagerAgent
@@ -93,3 +96,40 @@ async def test_agent_coordinator_consensus():
     assert decision.consensus_level >= 0.0
     assert decision.aggregate_confidence > 0.0
     assert decision.action_recommendation != ""
+
+
+class LowScoreAgent(BaseAgent):
+    def __init__(self, kind: AgentType) -> None:
+        self.kind = kind
+
+    @property
+    def agent_type(self) -> AgentType:
+        return self.kind
+
+    async def analyze(self, task: AgentTask) -> AgentOutput:
+        return AgentOutput(
+            task_id=task.task_id,
+            agent_type=self.kind,
+            symbol=task.symbol,
+            signal=SignalDirection.BUY,
+            confidence=0.05,
+            reasoning="Weak directional evidence with low heuristic signal strength.",
+        )
+
+    async def fallback_analyze(self, task: AgentTask) -> AgentOutput:
+        return await self.analyze(task)
+
+
+@pytest.mark.asyncio
+async def test_coordinator_does_not_inflate_low_signal_strength() -> None:
+    kinds = [
+        AgentType.TECHNICAL_ANALYST,
+        AgentType.PRICE_ACTION_ANALYST,
+        AgentType.RISK_MANAGER,
+    ]
+    coordinator = AgentCoordinator(specialists=[LowScoreAgent(kind) for kind in kinds])
+
+    decision = await coordinator.coordinate(create_sample_task(AgentType.COORDINATOR))
+
+    assert decision.aggregate_confidence == 0.05
+    assert "not a probability of success" in decision.action_recommendation

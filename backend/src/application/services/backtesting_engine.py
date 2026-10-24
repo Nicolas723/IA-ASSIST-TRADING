@@ -9,6 +9,7 @@ import math
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from src.domain.market.entities import Timeframe
 from src.domain.strategy.entities import (
     BacktestConfig,
     BacktestResult,
@@ -228,15 +229,22 @@ class BacktestingEngine:
         avg_win = round(gross_gains / len(winning_trades), 2) if winning_trades else 0.0
         avg_loss = round(gross_losses / len(losing_trades), 2) if losing_trades else 0.0
 
-        # Sharpe & Sortino Ratios (Annualized assuming 365 periods/year approximation)
+        # Annualize with the configured candle frequency. Treating every
+        # observation as daily materially misstates risk for intraday backtests.
         if len(daily_returns) > 1:
+            timeframe = Timeframe(config.timeframe)
+            periods_per_year = 365.0 * 24.0 * 60.0 * 60.0 / timeframe.seconds
             mean_ret = sum(daily_returns) / len(daily_returns)
             variance = sum((r - mean_ret) ** 2 for r in daily_returns) / len(daily_returns)
             std_dev = math.sqrt(variance)
 
-            # Annualized risk-free rate approx 2%
-            rf_period = 0.02 / 365.0
-            sharpe = (mean_ret - rf_period) / std_dev * math.sqrt(365.0) if std_dev > 0 else 0.0
+            annual_risk_free_rate = 0.02
+            rf_period = annual_risk_free_rate / periods_per_year
+            sharpe = (
+                (mean_ret - rf_period) / std_dev * math.sqrt(periods_per_year)
+                if std_dev > 0
+                else 0.0
+            )
 
             # Downside deviation for Sortino
             downside_returns = [r for r in daily_returns if r < 0]
@@ -244,7 +252,7 @@ class BacktestingEngine:
                 downside_var = sum(r**2 for r in downside_returns) / len(downside_returns)
                 downside_std = math.sqrt(downside_var)
                 sortino = (
-                    (mean_ret - rf_period) / downside_std * math.sqrt(365.0)
+                    (mean_ret - rf_period) / downside_std * math.sqrt(periods_per_year)
                     if downside_std > 0
                     else 0.0
                 )

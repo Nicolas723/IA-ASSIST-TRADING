@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -37,6 +39,110 @@ class SyncResponse(BaseModel):
     symbol: str
     timeframe: str
     candles_synced: int
+
+
+class MarketCoverageEntry(BaseModel):
+    asset_class: str
+    status: str
+    exchanges: list[str]
+    execution_available: bool
+    notes: str
+
+
+class MarketCoverageResponse(BaseModel):
+    generated_at: str
+    configured_symbols: list[str]
+    shadow_symbols: list[str]
+    active_market_data_exchange: str
+    entries: list[MarketCoverageEntry]
+
+
+@router.get(
+    "/coverage",
+    response_model=MarketCoverageResponse,
+    summary="Report which markets are actually implemented",
+)
+async def market_coverage() -> MarketCoverageResponse:
+    """Describe real capability instead of implying multimarket support.
+
+    ``execution_available`` means the code path exists, not that trading is
+    enabled: real trading stays behind its own independent safety flags.
+    """
+    settings = get_settings()
+    return MarketCoverageResponse(
+        generated_at=datetime.now(tz=UTC).isoformat(),
+        configured_symbols=list(settings.default_symbols),
+        shadow_symbols=list(settings.shadow_scan_symbols),
+        active_market_data_exchange=settings.market_data_exchange,
+        entries=[
+            MarketCoverageEntry(
+                asset_class="crypto_spot",
+                status="supported",
+                exchanges=["binance"],
+                execution_available=True,
+                notes=(
+                    "Market data and order execution exist for Binance spot. Execution is "
+                    "disabled unless the real-trading flags and credentials are explicitly set."
+                ),
+            ),
+            MarketCoverageEntry(
+                asset_class="crypto_spot_bybit_data",
+                status="market_data_supported",
+                exchanges=["bybit"],
+                execution_available=False,
+                notes=(
+                    "Public OHLCV, ticker and order-book ingestion uses a dedicated CCXT "
+                    "adapter; live connectivity has not been validated end-to-end here. "
+                    "No Bybit order execution, position reconciliation or OCO path is implemented."
+                ),
+            ),
+            MarketCoverageEntry(
+                asset_class="crypto_spot_other_exchanges",
+                status="adapter_base_only",
+                exchanges=["kraken", "coinbase"],
+                execution_available=False,
+                notes=(
+                    "A generic CCXT market-data base exists, but no dedicated adapter or "
+                    "end-to-end test has been validated for these exchanges."
+                ),
+            ),
+            MarketCoverageEntry(
+                asset_class="crypto_futures",
+                status="not_implemented",
+                exchanges=[],
+                execution_available=False,
+                notes="No futures/perpetual market data, funding, or margin logic is implemented.",
+            ),
+            MarketCoverageEntry(
+                asset_class="forex",
+                status="not_implemented",
+                exchanges=[],
+                execution_available=False,
+                notes="No FX data provider, session calendar, or broker adapter is implemented.",
+            ),
+            MarketCoverageEntry(
+                asset_class="equities",
+                status="not_implemented",
+                exchanges=[],
+                execution_available=False,
+                notes="No equity data provider, corporate-action handling, or broker adapter exists.",
+            ),
+            MarketCoverageEntry(
+                asset_class="indices",
+                status="not_implemented",
+                exchanges=[],
+                execution_available=False,
+                notes="No index data source or contract specification is implemented.",
+            ),
+            MarketCoverageEntry(
+                asset_class="commodities",
+                status="not_implemented",
+                exchanges=[],
+                execution_available=False,
+                notes="No commodity data source, roll logic, or contract specification is implemented.",
+            ),
+        ],
+    )
 
 
 @router.get("/symbols", summary="List available trading symbols")

@@ -34,12 +34,15 @@ class RiskService:
             max_drawdown_pct=float(settings.risk.max_drawdown_pct),
             max_risk_per_trade_pct=float(settings.risk.max_risk_per_trade_pct),
             max_position_size_pct=float(settings.risk.position_size_pct),
+            max_portfolio_exposure_pct=float(settings.risk.portfolio_exposure_pct),
             max_open_positions=int(settings.risk.max_open_positions),
         )
         self.guard = guard or DrawdownGuard(profile=initial_profile)
         self.current_daily_loss_pct: float = 0.0
         self.current_drawdown_pct: float = 0.0
         self.open_positions_count: int = 0
+        self.current_equity_usd: float = 0.0
+        self.current_gross_exposure_usd: float = 0.0
 
     def get_status(self) -> RiskStatusSummary:
         settings = get_settings()
@@ -51,6 +54,9 @@ class RiskService:
             max_drawdown_pct=self.guard.profile.max_drawdown_pct,
             open_positions_count=self.open_positions_count,
             max_open_positions=self.guard.profile.max_open_positions,
+            current_equity_usd=self.current_equity_usd,
+            gross_exposure_usd=self.current_gross_exposure_usd,
+            max_portfolio_exposure_pct=self.guard.profile.max_portfolio_exposure_pct,
             real_trading_enabled=settings.real_trading_enabled,
             kill_switch_active=self.guard.kill_switch_active,
             profile=self.guard.profile,
@@ -59,10 +65,16 @@ class RiskService:
         )
 
     def validate_order(self, request: OrderRiskCheckRequest) -> OrderRiskCheckResult:
-        # Feed live system state
-        request.current_daily_loss_pct = self.current_daily_loss_pct
-        request.current_drawdown_pct = self.current_drawdown_pct
-        request.current_open_positions_count = self.open_positions_count
+        # Merge independently observed state conservatively: application-level
+        # portfolio values must never be overwritten by an unrefreshed (or
+        # lower) RiskService cache and accidentally weaken the guard.
+        request.current_daily_loss_pct = max(
+            request.current_daily_loss_pct, self.current_daily_loss_pct
+        )
+        request.current_drawdown_pct = max(request.current_drawdown_pct, self.current_drawdown_pct)
+        request.current_open_positions_count = max(
+            request.current_open_positions_count, self.open_positions_count
+        )
         return self.guard.validate_order(request)
 
     def calculate_position_size(self, request: PositionSizeRequest) -> PositionSizeResult:

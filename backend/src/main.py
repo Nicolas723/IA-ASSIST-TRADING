@@ -34,8 +34,10 @@ from src.interfaces.api.v1 import (
     backtesting,
     market,
     migration,
+    mlops,
     observability,
     portfolio,
+    research,
     risk,
     status,
     strategy,
@@ -69,9 +71,12 @@ from src.shared.observability.metrics import (
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
 
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from src.domain.trading.entities import Order
 
 settings = get_settings()
+_shadow_scan_collector = None
 
 # ---------------------------------------------------------------------------
 # Initialize logging (must happen before any logger is used)
@@ -122,7 +127,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     - Dispose DB engine
     - Flush pending metrics
     """
-    global _redis_client
+    global _redis_client, _shadow_scan_collector
 
     logger.info(
         "application_starting",
@@ -192,6 +197,15 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
             except Exception as e:
                 logger.warning("live_oco_discovery_failed", error=str(e))
 
+        # Adopt still-open orders this system created but never journaled (for
+        # example, a crash between exchange submission and the DB write).
+        if live_trading_service.settings.real_trading_enabled:
+            try:
+                adopted = await live_trading_service.discover_untracked_orders()
+                logger.info("live_untracked_orders_checked", adopted=adopted)
+            except Exception as e:
+                logger.warning("live_untracked_orders_failed", error=str(e))
+
         async def _guard_price(symbol: str) -> float | None:
             fetcher = get_market_data_fetcher()
             return float(await fetcher.fetch_last_price(symbol))
@@ -244,12 +258,52 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
             "paper_mode_active", message="Paper trading mode — no real orders will be placed."
         )
 
+    # Optional, development-only market-data collection. This task has no
+    # execution dependency and persists only shadow snapshots/evaluations.
+    if settings.shadow_scan_autorun and settings.is_development:
+        try:
+            from src.application.services.market_data_service import MarketDataService
+            from src.application.services.shadow_scan_collector import ShadowScanCollector
+            from src.infrastructure.persistence.database import get_db_session
+            from src.infrastructure.persistence.repositories.candle_repository import (
+                TimescaleCandleRepository,
+            )
+            from src.interfaces.api.v1.deps import get_market_data_fetcher
+
+            def _market_service_for_session(session: AsyncSession) -> MarketDataService:
+                return MarketDataService(
+                    exchange=get_market_data_fetcher(),
+                    repository=TimescaleCandleRepository(session),
+                )
+
+            _shadow_scan_collector = ShadowScanCollector(
+                market_service_factory=_market_service_for_session,
+                session_factory=get_db_session,
+                symbols=settings.shadow_scan_symbols,
+                interval_seconds=settings.shadow_scan_interval_seconds,
+            )
+            _shadow_scan_collector.start()
+            logger.info(
+                "shadow_scan_collector_started",
+                symbols=settings.shadow_scan_symbols,
+                interval_seconds=settings.shadow_scan_interval_seconds,
+                timeframe="1h",
+                horizon_candles=1,
+            )
+        except Exception as e:
+            logger.exception("shadow_scan_collector_start_failed", error=str(e))
+
     logger.info("application_ready", host=settings.server_host, port=settings.server_port)
 
     yield  # Application runs here
 
     # --------------- Shutdown ---------------
     logger.info("application_shutting_down")
+
+    if _shadow_scan_collector is not None:
+        await _shadow_scan_collector.stop()
+        _shadow_scan_collector = None
+        logger.info("shadow_scan_collector_stopped")
 
     try:
         from src.interfaces.api.v1.deps import _autonomous_engine
@@ -485,11 +539,13 @@ def create_app() -> FastAPI:
     app.include_router(agents.router, prefix="/api/v1/agents", tags=["AI Agents"])
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["Audit"])
     app.include_router(risk.router, prefix="/api/v1/risk", tags=["Risk"])
+    app.include_router(research.router, prefix="/api/v1/research", tags=["Research Memory"])
     app.include_router(vault.router, prefix="/api/v1/vault", tags=["Credential Vault"])
     app.include_router(alerts.router, prefix="/api/v1/alerts", tags=["Alerts"])
     app.include_router(
         observability.router, prefix="/api/v1/observability", tags=["Observability & MLOps"]
     )
+    app.include_router(mlops.router, prefix="/api/v1/mlops", tags=["MLOps & Learning"])
     app.include_router(
         autonomous.router, prefix="/api/v1/autonomous", tags=["Autonomous Trading Bot"]
     )

@@ -9,7 +9,7 @@
 **AI Trading Assistant** es una plataforma de trading algorítmico y cuantitativo asistida por Inteligencia Artificial y un **Comité Multi-Agente**.
 - **Modo Paper Trading (Virtual)**: Simulación completa con $10,000 USDT virtuales, cálculo de comisiones, slippage, PnL en tiempo real y Stop Loss / Take Profit automáticos.
 - **Modo Real / Testnet**: Conexión con exchanges (Binance / Bybit) mediante CCXT y almacenamiento seguro de claves cifradas con AES-256 en un Credential Vault.
-- **Frontend Moderno e Intuitivo**: Hecho en React + Vite + Vanilla CSS, 100% en español, estructurado en pestañas (Tabs) para que usuarios sin experiencia técnica operen sin sobrecarga cognitiva ni ruido visual.
+- **Frontend Moderno e Intuitivo**: Hecho en React + Vite + Vanilla CSS, 100% en español. La vista principal reúne gráfico y asistente autónomo; la interfaz no expone compra/venta manual. Las métricas técnicas se agrupan bajo “Avanzado”.
 
 ---
 
@@ -26,16 +26,14 @@
   - `PriceActionAnalyst`: Soporte/Resistencia, patrones de velas (Pin bar, envolvente) y conceptos SMC (Smart Money Concepts).
   - `RiskManager`: Volatilidad ATR, sizing de posición dinámico y colocación de Stop-Loss / Take-Profit (mínimo ratio 2.0:1).
   - `AgentCoordinator`: Pondera los votos de los especialistas y genera veredicto de consenso con nivel de convicción.
-  - *Nota*: Funciona 100% determinista sin API keys de LLM, pero admite OpenAI, Anthropic o Gemini si se configuran en `.env`.
+  - *Nota*: El comité conecta OpenAI como proveedor principal y admite fallback configurable a Gemini, Anthropic, OpenRouter y Ollama. Sin proveedores configurados conserva análisis determinista; sus resultados aún no entrenan automáticamente los modelos.
 
 ### **Frontend (TypeScript / React 19 / Vite)**
 - **UI & Diseño**: Vanilla CSS moderno con glassmorphism, modo oscuro con gradientes cuidados, micro-animaciones y diseño adaptable (desktop y móvil).
-- **Organización por Pestañas (Tabs)**:
-  1. `🤖 Asistente Autónomo`: Semáforo gigante de estado (COMPRA, VENTA, ESPERA), explicación en lenguaje humano, control ON/OFF y registro de decisiones.
-  2. `📈 Mercado & Gráfico`: Gráfico interactivo SVG de velas y línea de precio con actualización en vivo vía WebSockets (`MarketChart.tsx`).
-  3. `💼 Cartera & Operaciones`: Resumen de saldo, posiciones abiertas con PnL y compra/venta rápida con 1 clic ($100, $250, $500, $1000).
-  4. `🧠 Comité de Analistas IA`: Explicación clara del veredicto y qué opina cada agente especialista.
-  5. `⚙️ Configuración & Claves`: Conexión segura con Binance (AES-256), botón de Ping de latencia y estado de servicios.
+- **Organización de la interfaz**:
+  1. `Asistente`: gráfico interactivo de velas y precio vivo, selección de par/temporalidad, señal del comité en lenguaje sencillo y controles para iniciar/pausar el bot autónomo.
+  2. `Configuración`: conexión con Binance y ajustes principales.
+  3. `Avanzado`: comité de analistas, MLOps, estrategia, límites, alertas y diagnóstico. La interfaz de operación manual y la pestaña de cartera se retiraron del recorrido normal.
 
 ### **Infraestructura (Docker Compose)**
 Ubicación: `infra/docker/docker-compose.yml`
@@ -300,6 +298,8 @@ ai-trading-assistant/
   - **Reinicio**: al arrancar se descubren las OCO abiertas y se reasocian a las posiciones restauradas. Si el descubrimiento falla, el guardián local no opera ese exchange y las ventas/cierres se bloquean hasta confirmar que no hay una OCO activa (fail-safe).
   - **Stop-limit**: el SL de la OCO usa `REAL_TRADING_OCO_STOP_LIMIT_BUFFER_PCT=0.1` por defecto para dar margen al stop-limit. En huecos fuertes puede no llenarse; en ese caso la posición sigue bajo el guardián local y las alertas.
 - **API**: `GET /api/v1/trading/real/status`, `GET /api/v1/trading/real/account`, `GET /api/v1/trading/real/positions`, `POST /api/v1/trading/real/orders`, `POST /api/v1/trading/real/positions/close`, `POST /api/v1/trading/real/reconcile`.
+- **Control desde la app**: `GET/PUT /api/v1/trading/runtime-config` permite cambiar paper/real, testnet/mainnet, allowlist, notional máximo, OCO y permiso autónomo sin editar `.env` ni reiniciar. Los cambios se guardan en `backend/vault/.runtime_config.json` (ignorado por Git) y se aplican en caliente. Testnet es el entorno inicial; Mainnet exige claves propias, opt-in explícito adicional y confirmación, y no se puede cambiar de entorno con posiciones reales abiertas. La confirmación manual por orden permanece obligatoria en modo real.
+- **Credential Vault**: almacena claves separadas por exchange y entorno, por lo que testnet y mainnet pueden coexistir; los archivos antiguos de una sola clave se migran conservando el entorno indicado en su metadata.
 - **Persistencia**: las órdenes reales se escriben en el journal (`orders`, `trades`, `positions`, snapshot de cartera) mediante `persist_live_order_to_database`; el journaling sigue siendo best-effort.
 - **Rehidratación real**: al arrancar se restauran posiciones, órdenes, trades y el último snapshot de equity desde PostgreSQL. Si hay posiciones restauradas pero el trading real o las credenciales no están activos, se emite una alerta crítica.
 - **Reconciliación**: cada `REAL_TRADING_RECONCILE_INTERVAL_SECONDS` (300 s por defecto) se comparan las posiciones locales con el saldo base del exchange: se eliminan las cerradas fuera de la plataforma y se ajustan las cantidades parciales. También se puede forzar desde la UI o con `POST /real/reconcile`.
@@ -316,7 +316,7 @@ ai-trading-assistant/
 - **API**: `GET /api/v1/alerts/status`, `POST /api/v1/alerts/test`.
 - **Frontend**: panel "Trading Real y Alertas" en Configuración con entorno (testnet/mainnet), credenciales, límite, guardián, modo de protección, contador de OCO activas, símbolos, estado de canales, botón de alerta de prueba y botón "Reconciliar con exchange". El botón de compra/venta usa los endpoints reales cuando el modo REAL está activo (con confirmación por orden y `client_order_id`).
 
-**Pruebas Fase 8**: `tests/unit/test_phase8_trading.py` (interlocks, ledger, cierres, SL/TP local y OCO, idempotencia, rehidratación, reconciliación, descubrimiento de OCO y alertas) y `tests/unit/test_phase8_channels.py` (Telegram/webhook/email y adaptador CCXT con cliente falso, incluido el mapeo OCO y el enriquecimiento de piernas terminales). Total: **152 unitarios** + **11 de integración**, cobertura **75.55%**.
+**Pruebas**: incluye `tests/unit/test_runtime_config_service.py` (persistencia, confirmación y restricciones), vault por entorno, gateway LLM/fallback y salvaguardas del asistente autónomo. Verificación local vigente: **190 tests aprobados**, Ruff/MyPy y formateo sin errores; frontend compila con `npm run build` (Oxlint mantiene avisos de hooks preexistentes).
 
 ### Endurecimiento operativo (2026-10-22)
 
@@ -334,4 +334,4 @@ ai-trading-assistant/
 
 *Fin del resumen de traspaso. Al iniciar el nuevo chat, comparte este archivo o pide continuar a partir de la sección 8.*
 
-*Última actualización: Fase 8.2 con OCO nativo de Binance spot validado en testnet (descubrimiento tras reinicio, cierre manual y ejecución TP con journal), además del endurecimiento real (rehidratación y reconciliación, idempotencia, guardián local y alertas Telegram/webhook/email). 152 tests unitarios + 11 de integración, 75.55% cobertura, Ruff/MyPy/CI en verde. Alertas Telegram configuradas y validadas con `POST /api/v1/alerts/test` (delivered=true). Pendiente: decidir el inicio de la Fase 9.*
+*Última actualización: Fase 9 inicial y gateway LLM con fallback implementados; la cadena requiere claves de proveedores para usar modelos reales. Configuración paper/real y testnet/mainnet desde la app. La OCO nativa de Binance spot fue validada en testnet. Verificación local: 190 tests aprobados, Ruff/MyPy/formateo y build TypeScript/Vite correctos. La migración Alembic d5e2b3c4f6a7 está aplicada a la base local.*

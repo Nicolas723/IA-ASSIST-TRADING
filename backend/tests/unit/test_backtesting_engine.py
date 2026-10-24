@@ -143,6 +143,23 @@ def test_backtest_buy_and_sell_cycle():
     assert result.net_profit > 0
 
 
+def test_backtest_sharpe_annualization_respects_configured_timeframe():
+    engine = BacktestingEngine()
+    candles = create_dummy_candles(20, start_price=100.0, trend=1.0)
+    hourly = engine.run(
+        MockStrategy(buy_indices={2}, sell_indices={8}),
+        candles,
+        BacktestConfig(strategy_name="mock", timeframe="1h"),
+    )
+    daily = engine.run(
+        MockStrategy(buy_indices={2}, sell_indices={8}),
+        candles,
+        BacktestConfig(strategy_name="mock", timeframe="1d"),
+    )
+
+    assert hourly.sharpe_ratio > daily.sharpe_ratio
+
+
 def test_backtest_stop_loss_trigger():
     engine = BacktestingEngine()
 

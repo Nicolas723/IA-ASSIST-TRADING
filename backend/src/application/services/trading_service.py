@@ -59,6 +59,8 @@ class TradingService:
                 take_profit=req.take_profit,
                 account_balance=float(portfolio.total_balance),
                 current_open_positions_count=len(portfolio.positions),
+                current_total_exposure_usd=float(portfolio.gross_exposure_usd),
+                current_symbol_exposure_usd=float(portfolio.exposure_usd(req.symbol)),
                 current_daily_loss_pct=self.risk_service.current_daily_loss_pct,
                 current_drawdown_pct=float(portfolio.current_drawdown_pct),
             )
@@ -122,7 +124,20 @@ class TradingService:
 
     def get_portfolio(self, mode: ExecutionMode = ExecutionMode.PAPER) -> Portfolio:
         if mode == ExecutionMode.PAPER:
-            return self.paper_exchange.get_portfolio()
+            portfolio = self.paper_exchange.get_portfolio()
+            if self.risk_service is not None:
+                daily_start_equity = portfolio.total_balance - portfolio.daily_pnl
+                daily_loss_pct = (
+                    float(-portfolio.daily_pnl / daily_start_equity * 100)
+                    if portfolio.daily_pnl < 0 and daily_start_equity > 0
+                    else 0.0
+                )
+                self.risk_service.current_daily_loss_pct = daily_loss_pct
+                self.risk_service.current_drawdown_pct = float(portfolio.current_drawdown_pct)
+                self.risk_service.open_positions_count = portfolio.position_count
+                self.risk_service.current_equity_usd = float(portfolio.total_balance)
+                self.risk_service.current_gross_exposure_usd = float(portfolio.gross_exposure_usd)
+            return portfolio
         raise ValidationError(f"Mode {mode} not currently active")
 
     def reset_paper_account(self, initial_balance: float = 10000.0) -> Portfolio:

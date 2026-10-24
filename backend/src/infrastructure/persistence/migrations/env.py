@@ -11,6 +11,8 @@ from src.infrastructure.persistence.database import Base
 # Import all models here so Alembic can discover them
 from src.infrastructure.persistence.models.audit import DecisionLogModel
 from src.infrastructure.persistence.models.market import CandleModel, TickModel
+from src.infrastructure.persistence.models.research import ResearchNoteModel
+from src.infrastructure.persistence.models.shadow_scan import ShadowScanRunModel
 from src.infrastructure.persistence.models.trading import (
     OrderModel,
     PortfolioSnapshotModel,
@@ -27,6 +29,8 @@ _ = (
     PositionModel,
     PortfolioSnapshotModel,
     DecisionLogModel,
+    ShadowScanRunModel,
+    ResearchNoteModel,
 )
 
 # this is the Alembic Config object, which provides
