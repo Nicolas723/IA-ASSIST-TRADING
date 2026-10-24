@@ -197,6 +197,43 @@ interface MarketRegimeData {
   disclaimer: string;
 }
 
+interface ConcentrationSymbolExposure {
+  symbol: string;
+  exposure_usd: number;
+  equity_pct: number | null;
+  limit_usd: number | null;
+  headroom_usd: number | null;
+  within_limit: boolean | null;
+}
+
+interface ConcentrationCorrelationPair {
+  left: string;
+  right: string;
+  correlation: number | null;
+  sample_size: number;
+  high: boolean;
+}
+
+interface ConcentrationReportData {
+  generated_at: string;
+  mode: string;
+  timeframe: string;
+  lookback: number;
+  universe: string[];
+  equity_usd: number;
+  gross_exposure_usd: number;
+  gross_exposure_pct: number | null;
+  max_portfolio_exposure_pct: number;
+  max_position_size_pct: number;
+  positions: ConcentrationSymbolExposure[];
+  correlations: ConcentrationCorrelationPair[];
+  high_correlation_threshold: number;
+  warnings: string[];
+  read_only: boolean;
+  affects_trading: boolean;
+  disclaimer: string;
+}
+
 interface AgentVoteData {
   agent_type: string;
   signal: string;
@@ -462,6 +499,7 @@ export default function App() {
   const [riskStatus, setRiskStatus] = useState<RiskStatusSummary | null>(null);
   const [driftReport, setDriftReport] = useState<DriftReportData | null>(null);
   const [regimeReport, setRegimeReport] = useState<MarketRegimeData | null>(null);
+  const [concentrationReport, setConcentrationReport] = useState<ConcentrationReportData | null>(null);
   const [isLoadingRegime, setIsLoadingRegime] = useState<boolean>(false);
 
   // Oportunidades en sombra y coste de IA (solo lectura)
@@ -547,6 +585,16 @@ export default function App() {
       })
       .catch((err) => console.error('Error régimen de mercado', err))
       .finally(() => setIsLoadingRegime(false));
+  };
+
+  const refreshConcentration = () => {
+    const params = new URLSearchParams({ timeframe: '1h', lookback: '200' });
+    fetch(`/api/v1/risk/concentration?${params.toString()}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: ConcentrationReportData | null) => {
+        if (data) setConcentrationReport(data);
+      })
+      .catch((err) => console.error('Error concentración', err));
   };
 
   const refreshOpportunities = () => {
@@ -720,6 +768,7 @@ export default function App() {
     refreshVault();
     refreshRisk();
     refreshDrift();
+    refreshConcentration();
     refreshOpportunities();
     refreshLLMStatus();
     refreshResearchContext();
@@ -2410,6 +2459,118 @@ export default function App() {
                   </span>
                 </div>
               </div>
+
+              {concentrationReport && (
+                <div style={{ marginTop: '18px', borderTop: '1px solid rgba(148, 163, 184, 0.2)', paddingTop: '16px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                    <div>
+                      <h4 style={{ margin: 0, fontSize: '14px', fontWeight: 800 }}>
+                        🧩 Concentración y Correlación{' '}
+                        <span style={{ fontSize: '11px', fontWeight: 700, color: '#94a3b8' }}>solo lectura</span>
+                      </h4>
+                      <p style={{ margin: '4px 0 0', fontSize: '12px', color: '#94a3b8' }}>
+                        Exposición por activo y correlación de retornos {concentrationReport.timeframe}. No bloquea ni dimensiona órdenes.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ fontSize: '11px', padding: '5px 10px' }}
+                      onClick={refreshConcentration}
+                    >
+                      Actualizar
+                    </button>
+                  </div>
+
+                  <div className="kpi-grid" style={{ marginTop: '12px' }}>
+                    <div className="kpi-card" style={{ padding: '12px' }}>
+                      <span className="kpi-label">Capital</span>
+                      <span className="kpi-value">{safeLoc(concentrationReport.equity_usd, { maximumFractionDigits: 2 })} USDT</span>
+                    </div>
+                    <div className="kpi-card" style={{ padding: '12px' }}>
+                      <span className="kpi-label">Exposición bruta</span>
+                      <span className="kpi-value">
+                        {safeLoc(concentrationReport.gross_exposure_usd, { maximumFractionDigits: 2 })} USDT
+                        {concentrationReport.gross_exposure_pct != null && (
+                          <> ({safeFix(concentrationReport.gross_exposure_pct)}%)</>
+                        )}
+                      </span>
+                    </div>
+                    <div className="kpi-card" style={{ padding: '12px' }}>
+                      <span className="kpi-label">Límite por activo</span>
+                      <span className="kpi-value">{safeFix(concentrationReport.max_position_size_pct, 0)}%</span>
+                    </div>
+                    <div className="kpi-card" style={{ padding: '12px' }}>
+                      <span className="kpi-label">Correlación más alta</span>
+                      <span className="kpi-value">
+                        {(() => {
+                          const values = concentrationReport.correlations
+                            .map((pair) => pair.correlation)
+                            .filter((value): value is number => value != null);
+                          return values.length > 0
+                            ? safeFix(values.reduce((best, value) => (Math.abs(value) > Math.abs(best) ? value : best), 0))
+                            : 'n/d';
+                        })()}
+                      </span>
+                    </div>
+                  </div>
+
+                  {concentrationReport.positions.length > 0 ? (
+                    <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      {concentrationReport.positions.map((position) => (
+                        <div
+                          key={position.symbol}
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            gap: '10px',
+                            flexWrap: 'wrap',
+                            padding: '8px 10px',
+                            borderRadius: '6px',
+                            backgroundColor: position.within_limit === false ? 'rgba(239, 68, 68, 0.08)' : 'rgba(148, 163, 184, 0.06)',
+                            fontSize: '12px',
+                          }}
+                        >
+                          <strong style={{ color: position.within_limit === false ? '#ef4444' : '#e2e8f0' }}>
+                            {position.symbol}
+                          </strong>
+                          <span>
+                            {safeLoc(position.exposure_usd, { maximumFractionDigits: 2 })} USDT
+                            {position.equity_pct != null && <> · {safeFix(position.equity_pct)}% del capital</>}
+                            {position.limit_usd != null && <> · límite {safeLoc(position.limit_usd, { maximumFractionDigits: 2 })} USDT</>}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p style={{ margin: '12px 0 0', fontSize: '12px', color: '#94a3b8' }}>Sin posiciones abiertas.</p>
+                  )}
+
+                  {concentrationReport.correlations.length > 0 && (
+                    <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '12px' }}>
+                      {concentrationReport.correlations.map((pair) => (
+                        <span key={`${pair.left}-${pair.right}`} style={{ color: pair.high ? '#f59e0b' : '#94a3b8' }}>
+                          {pair.left} ↔ {pair.right}:{' '}
+                          <strong>{pair.correlation == null ? 'n/d' : safeFix(pair.correlation, 3)}</strong>
+                          {' '}({pair.sample_size} velas){pair.high ? ' · CORRELACIÓN ALTA' : ''}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {concentrationReport.warnings.length > 0 && (
+                    <ul style={{ margin: '10px 0 0', paddingLeft: '18px', fontSize: '12px', color: '#f59e0b' }}>
+                      {concentrationReport.warnings.map((warning) => (
+                        <li key={warning}>{warning}</li>
+                      ))}
+                    </ul>
+                  )}
+
+                  <p style={{ margin: '8px 0 0', fontSize: '11px', opacity: 0.55 }}>
+                    {concentrationReport.disclaimer}
+                  </p>
+                </div>
+              )}
             </div>
           )}
 

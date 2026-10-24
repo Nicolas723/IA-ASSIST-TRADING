@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.application.services.agent_service import AgentService
 from src.application.services.alert_service import AlertService
 from src.application.services.autonomous_engine import AutonomousEngine
+from src.application.services.concentration_service import ConcentrationService
 from src.application.services.indicator_service import IndicatorService
 from src.application.services.journal import (
     persist_live_order_to_database,
@@ -105,6 +106,21 @@ def get_regime_service(
 ) -> RegimeService:
     """Instantiate the read-only market-regime classifier."""
     return RegimeService(market_service)
+
+
+def get_concentration_service(
+    market_service: Annotated[MarketDataService, Depends(get_market_data_service)],
+    risk_service: Annotated[RiskService, Depends(get_risk_service)],
+    trading_service: Annotated[TradingService, Depends(get_trading_service)],
+    live_trading_service: Annotated[LiveTradingService, Depends(get_live_trading_service)],
+) -> ConcentrationService:
+    """Instantiate the read-only concentration and correlation report."""
+    return ConcentrationService(
+        market_service=market_service,
+        risk_service=risk_service,
+        trading_service=trading_service,
+        live_trading_service=live_trading_service,
+    )
 
 
 def get_indicator_service() -> IndicatorService:

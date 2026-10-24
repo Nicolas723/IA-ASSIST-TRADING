@@ -50,6 +50,17 @@ La evaluación cuenta el horizonte desde el cierre de la última vela de entrada
 
 El panel **Régimen de Mercado** de la vista principal muestra esas métricas y motivos. Es contexto, no una señal de compra/venta: no cambia el comité, el sizing, el veto de riesgo ni la ejecución del bot. Una racha corta o un cambio brusco de volatilidad pueden hacer que la etiqueta quede obsoleta de inmediato.
 
+## Concentración y correlación (solo lectura)
+
+`GET /api/v1/risk/concentration?symbols=BTC/USDT,ETH/USDT&timeframe=1h&lookback=200` responde a dos preguntas: cuánto capital hay concentrado en cada activo y cómo se mueven entre sí los retornos recientes del universo consultado.
+
+- La exposición por activo se compara con `MAX_POSITION_SIZE_PCT` y la exposición bruta con `MAX_PORTFOLIO_EXPOSURE_PCT`. Esos dos límites **sí** se aplican en el preflight de órdenes.
+- La correlación de Pearson se calcula alineando velas cerradas por timestamp. Necesita al menos 30 retornos comunes; si no los hay, devuelve `null` y lo explica en `warnings`.
+- El umbral de correlación alta es 0.8 y solo genera una advertencia cuando ambos activos tienen exposición.
+- Devuelve `read_only=true` y `affects_trading=false`: no bloquea, no redimensiona y no envía órdenes.
+
+El panel de riesgo muestra el desglose por activo, la correlación más alta y las advertencias. Con un solo símbolo permitido, la correlación no aporta diversificación; es útil cuando se comparan varios activos o antes de ampliar la allowlist.
+
 ## 1. Empezar sin arriesgar dinero
 
 1. Inicia la aplicación y abre la pestaña **Asistente**.
