@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
 
 from src.application.services.agent_service import validate_market_data_freshness
+from src.application.services.regime_service import classify_regime
 from src.domain.market.entities import Timeframe
 from src.shared.config.settings import get_settings
 
@@ -37,6 +38,15 @@ class ShadowScanCandidate(BaseModel):
     quoted_spread_pct: float | None = None
     observed_movement_less_spread_pct: float | None = None
     spread_status: str = "unavailable"
+    # Descriptive regime label from the same closed candles. It is context for
+    # the operator, never a signal, forecast, or probability.
+    regime_status: str = "insufficient_data"
+    trend_regime: str | None = None
+    volatility_regime: str | None = None
+    regime_disclaimer: str = (
+        "Descriptive classification of past closed candles; not a forecast, "
+        "probability or trading signal."
+    )
     error: str | None = None
 
 
@@ -342,10 +352,12 @@ class MarketScanService:
     async def _scan_one(
         self, symbol: str, timeframe: Timeframe, lookback_candles: int
     ) -> ShadowScanCandidate:
+        # Fetch enough history to label the regime (EMA slow + ATR percentile)
+        # while keeping the observed movement window at the requested length.
         candles: list[Candle] = await self.market_service.get_candles(
             symbol=symbol,
             timeframe=timeframe,
-            limit=lookback_candles,
+            limit=max(lookback_candles, 120),
         )
         if len(candles) < 2:
             return ShadowScanCandidate(
@@ -368,8 +380,9 @@ class MarketScanService:
             )
         validate_market_data_freshness(closed_candles, timeframe)
         ordered_candles = sorted(closed_candles, key=lambda candle: candle.timestamp)
-        first_close = ordered_candles[0].close
-        latest = ordered_candles[-1]
+        movement_window = ordered_candles[-lookback_candles:]
+        first_close = movement_window[0].close
+        latest = movement_window[-1]
         if first_close <= 0:
             return ShadowScanCandidate(
                 symbol=symbol,
@@ -378,6 +391,12 @@ class MarketScanService:
             )
 
         change_pct = float((latest.close - first_close) / first_close * Decimal("100"))
+        regime = classify_regime(
+            ordered_candles,
+            symbol=symbol,
+            timeframe=timeframe.value,
+            now=now,
+        )
         candidate = ShadowScanCandidate(
             symbol=symbol,
             status="observed",
@@ -385,6 +404,9 @@ class MarketScanService:
             latest_candle_at=_as_utc(latest.timestamp),
             lookback_return_pct=round(change_pct, 4),
             activity_score=round(abs(change_pct), 4),
+            regime_status=regime.status,
+            trend_regime=regime.trend,
+            volatility_regime=regime.volatility,
         )
         try:
             order_book = await self.market_service.get_order_book(symbol, limit=5)

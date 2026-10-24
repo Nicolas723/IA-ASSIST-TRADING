@@ -260,6 +260,40 @@ class LiveExchangeAdapter:
                 orders.append(mapped)
         return orders
 
+    async def fetch_closed_orders(
+        self,
+        symbol: str,
+        *,
+        since_ms: int | None = None,
+        limit: int = 50,
+    ) -> list[Order]:
+        """List recent closed orders for a symbol.
+
+        Used only for ledger recovery: an order that filled while this process
+        was down is no longer visible in ``fetch_open_orders``. The caller
+        decides attribution by client order id prefix, so unrelated manual
+        orders are still ignored.
+        """
+        self._require_credentials()
+        client = self._require_client()
+        await self._ensure_markets(client)
+        try:
+            responses = await client.fetch_closed_orders(symbol, since_ms, limit)
+        except Exception as exc:
+            logger.warning(
+                "live_fetch_closed_orders_failed",
+                exchange=self.exchange_id.value,
+                symbol=symbol,
+                error=str(exc),
+            )
+            raise ExchangeError(f"Failed to list live closed orders: {exc}") from exc
+        orders: list[Order] = []
+        for response in responses or []:
+            mapped = self._order_from_response(response)
+            if mapped is not None:
+                orders.append(mapped)
+        return orders
+
     def _order_from_response(self, response: dict[str, Any]) -> Order | None:
         """Map a CCXT order payload to the domain model without inventing fields."""
         symbol = response.get("symbol")

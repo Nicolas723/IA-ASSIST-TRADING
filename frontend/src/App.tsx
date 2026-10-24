@@ -40,6 +40,9 @@ interface ShadowCandidateData {
   quoted_spread_pct?: number | null;
   observed_movement_less_spread_pct?: number | null;
   spread_status?: string;
+  regime_status?: string;
+  trend_regime?: string | null;
+  volatility_regime?: string | null;
   error?: string | null;
 }
 
@@ -2738,6 +2741,7 @@ export default function App() {
                         <th style={{ padding: '6px 8px' }}>Símbolo</th>
                         <th style={{ padding: '6px 8px' }}>Movimiento</th>
                         <th style={{ padding: '6px 8px' }}>Spread</th>
+                        <th style={{ padding: '6px 8px' }}>Régimen</th>
                         <th style={{ padding: '6px 8px' }}>Neto tras coste</th>
                         <th style={{ padding: '6px 8px' }}>Elegible</th>
                       </tr>
@@ -2760,6 +2764,11 @@ export default function App() {
                               {candidate.quoted_spread_pct == null
                                 ? 'No disponible'
                                 : `${safeFix(candidate.quoted_spread_pct, 4)}%`}
+                            </td>
+                            <td style={{ padding: '6px 8px' }}>
+                              {candidate.regime_status === 'classified' && candidate.trend_regime
+                                ? `${candidate.trend_regime} / ${candidate.volatility_regime ?? '-'}`
+                                : 'Sin clasificar'}
                             </td>
                             <td style={{ padding: '6px 8px' }}>
                               {assessed?.cost_adjusted_movement_pct == null

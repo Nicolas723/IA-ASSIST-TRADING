@@ -102,6 +102,8 @@ class FakeAdapter:
         self.fetch_order_calls: list[dict[str, Any]] = []
         self.open_orders: list[Order] = []
         self.fetch_open_orders_calls: list[str | None] = []
+        self.closed_orders: list[Order] = []
+        self.fetch_closed_orders_calls: list[dict[str, Any]] = []
         self.oco_create_response: dict[str, Any] = {
             "orderListId": 777,
             "listOrderStatus": "EXECUTING",
@@ -131,6 +133,18 @@ class FakeAdapter:
     async def fetch_open_orders(self, symbol: str | None = None) -> list[Order]:
         self.fetch_open_orders_calls.append(symbol)
         return list(self.open_orders)
+
+    async def fetch_closed_orders(
+        self,
+        symbol: str,
+        *,
+        since_ms: int | None = None,
+        limit: int = 50,
+    ) -> list[Order]:
+        self.fetch_closed_orders_calls.append(
+            {"symbol": symbol, "since_ms": since_ms, "limit": limit}
+        )
+        return list(self.closed_orders)
 
     async def place_order(self, **kwargs: Any) -> Order:
         self.last_place_kwargs = kwargs
@@ -547,6 +561,38 @@ async def test_discovery_is_idempotent_across_restarts() -> None:
     assert await service.discover_untracked_orders() == 1
     assert await service.discover_untracked_orders() == 0
     assert len(service.get_orders()) == 1
+
+
+async def test_discovery_recovers_closed_own_orders_once() -> None:
+    service, adapter = make_service()
+    service._on_execution = AsyncMock()  # type: ignore[method-assign]
+    recovered = make_fetched_order(
+        status=OrderStatus.FILLED,
+        filled=Decimal("0.05"),
+        price=Decimal("50000"),
+        commission=Decimal("0.5"),
+        client_order_id="ata-filled-while-down",
+    )
+    foreign = make_fetched_order(
+        status=OrderStatus.FILLED,
+        filled=Decimal("0.02"),
+        price=Decimal("50000"),
+        commission=Decimal("0.2"),
+        client_order_id="manual-filled",
+    )
+    adapter.closed_orders = [recovered, foreign]
+
+    assert await service.discover_untracked_orders() == 1
+
+    assert [order.client_order_id for order in service.get_orders()] == ["ata-filled-while-down"]
+    assert service.get_positions()[0].quantity == Decimal("0.05")
+    assert [trade.quantity for trade in service.get_trades()] == [Decimal("0.05")]
+    assert adapter.fetch_closed_orders_calls[0]["since_ms"] is not None
+    service._on_execution.assert_awaited_once()
+
+    # A second discovery pass must not double-book the recovered fill.
+    assert await service.discover_untracked_orders() == 0
+    assert len(service.get_trades()) == 1
 
 
 async def test_real_order_and_close_preserve_decision_attribution() -> None:

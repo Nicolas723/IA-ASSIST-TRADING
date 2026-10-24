@@ -96,6 +96,24 @@ async def test_shadow_scan_marks_insufficient_data_and_stale_market_unavailable(
 
 
 @pytest.mark.asyncio
+async def test_shadow_scan_labels_regime_from_closed_candles() -> None:
+    closes = [str(100 + index) for index in range(120)]
+    market = FakeMarketDataService({"BTC/USDT": closes})
+
+    result = await MarketScanService(market).scan(["BTC/USDT"], lookback_candles=24)
+
+    candidate = result.candidates[0]
+    assert candidate.status == "observed"
+    assert candidate.regime_status == "classified"
+    assert candidate.trend_regime == "uptrend"
+    assert candidate.volatility_regime in {"low", "normal", "high"}
+    assert "not a forecast" in candidate.regime_disclaimer
+    # Movement still uses the requested lookback window, not the 120-candle
+    # history fetched for the regime label.
+    assert candidate.activity_score == pytest.approx((219 - 196) / 196 * 100, abs=0.01)
+
+
+@pytest.mark.asyncio
 async def test_shadow_scan_keeps_movement_but_does_not_assume_missing_spread_is_zero() -> None:
     class MissingOrderBookMarket(FakeMarketDataService):
         async def get_order_book(self, symbol: str, limit: int = 5) -> OrderBook:

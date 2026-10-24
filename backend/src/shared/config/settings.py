@@ -102,7 +102,13 @@ class LLMProvider(StrEnum):
 
 
 class DatabaseSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="DATABASE_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="DATABASE_",
+        env_file=str(_ENV_FILE_PATH),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
     url: PostgresDsn = Field(
         default=cast(
@@ -117,7 +123,13 @@ class DatabaseSettings(BaseSettings):
 
 
 class RedisSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="REDIS_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="REDIS_",
+        env_file=str(_ENV_FILE_PATH),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
     url: RedisDsn = Field(default=cast("RedisDsn", "redis://localhost:6379/0"))
     max_connections: int = Field(default=50, ge=1)
@@ -125,7 +137,13 @@ class RedisSettings(BaseSettings):
 
 
 class OpenAISettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="OPENAI_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="OPENAI_",
+        env_file=str(_ENV_FILE_PATH),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
     api_key: str = Field(default="")
     default_model: str = Field(default="gpt-4o-mini")
@@ -134,7 +152,13 @@ class OpenAISettings(BaseSettings):
 
 
 class AnthropicSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="ANTHROPIC_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="ANTHROPIC_",
+        env_file=str(_ENV_FILE_PATH),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
     api_key: str = Field(default="")
     default_model: str = Field(default="claude-opus-4-5")
@@ -142,14 +166,26 @@ class AnthropicSettings(BaseSettings):
 
 
 class GeminiSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="GOOGLE_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="GOOGLE_",
+        env_file=str(_ENV_FILE_PATH),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
     api_key: str = Field(default="")
-    default_model: str = Field(default="gemini-2.5-flash")
+    default_model: str = Field(default="gemini-3.8-flash")
 
 
 class OllamaSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="OLLAMA_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="OLLAMA_",
+        env_file=str(_ENV_FILE_PATH),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
     enabled: bool = Field(default=False)
     base_url: str = Field(default="http://localhost:11434")
@@ -158,7 +194,13 @@ class OllamaSettings(BaseSettings):
 
 
 class OpenRouterSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="OPENROUTER_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="OPENROUTER_",
+        env_file=str(_ENV_FILE_PATH),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
     api_key: str = Field(default="")
     base_url: str = Field(default="https://openrouter.ai/api/v1")
@@ -166,7 +208,13 @@ class OpenRouterSettings(BaseSettings):
 
 
 class RiskSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="MAX_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="MAX_",
+        env_file=str(_ENV_FILE_PATH),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
     daily_loss_pct: Decimal = Field(default=Decimal("2.0"), gt=Decimal("0"))
     position_size_pct: Decimal = Field(default=Decimal("5.0"), gt=Decimal("0"))
@@ -183,14 +231,19 @@ class RiskSettings(BaseSettings):
 class AgentLLMConfig(BaseSettings):
     """Per-agent LLM provider configuration."""
 
-    model_config = SettingsConfigDict(extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE_PATH),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
     technical_analyst_provider: LLMProvider = LLMProvider.OPENAI
     technical_analyst_model: str = "gpt-4o"
     price_action_provider: LLMProvider = LLMProvider.OPENAI
     price_action_model: str = "gpt-4o"
     sentiment_provider: LLMProvider = LLMProvider.GOOGLE
-    sentiment_model: str = "gemini-2.5-flash"
+    sentiment_model: str = "gemini-3.8-flash"
     macro_provider: LLMProvider = LLMProvider.ANTHROPIC
     macro_model: str = "claude-opus-4-5"
     fundamental_provider: LLMProvider = LLMProvider.ANTHROPIC
@@ -267,6 +320,10 @@ class Settings(BaseSettings):
     # Optional per-process daily token cap. 0 disables the cap. The counter is
     # in-memory and resets at UTC midnight or on restart.
     llm_daily_token_budget: int = Field(default=0, ge=0)
+    # Optional per-cycle token cap. 0 disables the cap. The counter resets when
+    # the autonomous engine starts a new analysis cycle, which bounds the cost
+    # of a single committee run even when the daily budget is generous.
+    llm_cycle_token_budget: int = Field(default=0, ge=0)
     # Optional cost estimate. Rates are USD per one million tokens and default
     # to 0 ("unknown") because provider pricing changes and is model-specific.
     # The gateway only reports an estimate when at least one rate is set.
@@ -293,6 +350,9 @@ class Settings(BaseSettings):
     enable_autonomous_real_trading: bool = Field(default=False)
     real_trading_guard_interval_seconds: int = Field(default=15, ge=5, le=300)
     real_trading_reconcile_interval_seconds: int = Field(default=300, ge=30, le=3600)
+    # Lookback used to recover orders that filled while the process was down.
+    # Bounded so a restart never replays the entire exchange order history.
+    real_trading_order_recovery_lookback_seconds: int = Field(default=86400, ge=300, le=604800)
     real_trading_oco_enabled: bool = Field(default=False)
     real_trading_oco_stop_limit_buffer_pct: Decimal = Field(
         default=Decimal("0.1"), ge=Decimal("0"), le=Decimal("5")

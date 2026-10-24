@@ -92,6 +92,12 @@ class AgentService:
         self.research_repository = research_repository
         self._decision_history: list[CoordinatorDecision] = []
 
+    def begin_cycle(self) -> None:
+        """Reset the per-cycle LLM token counter before a new analysis run."""
+        gateway = getattr(self.coordinator, "llm", None)
+        if gateway is not None:
+            gateway.begin_cycle()
+
     def list_agents(self) -> list[AgentInfo]:
         return [
             AgentInfo(

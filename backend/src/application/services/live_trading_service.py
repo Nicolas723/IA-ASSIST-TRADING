@@ -14,7 +14,7 @@ import asyncio
 import contextlib
 import time
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
@@ -1217,9 +1217,12 @@ class LiveTradingService:
             return 0
 
         imported = 0
+        recovered_closed = 0
+        lookback = self.settings.real_trading_order_recovery_lookback_seconds
         adapter: LiveExchangeAdapter | None = None
         try:
             adapter = self._adapter(exchange_id)
+            since_ms = int((datetime.now(tz=UTC) - timedelta(seconds=lookback)).timestamp() * 1000)
             for symbol in self.settings.real_trading_allowed_symbols:
                 try:
                     open_orders = await adapter.fetch_open_orders(symbol)
@@ -1229,7 +1232,7 @@ class LiveTradingService:
                         symbol=symbol,
                         error=str(exc),
                     )
-                    continue
+                    open_orders = []
                 for order in open_orders:
                     client_id = order.client_order_id
                     if not client_id or not client_id.startswith(self.OWN_CLIENT_ORDER_PREFIX):
@@ -1247,12 +1250,52 @@ class LiveTradingService:
                                 order_id=str(order.id),
                                 error=str(exc),
                             )
+
+                # Orders that filled while this process was down are no longer
+                # open. Recover them from the bounded closed-order window so the
+                # ledger and position view do not silently drift.
+                try:
+                    closed_orders = await adapter.fetch_closed_orders(
+                        symbol, since_ms=since_ms, limit=50
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "live_closed_order_discovery_failed",
+                        symbol=symbol,
+                        error=str(exc),
+                    )
+                    continue
+                for order in closed_orders:
+                    client_id = order.client_order_id
+                    if not client_id or not client_id.startswith(self.OWN_CLIENT_ORDER_PREFIX):
+                        continue
+                    if client_id in self._client_order_ids:
+                        continue
+                    self._record(order)
+                    imported += 1
+                    recovered_closed += 1
+                    if self._on_execution is not None:
+                        try:
+                            await self._on_execution(order)
+                        except Exception as exc:
+                            logger.warning(
+                                "live_recovered_order_persist_failed",
+                                order_id=str(order.id),
+                                error=str(exc),
+                            )
         except Exception as exc:
             logger.warning("live_order_discovery_failed", error=str(exc))
             return imported
         finally:
             if adapter is not None:
                 await adapter.close()
+        if recovered_closed:
+            logger.warning(
+                "live_closed_orders_recovered",
+                count=recovered_closed,
+                exchange=exchange_id.value,
+                lookback_seconds=lookback,
+            )
         if imported:
             logger.warning(
                 "live_untracked_orders_imported",

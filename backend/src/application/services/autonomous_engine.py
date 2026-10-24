@@ -490,6 +490,9 @@ class AutonomousEngine:
             self.add_log(level="WARNING", message="AgentService not bound to AutonomousEngine")
             return
 
+        # Start a fresh LLM cycle budget before the committee spends tokens.
+        self.agent_service.begin_cycle()
+
         decision: CoordinatorDecision = await self.agent_service.run_analysis(
             symbol=symbol,
             timeframe=self.config.timeframe,

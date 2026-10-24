@@ -230,3 +230,83 @@ async def test_usage_status_counts_failures_and_fallbacks() -> None:
     assert status["by_provider"]["openai"]["failures"] == 1
     assert status["by_provider"]["google"]["requests"] == 1
     assert status["by_agent"]["price_action_analyst"]["failures"] == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_blocks_calls_once_cycle_token_budget_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infrastructure.llm import gateway as gateway_module
+
+    config = Settings(
+        _env_file=None,
+        llm_primary_provider=LLMProvider.OPENAI,
+        llm_fallback_providers=[],
+        llm_cycle_token_budget=100,
+    )
+    monkeypatch.setattr(gateway_module, "get_settings", lambda: config)
+    adapter = FakeAdapter(
+        LLMProvider.OPENAI,
+        LLMResponse(
+            content="ok",
+            model="gpt-4o-mini",
+            provider=LLMProvider.OPENAI,
+            prompt_tokens=60,
+            completion_tokens=50,
+            total_tokens=110,
+        ),
+    )
+    gateway = LLMGateway({LLMProvider.OPENAI: adapter})
+    gateway.begin_cycle()
+
+    assert (await gateway.complete(LLMRequest(messages=[], model=""))).content == "ok"
+    status = gateway.usage_status()
+    assert status["cycle_tokens_used"] == 110
+    assert status["cycle_budget_exhausted"] is True
+    # The daily counter is independent and stays enabled.
+    assert status["budget_exhausted"] is False
+
+    with pytest.raises(LLMError, match="Per-cycle LLM token budget exhausted"):
+        await gateway.complete(LLMRequest(messages=[], model=""))
+    assert len(adapter.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_begin_cycle_resets_only_the_cycle_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infrastructure.llm import gateway as gateway_module
+
+    config = Settings(
+        _env_file=None,
+        llm_primary_provider=LLMProvider.OPENAI,
+        llm_fallback_providers=[],
+        llm_daily_token_budget=100,
+        llm_cycle_token_budget=100,
+    )
+    monkeypatch.setattr(gateway_module, "get_settings", lambda: config)
+    adapter = FakeAdapter(
+        LLMProvider.OPENAI,
+        LLMResponse(
+            content="ok",
+            model="gpt-4o-mini",
+            provider=LLMProvider.OPENAI,
+            prompt_tokens=60,
+            completion_tokens=50,
+            total_tokens=110,
+        ),
+    )
+    gateway = LLMGateway({LLMProvider.OPENAI: adapter})
+    gateway.begin_cycle()
+
+    await gateway.complete(LLMRequest(messages=[], model=""))
+    gateway.begin_cycle()
+
+    status = gateway.usage_status()
+    assert status["cycle_tokens_used"] == 0
+    assert status["tokens_used"] == 110
+    # Starting a new cycle must not bypass the daily cap.
+    assert status["budget_exhausted"] is True
+    with pytest.raises(LLMError, match="Daily LLM token budget exhausted"):
+        await gateway.complete(LLMRequest(messages=[], model=""))
+    assert len(adapter.requests) == 1
