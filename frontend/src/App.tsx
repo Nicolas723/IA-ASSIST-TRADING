@@ -121,6 +121,10 @@ interface LLMStatusData {  mode: string;
     daily_token_budget: number;
     tokens_remaining: number | null;
     budget_exhausted: boolean;
+    cycle_token_budget?: number;
+    cycle_tokens_used?: number;
+    cycle_tokens_remaining?: number | null;
+    cycle_budget_exhausted?: boolean;
     fallbacks: number;
     estimated_cost_usd: number | null;
     pricing: {
@@ -2851,6 +2855,13 @@ export default function App() {
                   : ' (sin tope)'}
               </span>
               <span>
+                <strong>Tokens ciclo:</strong>{' '}
+                {safeNum(llmStatus?.usage?.cycle_tokens_used)}
+                {safeNum(llmStatus?.usage?.cycle_token_budget) > 0
+                  ? ` / ${safeNum(llmStatus?.usage?.cycle_token_budget)}`
+                  : ' (sin tope)'}
+              </span>
+              <span>
                 <strong>Llamadas:</strong> {safeNum(llmStatus?.usage?.requests)}
               </span>
               <span>
@@ -2862,8 +2873,10 @@ export default function App() {
                   ? safeUsd(llmStatus?.usage?.estimated_cost_usd)
                   : 'tarifas sin configurar'}
               </span>
-              <span style={{ color: llmStatus?.usage?.budget_exhausted ? '#ef4444' : '#10b981' }}>
-                {llmStatus?.usage?.budget_exhausted ? 'Presupuesto agotado' : 'Presupuesto disponible'}
+              <span style={{ color: (llmStatus?.usage?.budget_exhausted || llmStatus?.usage?.cycle_budget_exhausted) ? '#ef4444' : '#10b981' }}>
+                {(llmStatus?.usage?.budget_exhausted || llmStatus?.usage?.cycle_budget_exhausted)
+                  ? 'Presupuesto agotado'
+                  : 'Presupuesto disponible'}
               </span>
             </div>
             {Object.keys(llmStatus?.usage?.by_agent ?? {}).length > 0 && (

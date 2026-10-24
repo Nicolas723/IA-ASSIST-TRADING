@@ -111,6 +111,22 @@ def test_gateway_exposes_provider_names_without_secrets() -> None:
     assert gateway.fallback_providers == ["google", "anthropic"]
 
 
+def test_fallback_providers_exclude_the_primary(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.infrastructure.llm import gateway as gateway_module
+
+    config = Settings(
+        _env_file=None,
+        llm_primary_provider=LLMProvider.GOOGLE,
+        llm_fallback_providers=[LLMProvider.GOOGLE, LLMProvider.ANTHROPIC],
+    )
+    monkeypatch.setattr(gateway_module, "get_settings", lambda: config)
+    gateway = LLMGateway(
+        {LLMProvider.GOOGLE: FakeAdapter(LLMProvider.GOOGLE, _response(LLMProvider.GOOGLE, "ok"))}
+    )
+
+    assert gateway.fallback_providers == ["anthropic"]
+
+
 @pytest.mark.asyncio
 async def test_gateway_blocks_calls_once_daily_token_budget_is_exhausted(
     monkeypatch: pytest.MonkeyPatch,
