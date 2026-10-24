@@ -163,6 +163,40 @@ interface DriftReportData {
   disclaimer: string;
 }
 
+interface MarketRegimeMetricsData {
+  sample_size: number;
+  active_candles_excluded: number;
+  last_close: number | null;
+  last_candle_at: string | null;
+  data_age_seconds: number | null;
+  data_stale: boolean | null;
+  ema_fast: number | null;
+  ema_slow: number | null;
+  ema_separation_pct: number | null;
+  ema_slope_pct: number | null;
+  atr_pct: number | null;
+  atr_percentile: number | null;
+  trend_strength: number | null;
+  lookback_high: number | null;
+  lookback_low: number | null;
+  range_position_pct: number | null;
+}
+
+interface MarketRegimeData {
+  generated_at: string;
+  symbol: string;
+  timeframe: string;
+  status: 'insufficient_data' | 'classified';
+  trend: 'uptrend' | 'downtrend' | 'range' | null;
+  volatility: 'low' | 'normal' | 'high' | null;
+  metrics: MarketRegimeMetricsData;
+  reasons: string[];
+  descriptive_only: boolean;
+  affects_trading: boolean;
+  execution_enabled: boolean;
+  disclaimer: string;
+}
+
 interface AgentVoteData {
   agent_type: string;
   signal: string;
@@ -427,6 +461,8 @@ export default function App() {
   // Riesgo y Seguridad
   const [riskStatus, setRiskStatus] = useState<RiskStatusSummary | null>(null);
   const [driftReport, setDriftReport] = useState<DriftReportData | null>(null);
+  const [regimeReport, setRegimeReport] = useState<MarketRegimeData | null>(null);
+  const [isLoadingRegime, setIsLoadingRegime] = useState<boolean>(false);
 
   // Oportunidades en sombra y coste de IA (solo lectura)
   const [latestShadowScan, setLatestShadowScan] = useState<ShadowScanData | null>(null);
@@ -498,6 +534,19 @@ export default function App() {
         if (data) setDriftReport(data);
       })
       .catch((err) => console.error('Error drift', err));
+  };
+
+  const refreshRegime = () => {
+    const encoded = encodeURIComponent(selectedSymbol);
+    const params = new URLSearchParams({ timeframe: selectedTimeframe, limit: '200' });
+    setIsLoadingRegime(true);
+    fetch(`/api/v1/market/${encoded}/regime?${params.toString()}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: MarketRegimeData | null) => {
+        if (data) setRegimeReport(data);
+      })
+      .catch((err) => console.error('Error régimen de mercado', err))
+      .finally(() => setIsLoadingRegime(false));
   };
 
   const refreshOpportunities = () => {
@@ -792,6 +841,7 @@ export default function App() {
       .catch((err) => console.error('Error al cargar velas', err))
       .finally(() => setIsLoadingCandles(false));
     refreshResearchContext();
+    refreshRegime();
   }, [selectedSymbol, selectedTimeframe]);
 
   // Acciones del Bot Autónomo
@@ -1155,6 +1205,146 @@ export default function App() {
                 <MarketChart candles={candles} livePrice={livePrice} symbol={selectedSymbol} timeframe={selectedTimeframe} />
               )}
             </div>
+          </section>
+
+          {/* Régimen de mercado (solo lectura) */}
+          <section className="panel" style={{ padding: '18px 24px', marginTop: '16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 800 }}>
+                  🧭 Régimen de Mercado{' '}
+                  <span style={{ fontSize: '11px', fontWeight: 700, color: '#94a3b8' }}>solo lectura</span>
+                </h3>
+                <p style={{ margin: '4px 0 0', fontSize: '12px', color: '#94a3b8' }}>
+                  {selectedSymbol} · {selectedTimeframe} · clasificación descriptiva de velas cerradas; no es una señal de compra/venta.
+                </p>
+              </div>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                {regimeReport?.status === 'classified' && regimeReport.trend && (
+                  <span
+                    style={{
+                      padding: '3px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 800,
+                      backgroundColor:
+                        regimeReport.trend === 'uptrend'
+                          ? 'rgba(16, 185, 129, 0.15)'
+                          : regimeReport.trend === 'downtrend'
+                            ? 'rgba(239, 68, 68, 0.15)'
+                            : 'rgba(148, 163, 184, 0.15)',
+                      color:
+                        regimeReport.trend === 'uptrend'
+                          ? '#10b981'
+                          : regimeReport.trend === 'downtrend'
+                            ? '#ef4444'
+                            : '#94a3b8',
+                    }}
+                  >
+                    {regimeReport.trend === 'uptrend'
+                      ? 'TENDENCIA ALCISTA'
+                      : regimeReport.trend === 'downtrend'
+                        ? 'TENDENCIA BAJISTA'
+                        : 'RANGO / LATERAL'}
+                  </span>
+                )}
+                {regimeReport?.status === 'classified' && regimeReport.volatility && (
+                  <span
+                    style={{
+                      padding: '3px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 800,
+                      backgroundColor:
+                        regimeReport.volatility === 'high'
+                          ? 'rgba(245, 158, 11, 0.15)'
+                          : regimeReport.volatility === 'low'
+                            ? 'rgba(56, 189, 248, 0.15)'
+                            : 'rgba(148, 163, 184, 0.12)',
+                      color:
+                        regimeReport.volatility === 'high'
+                          ? '#f59e0b'
+                          : regimeReport.volatility === 'low'
+                            ? '#38bdf8'
+                            : '#94a3b8',
+                    }}
+                  >
+                    {regimeReport.volatility === 'high'
+                      ? 'VOLATILIDAD ALTA'
+                      : regimeReport.volatility === 'low'
+                        ? 'VOLATILIDAD BAJA'
+                        : 'VOLATILIDAD NORMAL'}
+                  </span>
+                )}
+                {regimeReport?.metrics.data_stale && (
+                  <span
+                    style={{
+                      padding: '3px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 800,
+                      backgroundColor: 'rgba(245, 158, 11, 0.15)',
+                      color: '#f59e0b',
+                    }}
+                  >
+                    DATOS ANTIGUOS
+                  </span>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  style={{ fontSize: '11px', padding: '5px 10px' }}
+                  onClick={refreshRegime}
+                  disabled={isLoadingRegime}
+                >
+                  {isLoadingRegime ? 'Calculando…' : 'Actualizar'}
+                </button>
+              </div>
+            </div>
+
+            {regimeReport ? (
+              regimeReport.status === 'insufficient_data' ? (
+                <p style={{ margin: '12px 0 0', fontSize: '12px', color: '#f59e0b' }}>
+                  Datos insuficientes: {regimeReport.reasons.join(' ')}
+                </p>
+              ) : (
+                <>
+                  <div className="kpi-grid" style={{ marginTop: '14px' }}>
+                    <div className="kpi-card" style={{ padding: '12px' }}>
+                      <span className="kpi-label">Velas cerradas usadas</span>
+                      <span className="kpi-value">{safeNum(regimeReport.metrics.sample_size)}</span>
+                    </div>
+                    <div className="kpi-card" style={{ padding: '12px' }}>
+                      <span className="kpi-label">Separación EMA20 / EMA50</span>
+                      <span className="kpi-value">{safeMetric(regimeReport.metrics.ema_separation_pct)}%</span>
+                    </div>
+                    <div className="kpi-card" style={{ padding: '12px' }}>
+                      <span className="kpi-label">Pendiente EMA20 (10 velas)</span>
+                      <span className="kpi-value">{safeMetric(regimeReport.metrics.ema_slope_pct)}%</span>
+                    </div>
+                    <div className="kpi-card" style={{ padding: '12px' }}>
+                      <span className="kpi-label">ATR14 sobre precio</span>
+                      <span className="kpi-value">{safeMetric(regimeReport.metrics.atr_pct)}%</span>
+                    </div>
+                    <div className="kpi-card" style={{ padding: '12px' }}>
+                      <span className="kpi-label">Percentil ATR · Fuerza</span>
+                      <span className="kpi-value">
+                        {safeMetric(regimeReport.metrics.atr_percentile, 0)} ·{' '}
+                        {safeMetric(regimeReport.metrics.trend_strength, 0)}/100
+                      </span>
+                    </div>
+                  </div>
+                  <p style={{ margin: '12px 0 0', fontSize: '12px', opacity: 0.8 }}>
+                    {regimeReport.reasons.join(' · ')}
+                  </p>
+                  <p style={{ margin: '6px 0 0', fontSize: '11px', opacity: 0.55 }}>
+                    {regimeReport.disclaimer} No modifica señales, riesgo ni ejecución.
+                  </p>
+                </>
+              )
+            ) : (
+              <p style={{ margin: '12px 0 0', fontSize: '12px', color: '#94a3b8' }}>Cargando régimen…</p>
+            )}
           </section>
 
           {/* Tarjeta Hero Principal del Bot */}

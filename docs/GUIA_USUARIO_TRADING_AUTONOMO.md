@@ -39,6 +39,17 @@ Para medir movimiento posterior cuando ya maduró un horizonte, usa `POST /api/v
 
 La evaluación cuenta el horizonte desde el cierre de la última vela de entrada (`evaluation_anchor_at`). El agregado separa comparaciones brutas de ventanas no solapadas; el umbral de 30 clasifica solo la evidencia estadística agregada y **no bloquea rankings ni evaluaciones shadow continuas** (`blocks_current_shadow_scan=false`). Ventanas no solapadas reducen repetición mecánica, pero no prueban independencia estadística. Este umbral tampoco es una autorización para trading real.
 
+## Régimen de mercado (solo lectura)
+
+`GET /api/v1/market/{symbol}/regime?timeframe=1h&limit=200` resume el comportamiento reciente de un mercado con dos etiquetas: tendencia (`uptrend`, `downtrend` o `range`) y volatilidad (`low`, `normal` o `high`). Se calcula con EMA20/EMA50, la pendiente de la EMA rápida y el percentil del ATR14.
+
+- Solo usa velas **cerradas**; la vela en curso se excluye y se contabiliza.
+- Si hay pocas velas devuelve `status=insufficient_data` en lugar de inventar una etiqueta.
+- Marca `data_stale=true` cuando la última vela cerrada es más antigua de lo esperado para esa temporalidad.
+- Devuelve `descriptive_only=true`, `affects_trading=false` y `execution_enabled=false`.
+
+El panel **Régimen de Mercado** de la vista principal muestra esas métricas y motivos. Es contexto, no una señal de compra/venta: no cambia el comité, el sizing, el veto de riesgo ni la ejecución del bot. Una racha corta o un cambio brusco de volatilidad pueden hacer que la etiqueta quede obsoleta de inmediato.
+
 ## 1. Empezar sin arriesgar dinero
 
 1. Inicia la aplicación y abre la pestaña **Asistente**.
@@ -90,6 +101,7 @@ Cambiar a Mainnet no activa por sí mismo el trading real. Se requieren credenci
 - **Pausar**: detiene ciclos y nuevas órdenes; no liquida posiciones existentes.
 - **Parada de emergencia**: intenta detener el bot y cerrar posiciones administradas; úsala solo entendiendo que puede materializar pérdidas y no sustituye la verificación directa en el exchange.
 - **MLOps**: muestra resultados atribuidos a decisiones del comité cuando se dispone de datos suficientes; es analítica, no autoentrenamiento ni garantía de mejora.
+- **Régimen de mercado**: etiqueta descriptiva de tendencia y volatilidad; no es una señal, no autoriza entradas y no modifica el riesgo ni la ejecución.
 
 ## 5. Hábitos recomendados
 

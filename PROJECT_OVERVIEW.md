@@ -330,8 +330,17 @@ ai-trading-assistant/
 - **OCO exchange-side implementada y validada (Fase 8.2)**: Binance spot, flag `REAL_TRADING_OCO_ENABLED=false` por defecto, cancelación segura antes de cierres, reconciliación de ejecuciones y descubrimiento al reiniciar.
 - **Validación testnet (2026-10-23)**: OCO creada y redescubierta tras reiniciar; cierre manual cancela la OCO; pierna TP ejecutada y registrada en el journal como orden `limit` con nota `Binance OCO ... executed (LIMIT_MAKER)`, sin venta adicional del guardián local. La prueba también reveló y corrigió que Binance no incluye el estado de las piernas en `orderList`; ahora se consultan una a una antes de concluir que no hubo fill.
 
+### Fase 9 — Aprendizaje continuo, régimen y activación Testnet (2026-10-24)
+
+- **Activación real/Testnet explícita**: `PUT /api/v1/trading/runtime-config` con `confirm=true` dejó `execution_mode=real`, `enable_real_trading=true`, `trading_environment=testnet`, `enable_autonomous_real_trading=true`, `require_manual_confirmation=true` y `allow_mainnet_trading=false`. `GET /real/status` confirmó `enabled=true`, `testnet=true`, credenciales Testnet y `open_positions=0`. Mainnet sigue bloqueado y el bot autónomo **no** se inicia solo.
+- **Smoke real en Testnet**: `scripts/real_testnet_smoke.py --execute --yes --close --quantity 0.0001` ejecutó compra y venta market reales en Binance Testnet (`BTC/USDT`, 0.0001), abrió y cerró la posición, y la alerta de prueba de Telegram se entregó. No se usó dinero real.
+- **Detector de régimen (solo lectura)**: `GET /api/v1/market/{symbol}/regime?timeframe=1h&limit=200` clasifica tendencia (`uptrend`/`downtrend`/`range`) y volatilidad (`low`/`normal`/`high`) con EMA20/50, pendiente y percentil de ATR14. Solo usa velas cerradas, marca datos insuficientes/antiguos y publica `descriptive_only=true`, `affects_trading=false` y `execution_enabled=false`. El panel «Régimen de Mercado» de la vista principal muestra el resultado y no modifica señales, riesgo ni ejecución.
+- **Vault**: el contenedor usa `VAULT_STORAGE_PATH=/app/vault/.vault_store.json`; en el host se copió el mismo vault a `backend/.vault_store.json` para que los scripts locales usen el path por defecto. Ambos archivos siguen ignorados por Git.
+- **CI**: el workflow ahora también se ejecuta en la rama `master` (antes solo `main`/`develop`, por lo que el push a `master` no disparaba comprobaciones).
+- **Verificación local**: **277 tests aprobados**, cobertura 78.61 %, Ruff y MyPy sin errores, `npm run build` correcto. Oxlint mantiene avisos de hooks preexistentes.
+
 ---
 
 *Fin del resumen de traspaso. Al iniciar el nuevo chat, comparte este archivo o pide continuar a partir de la sección 8.*
 
-*Última actualización: Fase 9 inicial y gateway LLM con fallback implementados; la cadena requiere claves de proveedores para usar modelos reales. Configuración paper/real y testnet/mainnet desde la app. La OCO nativa de Binance spot fue validada en testnet. Verificación local: 190 tests aprobados, Ruff/MyPy/formateo y build TypeScript/Vite correctos. La migración Alembic d5e2b3c4f6a7 está aplicada a la base local.*
+*Última actualización: 2026-10-24. Trading real activado explícitamente en Testnet (Mainnet bloqueado, bot autónomo no iniciado) y smoke test real compra/venta validado. Detector de régimen de mercado solo lectura y panel en la vista principal. CI extendido a `master`. Verificación local: 277 tests aprobados (cobertura 78.61 %), Ruff/MyPy/formateo y build TypeScript/Vite correctos. La migración Alembic d5e2b3c4f6a7 está aplicada a la base local.*

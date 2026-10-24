@@ -9,8 +9,13 @@ from pydantic import BaseModel, Field
 
 from src.application.services.indicator_service import IndicatorService, TechnicalAnalysisSummary
 from src.application.services.market_data_service import MarketDataService
+from src.application.services.regime_service import MarketRegimeReport, RegimeService
 from src.domain.market.entities import Timeframe
-from src.interfaces.api.v1.deps import get_indicator_service, get_market_data_service
+from src.interfaces.api.v1.deps import (
+    get_indicator_service,
+    get_market_data_service,
+    get_regime_service,
+)
 from src.shared.config.settings import get_settings
 
 router = APIRouter()
@@ -278,3 +283,39 @@ async def get_indicators(
         candles=candles,
     )
     return analysis
+
+
+@router.get(
+    "/{symbol:path}/regime",
+    response_model=MarketRegimeReport,
+    summary="Classify the current market regime (read-only)",
+)
+async def get_market_regime(
+    symbol: str,
+    timeframe: str = Query("1h", description="Candlestick timeframe e.g. 1m, 5m, 15m, 1h, 4h, 1d"),
+    limit: int = Query(
+        200, ge=30, le=1000, description="Closed-candle lookback used for classification"
+    ),
+    service: RegimeService = Depends(get_regime_service),
+) -> MarketRegimeReport:
+    """Describe trend and volatility from closed candles only.
+
+    This endpoint is intentionally descriptive: it does not alter signals,
+    sizing, risk vetoes or execution. Short or stale series are reported as
+    such instead of forcing a label.
+    """
+    normalized_symbol = symbol.replace("-", "/").replace("_", "/").upper()
+
+    try:
+        tf = Timeframe(timeframe)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid timeframe '{timeframe}'") from exc
+
+    try:
+        return await service.analyze(
+            symbol=normalized_symbol,
+            timeframe=tf,
+            limit=limit,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to classify regime: {exc}") from exc

@@ -21,6 +21,7 @@ from src.application.services.live_trading_service import LiveTradingService
 from src.application.services.market_data_service import MarketDataService
 from src.application.services.observability_service import ObservabilityService
 from src.application.services.optimization_service import OptimizationService
+from src.application.services.regime_service import RegimeService
 from src.application.services.risk_service import RiskService
 from src.application.services.runtime_config_service import RuntimeConfigService
 from src.application.services.strategy_service import StrategyService
@@ -97,6 +98,13 @@ def get_market_data_service(
 ) -> MarketDataService:
     repository = TimescaleCandleRepository(session)
     return MarketDataService(exchange=fetcher, repository=repository)
+
+
+def get_regime_service(
+    market_service: Annotated[MarketDataService, Depends(get_market_data_service)],
+) -> RegimeService:
+    """Instantiate the read-only market-regime classifier."""
+    return RegimeService(market_service)
 
 
 def get_indicator_service() -> IndicatorService:
