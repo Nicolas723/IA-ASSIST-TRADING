@@ -361,7 +361,11 @@ class LLMGateway:
         if not self._settings.llm_fallback_enabled:
             return []
         primary = self._settings.llm_primary_provider
-        return [p.value for p in self._settings.llm_fallback_providers if p != primary]
+        return [
+            provider.value
+            for provider in self._settings.llm_fallback_providers
+            if provider != primary and provider in self._adapters
+        ]
 
     async def complete(
         self,

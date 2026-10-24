@@ -108,7 +108,8 @@ def test_gateway_exposes_provider_names_without_secrets() -> None:
 
     assert gateway.configured_providers == ["openai"]
     assert gateway.primary_provider == "openai"
-    assert gateway.fallback_providers == ["google", "anthropic"]
+    # Unconfigured providers are never usable fallbacks, so they are not reported.
+    assert gateway.fallback_providers == []
 
 
 def test_fallback_providers_exclude_the_primary(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,10 +122,35 @@ def test_fallback_providers_exclude_the_primary(monkeypatch: pytest.MonkeyPatch)
     )
     monkeypatch.setattr(gateway_module, "get_settings", lambda: config)
     gateway = LLMGateway(
-        {LLMProvider.GOOGLE: FakeAdapter(LLMProvider.GOOGLE, _response(LLMProvider.GOOGLE, "ok"))}
+        {
+            LLMProvider.GOOGLE: FakeAdapter(
+                LLMProvider.GOOGLE, _response(LLMProvider.GOOGLE, "ok")
+            ),
+            LLMProvider.ANTHROPIC: FakeAdapter(
+                LLMProvider.ANTHROPIC, _response(LLMProvider.ANTHROPIC, "ok")
+            ),
+        }
     )
 
     assert gateway.fallback_providers == ["anthropic"]
+
+
+def test_fallback_providers_exclude_providers_without_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infrastructure.llm import gateway as gateway_module
+
+    config = Settings(
+        _env_file=None,
+        llm_primary_provider=LLMProvider.GOOGLE,
+        llm_fallback_providers=[LLMProvider.OPENAI, LLMProvider.ANTHROPIC],
+    )
+    monkeypatch.setattr(gateway_module, "get_settings", lambda: config)
+    gateway = LLMGateway(
+        {LLMProvider.GOOGLE: FakeAdapter(LLMProvider.GOOGLE, _response(LLMProvider.GOOGLE, "ok"))}
+    )
+
+    assert gateway.fallback_providers == []
 
 
 @pytest.mark.asyncio
