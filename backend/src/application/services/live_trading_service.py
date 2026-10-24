@@ -137,6 +137,9 @@ class LiveTradingService:
         self._order_ids: set[UUID] = set()
         self._client_order_ids: dict[str, Order] = {}
         self._last_reconcile = 0.0
+        self._last_reconcile_ok: bool | None = None
+        self._last_reconcile_error: str | None = None
+        self._last_reconcile_at: datetime | None = None
         self._oco_protections: dict[str, OcoProtection] = {}
         self._oco_discovery_failed: set[Exchange] = set()
 
@@ -1363,6 +1366,45 @@ class LiveTradingService:
             self.risk_service.current_equity_usd = float(total)
             self.risk_service.current_gross_exposure_usd = float(portfolio.gross_exposure_usd)
         return portfolio
+
+    async def preflight_reconciliation(self) -> tuple[bool, str | None]:
+        """Read-only gate before opening new real risk.
+
+        A balance probe is the cheapest way to prove that the exchange is
+        reachable and the stored credentials are still valid. When it fails the
+        local ledger cannot be trusted, so callers must suspend new entries
+        until a later probe succeeds. Existing positions are never gated: exits
+        must stay possible even while reconciliation is degraded.
+
+        Returns ``(ok, error)``; ``error`` is ``None`` when the probe succeeds.
+        """
+        if not self.settings.real_trading_enabled:
+            return True, None
+
+        exchange_id = self._exchange()
+        adapter: LiveExchangeAdapter | None = None
+        try:
+            adapter = self._adapter(exchange_id)
+            await adapter.fetch_balances()
+        except Exception as exc:
+            error = str(exc)
+            self._last_reconcile_ok = False
+            self._last_reconcile_error = error
+            self._last_reconcile_at = datetime.now(tz=UTC)
+            logger.warning(
+                "live_reconcile_gate_failed",
+                exchange=exchange_id.value,
+                error=error,
+            )
+            return False, error
+        finally:
+            if adapter is not None:
+                await adapter.close()
+
+        self._last_reconcile_ok = True
+        self._last_reconcile_error = None
+        self._last_reconcile_at = datetime.now(tz=UTC)
+        return True, None
 
     async def reconcile_positions(self) -> list[str]:
         """

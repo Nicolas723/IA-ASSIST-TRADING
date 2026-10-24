@@ -722,6 +722,35 @@ class AutonomousEngine:
                     )
                     return
 
+            # Fail-closed preflight: never open new real risk while the exchange
+            # cannot confirm that the local ledger is still trustworthy. Exits
+            # above are intentionally not gated, so a degraded reconciliation
+            # can never trap an open position.
+            if mode == ExecutionMode.REAL and order_side == OrderSide.BUY:
+                if self.live_trading_service is None:
+                    self.add_log(
+                        level="ERROR",
+                        message=f"{log_msg} — Entrada omitida: falta el servicio de trading real.",
+                        signal=signal_str.upper(),
+                        confidence_pct=confidence_pct,
+                        price=current_price,
+                    )
+                    return
+                reconciled, gate_error = await self.live_trading_service.preflight_reconciliation()
+                if not reconciled:
+                    self.add_log(
+                        level="ERROR",
+                        message=(
+                            f"{log_msg} — Entrada suspendida: falló la conciliación con el "
+                            f"exchange ({gate_error or 'error desconocido'}). No se abre "
+                            "riesgo nuevo hasta que la conciliación vuelva a responder."
+                        ),
+                        signal=signal_str.upper(),
+                        confidence_pct=confidence_pct,
+                        price=current_price,
+                    )
+                    return
+
             place_req = PlaceOrderRequest(
                 symbol=symbol,
                 side=order_side,

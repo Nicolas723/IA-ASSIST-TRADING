@@ -96,6 +96,8 @@ El porcentaje de riesgo configura el riesgo teórico calculado hasta el Stop Los
 
 El modo Real continúa sujeto a la allowlist, máximo por orden, Risk Guard y confirmación de la sesión autónoma. Las confirmaciones manuales normales de órdenes siguen siendo obligatorias en el trading manual; la sesión autónoma es una autorización explícita para que el bot ejecute las señales durante esa sesión.
 
+Antes de cada entrada nueva en Real, el bot comprueba que el exchange responde a una lectura de saldo. Si esa comprobación falla, la entrada se suspende y verás un aviso en el registro; las ventas y los cierres por Stop Loss/Take Profit no se bloquean. Esto evita abrir riesgo nuevo mientras el registro local puede estar desincronizado con el exchange.
+
 ## 3. Mainnet: dinero real (no recomendado para empezar)
 
 Mainnet debe ser el último paso, solo después de comprender y validar el comportamiento en Paper y Testnet. Las claves Mainnet se guardan separadas de Testnet.

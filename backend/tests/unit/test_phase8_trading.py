@@ -886,6 +886,49 @@ async def test_reconcile_persists_changes_through_callback() -> None:
     assert calls == [True]
 
 
+async def test_preflight_reconciliation_probes_balances_and_records_success() -> None:
+    service, adapter = make_service()
+
+    ok, error = await service.preflight_reconciliation()
+
+    assert ok is True
+    assert error is None
+    assert service._last_reconcile_ok is True
+    assert service._last_reconcile_error is None
+    assert service._last_reconcile_at is not None
+    assert adapter.closed is True
+
+
+async def test_preflight_reconciliation_fails_closed_when_probe_raises() -> None:
+    service, adapter = make_service()
+
+    async def failing_balances() -> dict[str, float]:
+        raise RuntimeError("network down")
+
+    adapter.fetch_balances = failing_balances  # type: ignore[method-assign]
+
+    ok, error = await service.preflight_reconciliation()
+
+    assert ok is False
+    assert error == "network down"
+    assert service._last_reconcile_ok is False
+    assert service._last_reconcile_error == "network down"
+    assert adapter.closed is True
+
+
+async def test_preflight_reconciliation_is_skipped_when_real_trading_disabled() -> None:
+    service = LiveTradingService(
+        vault_service=FakeVault(),
+        settings=real_settings(enable_real_trading=False),
+    )
+
+    ok, error = await service.preflight_reconciliation()
+
+    assert ok is True
+    assert error is None
+    assert service._last_reconcile_ok is None
+
+
 async def test_reconcile_is_skipped_when_real_trading_disabled() -> None:
     service, _ = make_service(settings=Settings(_env_file=None))
     service.restore(positions=[make_position()], orders=[], trades=[])
