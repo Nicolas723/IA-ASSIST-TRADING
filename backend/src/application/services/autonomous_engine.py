@@ -684,6 +684,41 @@ class AutonomousEngine:
                 )
                 return
 
+            # Real orders must fit the per-order notional cap. Sizing by risk
+            # can produce a much larger notional than the operator allowed, so
+            # shrink the quantity instead of letting the live service reject
+            # every signal. The live service still enforces the cap as a hard
+            # last line of defense.
+            if mode == ExecutionMode.REAL:
+                max_notional = float(get_settings().real_trading_max_notional)
+                if current_price > 0 and quantity * current_price > max_notional:
+                    capped_quantity = round(max_notional / current_price, 6)
+                    self.add_log(
+                        level="WARNING",
+                        message=(
+                            f"{log_msg} — Cantidad ajustada de {quantity} a {capped_quantity} "
+                            f"{symbol} para respetar REAL_TRADING_MAX_NOTIONAL "
+                            f"(${max_notional:,.2f})."
+                        ),
+                        signal=signal_str.upper(),
+                        confidence_pct=confidence_pct,
+                        price=current_price,
+                    )
+                    quantity = capped_quantity
+                if quantity <= 0:
+                    self.add_log(
+                        level="WARNING",
+                        message=(
+                            f"{log_msg} — Entrada omitida: REAL_TRADING_MAX_NOTIONAL "
+                            f"(${max_notional:,.2f}) no permite una cantidad positiva a "
+                            f"${current_price:,.2f}."
+                        ),
+                        signal=signal_str.upper(),
+                        confidence_pct=confidence_pct,
+                        price=current_price,
+                    )
+                    return
+
             place_req = PlaceOrderRequest(
                 symbol=symbol,
                 side=order_side,

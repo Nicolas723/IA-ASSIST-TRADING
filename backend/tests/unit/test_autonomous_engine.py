@@ -20,6 +20,7 @@ from src.domain.agents.entities import (
     SignalDirection,
 )
 from src.domain.market.entities import OHLCV, Candle, Exchange, Timeframe
+from src.domain.risk.entities import PositionSizeResult
 from src.domain.trading.entities import (
     ExecutionMode,
     Order,
@@ -316,3 +317,83 @@ async def test_autonomous_sell_signal_closes_only_its_tracked_position():
         mode=ExecutionMode.PAPER,
     )
     trading.place_order.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_real_order_quantity_is_capped_to_max_notional(monkeypatch) -> None:
+    market = MagicMock()
+    market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
+    agent = MagicMock()
+    agent.run_analysis = AsyncMock(
+        return_value=CoordinatorDecision(
+            symbol="BTC/USDT",
+            final_signal=SignalDirection.BUY,
+            aggregate_confidence=0.85,
+            consensus_level=0.9,
+            reasoning_summary="Bullish momentum with committee consensus and risk approval.",
+            risk_approved=True,
+            recommended_entry=65000.0,
+            recommended_stop=63700.0,
+            recommended_target=67600.0,
+        )
+    )
+    risk = MagicMock()
+    risk.calculate_position_size.return_value = PositionSizeResult(
+        symbol="BTC/USDT",
+        account_balance=10000.0,
+        risk_percentage=1.0,
+        risk_amount_usd=100.0,
+        price_risk_per_unit=1300.0,
+        price_risk_pct=2.0,
+        recommended_units=0.1,
+        recommended_notional_usd=6500.0,
+        risk_reward_ratio=2.0,
+        potential_profit_usd=200.0,
+        is_valid_setup=True,
+        notes="",
+    )
+    live = MagicMock()
+    live.get_portfolio.return_value = Portfolio(
+        mode=ExecutionMode.REAL,
+        exchange=Exchange.BINANCE,
+        total_balance=Decimal("10000"),
+        available_balance=Decimal("10000"),
+        locked_balance=Decimal("0"),
+        positions=[],
+    )
+    live.get_positions.return_value = []
+    live.place_order = AsyncMock(
+        return_value=Order(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            quantity=Decimal("0.000769"),
+            price=Decimal("65000"),
+            exchange=Exchange.BINANCE,
+            mode=ExecutionMode.REAL,
+            status=OrderStatus.FILLED,
+        )
+    )
+    monkeypatch.setattr(
+        "src.application.services.autonomous_engine.get_settings",
+        lambda: SimpleNamespace(real_trading_max_notional=Decimal("50")),
+    )
+
+    engine = AutonomousEngine(
+        agent_service=agent,
+        market_service=market,
+        risk_service=risk,
+        live_trading_service=live,
+    )
+    engine.config = AutonomousBotConfig(
+        execution_mode="real",
+        confirm_real_trading=True,
+        risk_per_trade_pct=1.0,
+    )
+
+    await engine._execute_cycle()
+
+    placed = live.place_order.call_args.kwargs["req"]
+    assert placed.quantity == 0.000769
+    assert any("Cantidad ajustada" in log.message for log in engine._logs)
