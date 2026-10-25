@@ -64,10 +64,13 @@ async def check_llm_providers(
 ) -> dict[str, object]:
     """Check provider connectivity without sending market data or trading requests."""
     if llm_gateway is None:
-        return {"mode": "deterministic_fallback", "providers": {}}
+        return {"mode": "deterministic_fallback", "providers": {}, "cooldowns": []}
     return {
         "mode": "llm_with_fallback",
         "providers": await llm_gateway.check_providers_health(),
+        # Connectivity can succeed while the account cannot be billed (for
+        # example a 402 for insufficient balance), so surface the cooldowns too.
+        "cooldowns": llm_gateway.provider_cooldowns,
     }
 
 

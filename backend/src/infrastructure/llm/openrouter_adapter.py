@@ -13,7 +13,12 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from src.infrastructure.llm.gateway import BaseLLMAdapter, LLMRequest, LLMResponse
 from src.shared.config.settings import LLMProvider, get_settings
-from src.shared.exceptions.domain import LLMError, LLMRateLimitError, LLMTimeoutError
+from src.shared.exceptions.domain import (
+    LLMError,
+    LLMQuotaError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+)
 from src.shared.logging.setup import get_logger
 
 logger = get_logger(__name__)
@@ -84,7 +89,25 @@ class OpenRouterAdapter(BaseLLMAdapter):
         except TimeoutError as exc:
             raise LLMTimeoutError("OpenRouter request timed out", provider="openrouter") from exc
         except openai.AuthenticationError as exc:
-            raise LLMError(f"OpenRouter auth failed: {exc}", provider="openrouter") from exc
+            raise LLMQuotaError(
+                f"OpenRouter rejected the API key: {exc}",
+                provider="openrouter",
+                cooldown_seconds=3600,
+            ) from exc
+        except openai.PermissionDeniedError as exc:
+            raise LLMQuotaError(
+                f"OpenRouter denied access to this model: {exc}",
+                provider="openrouter",
+                cooldown_seconds=3600,
+            ) from exc
+        except openai.APIStatusError as exc:
+            if exc.status_code == 402:
+                raise LLMQuotaError(
+                    f"OpenRouter has insufficient balance: {exc}",
+                    provider="openrouter",
+                    cooldown_seconds=1800,
+                ) from exc
+            raise LLMError(f"OpenRouter API error: {exc}", provider="openrouter") from exc
         except openai.APIError as exc:
             raise LLMError(f"OpenRouter API error: {exc}", provider="openrouter") from exc
 

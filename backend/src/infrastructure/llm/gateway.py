@@ -283,6 +283,11 @@ class LLMGateway:
             )
         return statuses
 
+    @property
+    def provider_cooldowns(self) -> list[dict[str, object]]:
+        """Providers currently parked after a non-transient failure."""
+        return self._cooldown_status()
+
     def _refresh_usage_day(self) -> None:
         today = datetime.now(tz=UTC).date()
         if self._usage_date != today:
@@ -353,7 +358,7 @@ class LLMGateway:
                 cycle_request_budget > 0 and self._cycle_requests_used >= cycle_request_budget
             ),
             "fallbacks": self._fallbacks_today,
-            "provider_cooldowns": self._cooldown_status(),
+            "provider_cooldowns": self.provider_cooldowns,
             "estimated_cost_usd": _estimate_cost(
                 self._prompt_tokens_today,
                 self._completion_tokens_today,
