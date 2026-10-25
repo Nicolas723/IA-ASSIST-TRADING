@@ -111,6 +111,33 @@ async def test_complete_maps_rate_limit_errors(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
+async def test_rate_limit_error_exposes_the_provider_retry_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = RuntimeError(
+        "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'details': "
+        "[{'@type': 'type.googleapis.com/google.rpc.RetryInfo', "
+        "'retryDelay': '20282s'}]}}"
+    )
+    adapter, _ = make_adapter(monkeypatch, error=error)
+
+    with pytest.raises(LLMRateLimitError) as excinfo:
+        await adapter.complete(make_request())
+
+    assert excinfo.value.retry_after_seconds == 20282
+
+
+def test_retry_after_seconds_parses_retry_in_text() -> None:
+    exc = RuntimeError("Quota exceeded. Please retry in 30.4s.")
+
+    assert gemini_module._retry_after_seconds(exc) == 31
+
+
+def test_retry_after_seconds_is_unknown_without_a_delay() -> None:
+    assert gemini_module._retry_after_seconds(RuntimeError("429 quota")) is None
+
+
+@pytest.mark.asyncio
 async def test_daily_quota_errors_are_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter, models = make_adapter(monkeypatch, error=RuntimeError("429 RESOURCE_EXHAUSTED quota"))
 

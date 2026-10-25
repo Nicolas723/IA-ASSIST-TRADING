@@ -121,6 +121,35 @@ class LLMError(InfrastructureError):
 class LLMRateLimitError(LLMError):
     """LLM provider rate limit exceeded."""
 
+    def __init__(
+        self,
+        message: str,
+        provider: str | None = None,
+        retry_after_seconds: int | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, provider=provider, **kwargs)
+        self.retry_after_seconds = retry_after_seconds
+
+
+class LLMQuotaError(LLMError):
+    """The provider account cannot serve requests (no balance or bad credentials).
+
+    Unlike a rate limit, this condition does not fix itself in seconds, so the
+    gateway parks the provider for a longer cooldown instead of retrying it on
+    every analysis cycle.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        provider: str | None = None,
+        cooldown_seconds: int = 1800,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, provider=provider, **kwargs)
+        self.cooldown_seconds = cooldown_seconds
+
 
 class LLMTimeoutError(LLMError):
     """LLM request timed out."""

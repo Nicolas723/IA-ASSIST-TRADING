@@ -5,6 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
+import openai
 import pytest
 
 from src.infrastructure.llm import deepseek_adapter as deepseek_module
@@ -22,6 +24,7 @@ from src.shared.config.settings import (
     OpenRouterSettings,
     Settings,
 )
+from src.shared.exceptions.domain import LLMQuotaError
 
 
 class FakeCompletions:
@@ -118,3 +121,56 @@ def test_factory_registers_deepseek_when_key_is_configured(
 
     assert gateway is not None
     assert gateway.configured_providers == ["deepseek"]
+
+
+class RaisingCompletions:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def create(self, **kwargs: Any) -> Any:
+        raise self.error
+
+
+def _status_error(status_code: int, message: str) -> openai.APIStatusError:
+    request = httpx.Request("POST", "https://api.deepseek.com/chat/completions")
+    response = httpx.Response(status_code, request=request, json={"error": {"message": message}})
+    if status_code == 401:
+        return openai.AuthenticationError(message, response=response, body=None)
+    if status_code == 403:
+        return openai.PermissionDeniedError(message, response=response, body=None)
+    return openai.APIStatusError(message, response=response, body=None)
+
+
+def _request() -> LLMRequest:
+    return LLMRequest(messages=[LLMMessage(role="user", content="hi")], model="")
+
+
+@pytest.mark.asyncio
+async def test_insufficient_balance_maps_to_a_long_quota_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _build_adapter(monkeypatch)
+    adapter._client.chat.completions = RaisingCompletions(  # type: ignore[assignment]
+        _status_error(402, "Insufficient Balance")
+    )
+
+    with pytest.raises(LLMQuotaError) as excinfo:
+        await adapter.complete(_request())
+
+    assert excinfo.value.provider == "deepseek"
+    assert excinfo.value.cooldown_seconds == 1800
+
+
+@pytest.mark.asyncio
+async def test_rejected_credentials_map_to_a_quota_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _build_adapter(monkeypatch)
+    adapter._client.chat.completions = RaisingCompletions(  # type: ignore[assignment]
+        _status_error(401, "Invalid API key")
+    )
+
+    with pytest.raises(LLMQuotaError) as excinfo:
+        await adapter.complete(_request())
+
+    assert excinfo.value.cooldown_seconds == 3600

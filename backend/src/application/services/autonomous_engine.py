@@ -523,8 +523,8 @@ class AutonomousEngine:
 
         self._last_analysis_at = datetime.now(tz=UTC)
 
-        # Start a fresh LLM cycle budget before the committee spends tokens.
-        self.agent_service.begin_cycle()
+        # AgentService.run_analysis starts a fresh per-cycle LLM budget itself,
+        # so both the engine and the manual /agents/analyze endpoint get one.
         decision: CoordinatorDecision = await self.agent_service.run_analysis(
             symbol=symbol,
             timeframe=self.config.timeframe,

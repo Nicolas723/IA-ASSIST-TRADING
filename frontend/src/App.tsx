@@ -134,6 +134,12 @@ interface LLMStatusData {  mode: string;
     cycle_requests_remaining?: number | null;
     cycle_request_budget_exhausted?: boolean;
     fallbacks: number;
+    provider_cooldowns?: Array<{
+      provider: string;
+      reason: string;
+      seconds_remaining: number;
+      until_utc: string;
+    }>;
     estimated_cost_usd: number | null;
     pricing: {
       input_usd_per_million_tokens: number;
@@ -2903,6 +2909,19 @@ export default function App() {
               <span>
                 <strong>Fallbacks:</strong> {safeNum(llmStatus?.usage?.fallbacks)}
               </span>
+              {(llmStatus?.usage?.provider_cooldowns?.length ?? 0) > 0 && (
+                <span style={{ color: '#f59e0b' }}>
+                  <strong>Proveedores en espera:</strong>{' '}
+                  {llmStatus?.usage?.provider_cooldowns
+                    ?.map(
+                      (cooldown) =>
+                        `${cooldown.provider} (${cooldown.reason}, ${Math.ceil(
+                          cooldown.seconds_remaining / 60,
+                        )} min)`,
+                    )
+                    .join(', ')}
+                </span>
+              )}
               <span>
                 <strong>Coste IA est.:</strong>{' '}
                 {llmStatus?.usage?.pricing?.configured

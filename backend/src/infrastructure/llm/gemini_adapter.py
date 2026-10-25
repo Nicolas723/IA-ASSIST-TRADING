@@ -8,6 +8,8 @@ event loop without a thread hop.
 
 from __future__ import annotations
 
+import math
+import re
 from typing import Any
 
 from google import genai
@@ -48,6 +50,27 @@ def _is_rate_limit(exc: Exception) -> bool:
         return True
     text = str(exc).lower()
     return "429" in text or "quota" in text or "resource_exhausted" in text
+
+
+_RETRY_DELAY_RE = re.compile(
+    r"retry_?delay[\"']?\s*[:=]\s*[\"']?(\d+(?:\.\d+)?)\s*s",
+    re.IGNORECASE,
+)
+_RETRY_IN_RE = re.compile(r"retry in (\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
+
+
+def _retry_after_seconds(exc: Exception) -> int | None:
+    """Extract the provider's retryDelay so the gateway can park it precisely.
+
+    Gemini includes the wait in the 429 payload (``'retryDelay': '20282s'``).
+    A daily free-tier quota is measured in hours, so guessing a short cooldown
+    would make every analysis waste another request against the same wall.
+    """
+    text = str(exc)
+    match = _RETRY_DELAY_RE.search(text) or _RETRY_IN_RE.search(text)
+    if match is None:
+        return None
+    return max(1, math.ceil(float(match.group(1))))
 
 
 def _response_text(response: Any) -> str:
@@ -130,7 +153,11 @@ class GeminiAdapter(BaseLLMAdapter):
             if _is_timeout(exc):
                 raise LLMTimeoutError("Gemini request timed out", provider="google") from exc
             if _is_rate_limit(exc):
-                raise LLMRateLimitError(str(exc), provider="google") from exc
+                raise LLMRateLimitError(
+                    str(exc),
+                    provider="google",
+                    retry_after_seconds=_retry_after_seconds(exc),
+                ) from exc
             raise LLMError(f"Gemini API error: {exc}", provider="google") from exc
 
     async def health_check(self) -> bool:

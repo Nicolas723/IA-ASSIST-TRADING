@@ -544,7 +544,6 @@ async def test_committee_analysis_is_throttled_between_fast_cycles() -> None:
     # The first cycle analyzes; the second one still tracks positions but
     # defers the expensive committee run.
     agent.run_analysis.assert_awaited_once()
-    agent.begin_cycle.assert_called_once()
     assert engine.total_cycles == 2
 
 

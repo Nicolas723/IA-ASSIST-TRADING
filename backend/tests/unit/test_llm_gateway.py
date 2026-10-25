@@ -11,7 +11,7 @@ from src.infrastructure.llm.gateway import (
     LLMResponse,
 )
 from src.shared.config.settings import LLMProvider, Settings
-from src.shared.exceptions.domain import LLMError
+from src.shared.exceptions.domain import LLMError, LLMQuotaError, LLMRateLimitError
 
 
 class FakeAdapter(BaseLLMAdapter):
@@ -446,3 +446,108 @@ async def test_begin_cycle_resets_the_request_counter_only_for_the_cycle(
     with pytest.raises(LLMError, match="Daily LLM request budget exhausted"):
         await gateway.complete(LLMRequest(messages=[], model=""))
     assert len(adapter.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_quota_error_parks_the_provider_and_uses_the_fallback() -> None:
+    primary = FakeAdapter(
+        LLMProvider.OPENAI,
+        LLMQuotaError("insufficient balance", provider="openai", cooldown_seconds=1800),
+    )
+    fallback = FakeAdapter(LLMProvider.GOOGLE, _response(LLMProvider.GOOGLE, "ok"))
+    gateway = LLMGateway({LLMProvider.OPENAI: primary, LLMProvider.GOOGLE: fallback})
+
+    result = await gateway.complete(LLMRequest(messages=[], model=""))
+
+    assert result.provider == LLMProvider.GOOGLE
+    status = gateway.usage_status()
+    cooldowns = status["provider_cooldowns"]
+    assert len(cooldowns) == 1
+    cooldown = cooldowns[0]
+    assert cooldown["provider"] == "openai"
+    assert cooldown["reason"] == "quota"
+    assert 1790 <= cooldown["seconds_remaining"] <= 1801
+    assert status["by_provider"]["openai"]["failures"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cooling_provider_is_skipped_without_spending_an_attempt() -> None:
+    primary = FakeAdapter(
+        LLMProvider.OPENAI,
+        LLMQuotaError("insufficient balance", provider="openai", cooldown_seconds=1800),
+    )
+    fallback = FakeAdapter(LLMProvider.GOOGLE, _response(LLMProvider.GOOGLE, "ok"))
+    gateway = LLMGateway({LLMProvider.OPENAI: primary, LLMProvider.GOOGLE: fallback})
+
+    await gateway.complete(LLMRequest(messages=[], model=""))
+    await gateway.complete(LLMRequest(messages=[], model=""))
+
+    # The parked provider is not contacted again, so its quota failure does
+    # not consume a second request attempt (the first call spent two attempts:
+    # the failed primary and the fallback).
+    assert len(primary.requests) == 1
+    assert len(fallback.requests) == 2
+    assert gateway.usage_status()["request_attempts"] == 3
+
+
+@pytest.mark.asyncio
+async def test_all_providers_cooling_down_fails_fast_without_attempts() -> None:
+    primary = FakeAdapter(
+        LLMProvider.OPENAI,
+        LLMQuotaError("no balance", provider="openai", cooldown_seconds=1800),
+    )
+    fallback = FakeAdapter(
+        LLMProvider.GOOGLE,
+        LLMRateLimitError("quota", provider="google", retry_after_seconds=7200),
+    )
+    gateway = LLMGateway({LLMProvider.OPENAI: primary, LLMProvider.GOOGLE: fallback})
+
+    with pytest.raises(LLMError, match="All LLM providers failed"):
+        await gateway.complete(LLMRequest(messages=[], model=""))
+
+    with pytest.raises(LLMError, match="cooling down"):
+        await gateway.complete(LLMRequest(messages=[], model=""))
+
+    assert len(primary.requests) == 1
+    assert len(fallback.requests) == 1
+    status = gateway.usage_status()
+    assert {item["provider"] for item in status["provider_cooldowns"]} == {"openai", "google"}
+    assert status["request_attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_cooldown_honours_the_provider_retry_after() -> None:
+    adapter = FakeAdapter(
+        LLMProvider.GOOGLE,
+        LLMRateLimitError("daily quota", provider="google", retry_after_seconds=20282),
+    )
+    gateway = LLMGateway({LLMProvider.GOOGLE: adapter})
+
+    with pytest.raises(LLMError, match="All LLM providers failed"):
+        await gateway.complete(LLMRequest(messages=[], model=""))
+
+    cooldown = gateway.usage_status()["provider_cooldowns"][0]
+    assert cooldown["reason"] == "rate_limit"
+    assert 20270 <= cooldown["seconds_remaining"] <= 20283
+
+
+@pytest.mark.asyncio
+async def test_expired_cooldown_lets_the_provider_retry() -> None:
+    import time
+
+    adapter = FakeAdapter(
+        LLMProvider.OPENAI,
+        LLMQuotaError("no balance", provider="openai", cooldown_seconds=1800),
+    )
+    gateway = LLMGateway({LLMProvider.OPENAI: adapter})
+
+    with pytest.raises(LLMError, match="All LLM providers failed"):
+        await gateway.complete(LLMRequest(messages=[], model=""))
+
+    gateway._cooldowns["openai"].until = time.monotonic() - 1
+
+    adapter.response = _response(LLMProvider.OPENAI, "recovered")
+    result = await gateway.complete(LLMRequest(messages=[], model=""))
+
+    assert result.content == "recovered"
+    assert gateway.usage_status()["provider_cooldowns"] == []

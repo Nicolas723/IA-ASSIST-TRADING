@@ -19,12 +19,17 @@ import abc
 import json
 import time
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from src.shared.config.settings import LLMProvider, get_settings
-from src.shared.exceptions.domain import LLMError, LLMRateLimitError, LLMTimeoutError
+from src.shared.exceptions.domain import (
+    LLMError,
+    LLMQuotaError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+)
 from src.shared.logging.setup import get_logger
 from src.shared.observability.metrics import (
     llm_errors_total,
@@ -33,6 +38,12 @@ from src.shared.observability.metrics import (
 )
 
 logger = get_logger(__name__)
+
+# A rate limit may be per-minute or per-day: honour the provider's retry-after
+# when it sends one, otherwise park the provider for a short while so the next
+# analysis does not waste a request on the same failing endpoint.
+DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 300
+DEFAULT_QUOTA_COOLDOWN_SECONDS = 1800
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +137,15 @@ class _UsageBucket:
         }
 
 
+@dataclass
+class _ProviderCooldown:
+    """Temporary park for a provider that just failed in a non-transient way."""
+
+    until: float
+    reason: str
+    until_utc: datetime
+
+
 def _estimate_cost(
     prompt_tokens: int,
     completion_tokens: int,
@@ -208,16 +228,60 @@ class LLMGateway:
         self._cycle_requests_used = 0
         self._by_agent: dict[str, _UsageBucket] = {}
         self._by_provider: dict[str, _UsageBucket] = {}
+        # Providers parked after a quota/auth/rate-limit failure. Cooldowns are
+        # time-based and deliberately survive begin_cycle(): starting a new
+        # analysis does not fix an exhausted account.
+        self._cooldowns: dict[str, _ProviderCooldown] = {}
 
     def begin_cycle(self) -> None:
         """Reset the per-cycle counters before a new analysis cycle.
 
         The daily counters are never reset here: they only roll over at UTC
         midnight, so a caller cannot bypass the daily cap by starting cycles.
+        Provider cooldowns are also preserved for the same reason.
         """
         self._refresh_usage_day()
         self._cycle_tokens_used = 0
         self._cycle_requests_used = 0
+
+    def _active_cooldown(self, provider: LLMProvider) -> _ProviderCooldown | None:
+        """Return the cooldown for a provider, dropping it once it has expired."""
+        cooldown = self._cooldowns.get(provider.value)
+        if cooldown is None:
+            return None
+        if cooldown.until <= time.monotonic():
+            self._cooldowns.pop(provider.value, None)
+            return None
+        return cooldown
+
+    def _start_cooldown(self, provider: str, seconds: int, reason: str) -> None:
+        """Park a provider so later cycles skip it instead of burning attempts."""
+        if seconds <= 0:
+            return
+        self._cooldowns[provider] = _ProviderCooldown(
+            until=time.monotonic() + seconds,
+            reason=reason,
+            until_utc=datetime.now(tz=UTC) + timedelta(seconds=seconds),
+        )
+
+    def _cooldown_status(self) -> list[dict[str, object]]:
+        """Serialize active cooldowns for the status/UI endpoints."""
+        now = time.monotonic()
+        statuses: list[dict[str, object]] = []
+        for provider in sorted(self._cooldowns):
+            cooldown = self._cooldowns[provider]
+            remaining = cooldown.until - now
+            if remaining <= 0:
+                continue
+            statuses.append(
+                {
+                    "provider": provider,
+                    "reason": cooldown.reason,
+                    "seconds_remaining": int(remaining) + 1,
+                    "until_utc": cooldown.until_utc.isoformat(),
+                }
+            )
+        return statuses
 
     def _refresh_usage_day(self) -> None:
         today = datetime.now(tz=UTC).date()
@@ -289,6 +353,7 @@ class LLMGateway:
                 cycle_request_budget > 0 and self._cycle_requests_used >= cycle_request_budget
             ),
             "fallbacks": self._fallbacks_today,
+            "provider_cooldowns": self._cooldown_status(),
             "estimated_cost_usd": _estimate_cost(
                 self._prompt_tokens_today,
                 self._completion_tokens_today,
@@ -430,6 +495,24 @@ class LLMGateway:
         if fallbacks is None and self._settings.llm_fallback_enabled:
             fallbacks = self._settings.llm_fallback_providers
         providers_to_try = self._build_provider_list(primary, fallbacks)
+        if not providers_to_try:
+            if not self._adapters:
+                raise LLMError("No LLM providers are configured.", provider="none")
+            cooldowns = self._cooldown_status()
+            if cooldowns:
+                detail = ", ".join(
+                    f"{item['provider']} ({item['reason']}, {item['seconds_remaining']}s left)"
+                    for item in cooldowns
+                )
+                raise LLMError(
+                    "Every configured LLM provider is cooling down after a recent failure: "
+                    f"{detail}.",
+                    provider="cooldown",
+                )
+            raise LLMError(
+                "No configured LLM provider matches the requested routing.",
+                provider="none",
+            )
         self._enforce_budget()
 
         last_error: Exception | None = None
@@ -555,6 +638,11 @@ class LLMGateway:
                 logger.warning("llm_rate_limit", provider=p.value, error=str(exc))
                 self._record_failure(provider=p.value, agent_type=agent_type)
                 llm_errors_total.labels(provider=p.value, error_type="rate_limit").inc()
+                self._start_cooldown(
+                    p.value,
+                    exc.retry_after_seconds or DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS,
+                    "rate_limit",
+                )
                 last_error = exc
                 # Rate limits → try next provider immediately
                 continue
@@ -563,6 +651,20 @@ class LLMGateway:
                 logger.warning("llm_timeout", provider=p.value, error=str(exc))
                 self._record_failure(provider=p.value, agent_type=agent_type)
                 llm_errors_total.labels(provider=p.value, error_type="timeout").inc()
+                last_error = exc
+                continue
+
+            except LLMQuotaError as exc:
+                # No balance or rejected credentials: retrying every cycle only
+                # burns budget, so park the provider for a longer period.
+                logger.warning("llm_quota_error", provider=p.value, error=str(exc))
+                self._record_failure(provider=p.value, agent_type=agent_type)
+                llm_errors_total.labels(provider=p.value, error_type="quota").inc()
+                self._start_cooldown(
+                    p.value,
+                    exc.cooldown_seconds or DEFAULT_QUOTA_COOLDOWN_SECONDS,
+                    "quota",
+                )
                 last_error = exc
                 continue
 
@@ -608,7 +710,23 @@ class LLMGateway:
                 LLMProvider.OLLAMA,
             ]
             providers = [p for p in default_order if p in self._adapters]
-        return providers
+
+        available: list[LLMProvider] = []
+        for provider in providers:
+            if provider not in self._adapters:
+                logger.warning("llm_provider_not_configured", provider=provider.value)
+                continue
+            cooldown = self._active_cooldown(provider)
+            if cooldown is not None:
+                logger.info(
+                    "llm_provider_cooling_down",
+                    provider=provider.value,
+                    reason=cooldown.reason,
+                    seconds_remaining=int(cooldown.until - time.monotonic()) + 1,
+                )
+                continue
+            available.append(provider)
+        return available
 
     async def check_providers_health(self) -> dict[str, bool]:
         """Check health of all configured providers."""

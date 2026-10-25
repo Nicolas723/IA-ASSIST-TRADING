@@ -21,7 +21,12 @@ from tenacity import (
 
 from src.infrastructure.llm.gateway import BaseLLMAdapter, LLMRequest, LLMResponse
 from src.shared.config.settings import LLMProvider, get_settings
-from src.shared.exceptions.domain import LLMError, LLMRateLimitError, LLMTimeoutError
+from src.shared.exceptions.domain import (
+    LLMError,
+    LLMQuotaError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+)
 from src.shared.logging.setup import get_logger
 
 logger = get_logger(__name__)
@@ -108,9 +113,28 @@ class OpenAIAdapter(BaseLLMAdapter):
                 f"{self._provider_label} request timed out", provider=self._provider_label
             ) from exc
         except openai.AuthenticationError as exc:
-            raise LLMError(
-                f"{self._provider_label} authentication failed: {exc}",
+            raise LLMQuotaError(
+                f"{self._provider_label} rejected the API key: {exc}",
                 provider=self._provider_label,
+                cooldown_seconds=3600,
+            ) from exc
+        except openai.PermissionDeniedError as exc:
+            raise LLMQuotaError(
+                f"{self._provider_label} denied access to this model: {exc}",
+                provider=self._provider_label,
+                cooldown_seconds=3600,
+            ) from exc
+        except openai.APIStatusError as exc:
+            # 402 = the account is out of credit. It will not recover within a
+            # cycle, so park the provider instead of retrying every analysis.
+            if exc.status_code == 402:
+                raise LLMQuotaError(
+                    f"{self._provider_label} has insufficient balance: {exc}",
+                    provider=self._provider_label,
+                    cooldown_seconds=1800,
+                ) from exc
+            raise LLMError(
+                f"{self._provider_label} API error: {exc}", provider=self._provider_label
             ) from exc
         except openai.OpenAIError as exc:
             raise LLMError(

@@ -135,6 +135,10 @@ class AgentService:
         normalized_symbol = symbol.replace("-", "/").replace("_", "/").upper()
         tf = Timeframe(timeframe)
 
+        # Every analysis (scheduled cycle or manual /agents/analyze call) gets a
+        # fresh per-cycle LLM budget. The daily caps are untouched.
+        self.begin_cycle()
+
         if not self.market_service:
             raise ValueError("MarketDataService is required for AgentService")
 
