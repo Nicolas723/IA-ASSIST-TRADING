@@ -372,6 +372,7 @@ interface AutonomousBotStatus {
   started_at?: string | null;
   uptime_seconds: number;
   last_cycle_at?: string | null;
+  last_analysis_at?: string | null;
   last_price?: number | null;
   last_signal?: string | null;
   last_confidence?: number | null;
@@ -1461,6 +1462,18 @@ export default function App() {
                     </div>
                   </div>
                 </div>
+
+                {Boolean(autonomousStatus?.config.llm_analysis_interval_seconds) && (
+                  <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '8px' }}>
+                    Análisis del comité cada{' '}
+                    {Math.round((autonomousStatus?.config.llm_analysis_interval_seconds || 0) / 60)} min
+                    {' · '}
+                    {autonomousStatus?.last_analysis_at
+                      ? `último: ${new Date(autonomousStatus.last_analysis_at).toLocaleTimeString()}`
+                      : 'aún sin ejecutar en esta sesión'}
+                    {' · '}las salidas y el SL/TP se revisan cada {autonomousStatus?.config.interval_seconds}s
+                  </div>
+                )}
 
                 {/* Métricas clave en tarjetas pequeñas */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px', marginTop: '16px' }}>

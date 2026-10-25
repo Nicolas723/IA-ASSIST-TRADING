@@ -90,6 +90,7 @@ class AutonomousBotStatus(BaseModel):
     started_at: datetime | None = None
     uptime_seconds: float = 0.0
     last_cycle_at: datetime | None = None
+    last_analysis_at: datetime | None = None
     last_price: float | None = None
     last_signal: str | None = None
     last_confidence: float | None = None
@@ -211,6 +212,7 @@ class AutonomousEngine:
             started_at=self.started_at,
             uptime_seconds=round(uptime, 1),
             last_cycle_at=self.last_cycle_at,
+            last_analysis_at=self._last_analysis_at,
             last_price=self.last_price,
             last_signal=self.last_signal,
             last_confidence=self.last_confidence,
