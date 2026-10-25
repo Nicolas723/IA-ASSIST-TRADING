@@ -200,21 +200,24 @@ class LLMGateway:
         self._usage_date: date = datetime.now(tz=UTC).date()
         self._tokens_used_today = 0
         self._requests_today = 0
+        self._request_attempts_today = 0
         self._prompt_tokens_today = 0
         self._completion_tokens_today = 0
         self._fallbacks_today = 0
         self._cycle_tokens_used = 0
+        self._cycle_requests_used = 0
         self._by_agent: dict[str, _UsageBucket] = {}
         self._by_provider: dict[str, _UsageBucket] = {}
 
     def begin_cycle(self) -> None:
-        """Reset the per-cycle token counter before a new analysis cycle.
+        """Reset the per-cycle counters before a new analysis cycle.
 
-        The daily counter is never reset here: it only rolls over at UTC
+        The daily counters are never reset here: they only roll over at UTC
         midnight, so a caller cannot bypass the daily cap by starting cycles.
         """
         self._refresh_usage_day()
         self._cycle_tokens_used = 0
+        self._cycle_requests_used = 0
 
     def _refresh_usage_day(self) -> None:
         today = datetime.now(tz=UTC).date()
@@ -222,10 +225,12 @@ class LLMGateway:
             self._usage_date = today
             self._tokens_used_today = 0
             self._requests_today = 0
+            self._request_attempts_today = 0
             self._prompt_tokens_today = 0
             self._completion_tokens_today = 0
             self._fallbacks_today = 0
             self._cycle_tokens_used = 0
+            self._cycle_requests_used = 0
             self._by_agent.clear()
             self._by_provider.clear()
 
@@ -234,9 +239,19 @@ class LLMGateway:
         self._refresh_usage_day()
         budget = int(self._settings.llm_daily_token_budget)
         remaining = max(0, budget - self._tokens_used_today) if budget > 0 else None
+        request_budget = int(self._settings.llm_daily_request_budget)
+        requests_remaining = (
+            max(0, request_budget - self._request_attempts_today) if request_budget > 0 else None
+        )
         cycle_budget = int(self._settings.llm_cycle_token_budget)
         cycle_remaining = (
             max(0, cycle_budget - self._cycle_tokens_used) if cycle_budget > 0 else None
+        )
+        cycle_request_budget = int(self._settings.llm_cycle_request_budget)
+        cycle_requests_remaining = (
+            max(0, cycle_request_budget - self._cycle_requests_used)
+            if cycle_request_budget > 0
+            else None
         )
         input_rate = self._settings.llm_input_cost_per_million_usd
         output_rate = self._settings.llm_output_cost_per_million_usd
@@ -244,6 +259,7 @@ class LLMGateway:
         return {
             "date_utc": self._usage_date.isoformat(),
             "requests": self._requests_today,
+            "request_attempts": self._request_attempts_today,
             "tokens_used": self._tokens_used_today,
             "prompt_tokens": self._prompt_tokens_today,
             "completion_tokens": self._completion_tokens_today,
@@ -255,11 +271,22 @@ class LLMGateway:
             "daily_token_budget": budget,
             "tokens_remaining": remaining,
             "budget_exhausted": budget > 0 and self._tokens_used_today >= budget,
+            "daily_request_budget": request_budget,
+            "requests_remaining": requests_remaining,
+            "request_budget_exhausted": (
+                request_budget > 0 and self._request_attempts_today >= request_budget
+            ),
             "cycle_token_budget": cycle_budget,
             "cycle_tokens_used": self._cycle_tokens_used,
             "cycle_tokens_remaining": cycle_remaining,
             "cycle_budget_exhausted": (
                 cycle_budget > 0 and self._cycle_tokens_used >= cycle_budget
+            ),
+            "cycle_request_budget": cycle_request_budget,
+            "cycle_requests_used": self._cycle_requests_used,
+            "cycle_requests_remaining": cycle_requests_remaining,
+            "cycle_request_budget_exhausted": (
+                cycle_request_budget > 0 and self._cycle_requests_used >= cycle_request_budget
             ),
             "fallbacks": self._fallbacks_today,
             "estimated_cost_usd": _estimate_cost(
@@ -290,11 +317,25 @@ class LLMGateway:
 
     def _enforce_budget(self) -> None:
         self._refresh_usage_day()
+        cycle_request_budget = int(self._settings.llm_cycle_request_budget)
+        if cycle_request_budget > 0 and self._cycle_requests_used >= cycle_request_budget:
+            raise LLMError(
+                "Per-cycle LLM request budget exhausted "
+                f"({self._cycle_requests_used}/{cycle_request_budget} attempts).",
+                provider="budget",
+            )
         cycle_budget = int(self._settings.llm_cycle_token_budget)
         if cycle_budget > 0 and self._cycle_tokens_used >= cycle_budget:
             raise LLMError(
                 "Per-cycle LLM token budget exhausted "
                 f"({self._cycle_tokens_used}/{cycle_budget} tokens).",
+                provider="budget",
+            )
+        request_budget = int(self._settings.llm_daily_request_budget)
+        if request_budget > 0 and self._request_attempts_today >= request_budget:
+            raise LLMError(
+                "Daily LLM request budget exhausted "
+                f"({self._request_attempts_today}/{request_budget} attempts).",
                 provider="budget",
             )
         budget = int(self._settings.llm_daily_token_budget)
@@ -399,6 +440,18 @@ class LLMGateway:
             if adapter is None:
                 logger.warning("llm_provider_not_configured", provider=p.value)
                 continue
+
+            # Re-check the caps before every attempt: one call can fall back
+            # across several providers, and free tiers usually limit requests
+            # per day rather than tokens.
+            try:
+                self._enforce_budget()
+            except LLMError as exc:
+                logger.warning("llm_budget_exhausted", provider=p.value, error=str(exc))
+                last_error = exc
+                break
+            self._request_attempts_today += 1
+            self._cycle_requests_used += 1
 
             try:
                 if index > 0:

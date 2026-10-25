@@ -82,7 +82,9 @@ class GeminiAdapter(BaseLLMAdapter):
         return LLMProvider.GOOGLE
 
     @retry(
-        retry=retry_if_exception_type(Exception),
+        # Retry only timeouts: a 429 from a free-tier daily quota is not
+        # transient, and retrying it burns the remaining request budget.
+        retry=retry_if_exception_type(LLMTimeoutError),
         wait=wait_exponential(multiplier=1, min=2, max=30),
         stop=stop_after_attempt(3),
         reraise=True,

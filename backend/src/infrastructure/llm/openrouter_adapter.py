@@ -38,7 +38,9 @@ class OpenRouterAdapter(BaseLLMAdapter):
         return LLMProvider.OPENROUTER
 
     @retry(
-        retry=retry_if_exception_type((openai.RateLimitError, openai.APIConnectionError)),
+        # Retrying a 429 can exhaust the whole daily allowance; only retry
+        # connection failures and timeouts.
+        retry=retry_if_exception_type(openai.APIConnectionError),
         wait=wait_exponential(multiplier=1, min=2, max=30),
         stop=stop_after_attempt(3),
         reraise=True,

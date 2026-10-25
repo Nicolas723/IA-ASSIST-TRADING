@@ -341,10 +341,16 @@ class Settings(BaseSettings):
     # Optional per-process daily token cap. 0 disables the cap. The counter is
     # in-memory and resets at UTC midnight or on restart.
     llm_daily_token_budget: int = Field(default=0, ge=0)
+    # Optional per-process daily request cap. 0 disables the cap. Counts every
+    # provider attempt (including failures), because free tiers usually limit
+    # requests per day rather than tokens.
+    llm_daily_request_budget: int = Field(default=0, ge=0)
     # Optional per-cycle token cap. 0 disables the cap. The counter resets when
     # the autonomous engine starts a new analysis cycle, which bounds the cost
     # of a single committee run even when the daily budget is generous.
     llm_cycle_token_budget: int = Field(default=0, ge=0)
+    # Optional per-cycle request cap. 0 disables the cap.
+    llm_cycle_request_budget: int = Field(default=0, ge=0)
     # Optional cost estimate. Rates are USD per one million tokens and default
     # to 0 ("unknown") because provider pricing changes and is model-specific.
     # The gateway only reports an estimate when at least one rate is set.

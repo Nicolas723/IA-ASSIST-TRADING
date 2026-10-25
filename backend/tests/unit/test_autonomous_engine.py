@@ -517,3 +517,57 @@ async def test_real_exit_is_not_blocked_by_reconciliation_failure() -> None:
     live.close_position.assert_awaited_once()
     live.preflight_reconciliation.assert_not_awaited()
     live.place_order.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_committee_analysis_is_throttled_between_fast_cycles() -> None:
+    market = MagicMock()
+    market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
+    agent = MagicMock()
+    agent.run_analysis = AsyncMock(
+        return_value=CoordinatorDecision(
+            symbol="BTC/USDT",
+            final_signal=SignalDirection.NEUTRAL,
+            aggregate_confidence=0.4,
+            consensus_level=0.5,
+            reasoning_summary="Mixed signals across agents; no clear directional edge detected right now.",
+        )
+    )
+
+    engine = AutonomousEngine(agent_service=agent, market_service=market)
+    engine.config = AutonomousBotConfig(llm_analysis_interval_seconds=1800)
+
+    await engine._execute_cycle()
+    await engine._execute_cycle()
+
+    # The first cycle analyzes; the second one still tracks positions but
+    # defers the expensive committee run.
+    agent.run_analysis.assert_awaited_once()
+    agent.begin_cycle.assert_called_once()
+    assert engine.total_cycles == 2
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_zero_analysis_interval_runs_the_committee_every_cycle() -> None:
+    market = MagicMock()
+    market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
+    agent = MagicMock()
+    agent.run_analysis = AsyncMock(
+        return_value=CoordinatorDecision(
+            symbol="BTC/USDT",
+            final_signal=SignalDirection.NEUTRAL,
+            aggregate_confidence=0.4,
+            consensus_level=0.5,
+            reasoning_summary="Mixed signals across agents; no clear directional edge detected right now.",
+        )
+    )
+
+    engine = AutonomousEngine(agent_service=agent, market_service=market)
+    engine.config = AutonomousBotConfig(llm_analysis_interval_seconds=0)
+
+    await engine._execute_cycle()
+    await engine._execute_cycle()
+
+    assert agent.run_analysis.await_count == 2

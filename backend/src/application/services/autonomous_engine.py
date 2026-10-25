@@ -49,6 +49,10 @@ class AutonomousBotConfig(BaseModel):
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
     interval_seconds: int = Field(default=60, ge=2, le=3600)
+    # Minimum seconds between full LLM committee runs. Position tracking and
+    # SL/TP exits still run every `interval_seconds`; only the expensive entry
+    # analysis is throttled so a free-tier request quota lasts longer.
+    llm_analysis_interval_seconds: int = Field(default=1800, ge=0, le=86400)
     execution_mode: str = "paper"  # "paper" or "real"
     confirm_real_trading: bool = False
     min_confidence_pct: float = Field(default=60.0, ge=10.0, le=99.0)
@@ -129,6 +133,7 @@ class AutonomousEngine:
         self.last_signal: str | None = None
         self.last_confidence: float | None = None
         self.last_error: str | None = None
+        self._last_analysis_at: datetime | None = None
         self._logs: list[AutonomousLogEntry] = []
         self._task: asyncio.Task[None] | None = None
 
@@ -239,10 +244,20 @@ class AutonomousEngine:
         self.is_running = True
         self.started_at = datetime.now(tz=UTC)
         self.last_error = None
+        self._last_analysis_at = None
         self.add_log(
             level="INFO",
             message=f"🚀 Autonomous Trading Daemon started for {self.config.symbol} ({self.config.timeframe}) every {self.config.interval_seconds}s.",
         )
+        if self.config.llm_analysis_interval_seconds > 0:
+            self.add_log(
+                level="INFO",
+                message=(
+                    "LLM committee analysis throttled to every "
+                    f"{self.config.llm_analysis_interval_seconds}s; "
+                    "position tracking still runs every cycle."
+                ),
+            )
 
         self.add_log(
             level="INFO",
@@ -490,9 +505,24 @@ class AutonomousEngine:
             self.add_log(level="WARNING", message="AgentService not bound to AutonomousEngine")
             return
 
+        # Throttle the expensive LLM committee. Exits and SL/TP tracking already
+        # ran above, so skipping only delays new entry analysis. This stretches a
+        # free-tier request quota across the day instead of burning it in an hour.
+        throttle = self.config.llm_analysis_interval_seconds
+        if throttle > 0 and self._last_analysis_at is not None:
+            elapsed = (datetime.now(tz=UTC) - self._last_analysis_at).total_seconds()
+            if elapsed < throttle:
+                logger.debug(
+                    "committee_analysis_deferred",
+                    elapsed_seconds=int(elapsed),
+                    next_in_seconds=int(throttle - elapsed),
+                )
+                return
+
+        self._last_analysis_at = datetime.now(tz=UTC)
+
         # Start a fresh LLM cycle budget before the committee spends tokens.
         self.agent_service.begin_cycle()
-
         decision: CoordinatorDecision = await self.agent_service.run_analysis(
             symbol=symbol,
             timeframe=self.config.timeframe,

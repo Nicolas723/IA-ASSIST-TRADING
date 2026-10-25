@@ -111,6 +111,18 @@ async def test_complete_maps_rate_limit_errors(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
+async def test_daily_quota_errors_are_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter, models = make_adapter(monkeypatch, error=RuntimeError("429 RESOURCE_EXHAUSTED quota"))
+
+    with pytest.raises(LLMRateLimitError):
+        await adapter.complete(make_request())
+
+    # A 429 is not transient for a daily free-tier quota: retrying it would
+    # consume the remaining request budget without any chance of success.
+    assert len(models.generate_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_complete_maps_timeout_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter, _ = make_adapter(monkeypatch, error=TimeoutError("deadline"))
 

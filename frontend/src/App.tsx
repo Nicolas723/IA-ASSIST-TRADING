@@ -114,6 +114,7 @@ interface LLMStatusData {  mode: string;
   fallback_providers?: string[];
   usage?: {
     requests: number;
+    request_attempts?: number;
     tokens_used: number;
     prompt_tokens: number;
     completion_tokens: number;
@@ -121,10 +122,17 @@ interface LLMStatusData {  mode: string;
     daily_token_budget: number;
     tokens_remaining: number | null;
     budget_exhausted: boolean;
+    daily_request_budget?: number;
+    requests_remaining?: number | null;
+    request_budget_exhausted?: boolean;
     cycle_token_budget?: number;
     cycle_tokens_used?: number;
     cycle_tokens_remaining?: number | null;
     cycle_budget_exhausted?: boolean;
+    cycle_request_budget?: number;
+    cycle_requests_used?: number;
+    cycle_requests_remaining?: number | null;
+    cycle_request_budget_exhausted?: boolean;
     fallbacks: number;
     estimated_cost_usd: number | null;
     pricing: {
@@ -345,6 +353,7 @@ interface AutonomousBotConfig {
   symbol: string;
   timeframe: string;
   interval_seconds: number;
+  llm_analysis_interval_seconds?: number;
   execution_mode: string;
   confirm_real_trading: boolean;
   min_confidence_pct: number;
@@ -2862,7 +2871,21 @@ export default function App() {
                   : ' (sin tope)'}
               </span>
               <span>
-                <strong>Llamadas:</strong> {safeNum(llmStatus?.usage?.requests)}
+                <strong>Llamadas OK:</strong> {safeNum(llmStatus?.usage?.requests)}
+              </span>
+              <span>
+                <strong>Peticiones hoy:</strong>{' '}
+                {safeNum(llmStatus?.usage?.request_attempts)}
+                {safeNum(llmStatus?.usage?.daily_request_budget) > 0
+                  ? ` / ${safeNum(llmStatus?.usage?.daily_request_budget)}`
+                  : ' (sin tope)'}
+              </span>
+              <span>
+                <strong>Peticiones ciclo:</strong>{' '}
+                {safeNum(llmStatus?.usage?.cycle_requests_used)}
+                {safeNum(llmStatus?.usage?.cycle_request_budget) > 0
+                  ? ` / ${safeNum(llmStatus?.usage?.cycle_request_budget)}`
+                  : ' (sin tope)'}
               </span>
               <span>
                 <strong>Fallbacks:</strong> {safeNum(llmStatus?.usage?.fallbacks)}
@@ -2873,8 +2896,8 @@ export default function App() {
                   ? safeUsd(llmStatus?.usage?.estimated_cost_usd)
                   : 'tarifas sin configurar'}
               </span>
-              <span style={{ color: (llmStatus?.usage?.budget_exhausted || llmStatus?.usage?.cycle_budget_exhausted) ? '#ef4444' : '#10b981' }}>
-                {(llmStatus?.usage?.budget_exhausted || llmStatus?.usage?.cycle_budget_exhausted)
+              <span style={{ color: (llmStatus?.usage?.budget_exhausted || llmStatus?.usage?.cycle_budget_exhausted || llmStatus?.usage?.request_budget_exhausted || llmStatus?.usage?.cycle_request_budget_exhausted) ? '#ef4444' : '#10b981' }}>
+                {(llmStatus?.usage?.budget_exhausted || llmStatus?.usage?.cycle_budget_exhausted || llmStatus?.usage?.request_budget_exhausted || llmStatus?.usage?.cycle_request_budget_exhausted)
                   ? 'Presupuesto agotado'
                   : 'Presupuesto disponible'}
               </span>

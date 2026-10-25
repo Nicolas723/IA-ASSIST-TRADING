@@ -352,3 +352,97 @@ async def test_begin_cycle_resets_only_the_cycle_counter(
     with pytest.raises(LLMError, match="Daily LLM token budget exhausted"):
         await gateway.complete(LLMRequest(messages=[], model=""))
     assert len(adapter.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_blocks_calls_once_daily_request_budget_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infrastructure.llm import gateway as gateway_module
+
+    config = Settings(
+        _env_file=None,
+        llm_primary_provider=LLMProvider.OPENAI,
+        llm_fallback_providers=[],
+        llm_daily_request_budget=2,
+    )
+    monkeypatch.setattr(gateway_module, "get_settings", lambda: config)
+    adapter = FakeAdapter(LLMProvider.OPENAI, _response(LLMProvider.OPENAI, "ok"))
+    gateway = LLMGateway({LLMProvider.OPENAI: adapter})
+
+    await gateway.complete(LLMRequest(messages=[], model=""))
+    await gateway.complete(LLMRequest(messages=[], model=""))
+
+    status = gateway.usage_status()
+    assert status["request_attempts"] == 2
+    assert status["requests"] == 2
+    assert status["daily_request_budget"] == 2
+    assert status["requests_remaining"] == 0
+    assert status["request_budget_exhausted"] is True
+
+    with pytest.raises(LLMError, match="Daily LLM request budget exhausted"):
+        await gateway.complete(LLMRequest(messages=[], model=""))
+    assert len(adapter.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_cycle_request_budget_counts_failed_attempts_and_blocks_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infrastructure.llm import gateway as gateway_module
+
+    config = Settings(
+        _env_file=None,
+        llm_primary_provider=LLMProvider.OPENAI,
+        llm_fallback_providers=[LLMProvider.GOOGLE],
+        llm_cycle_request_budget=1,
+    )
+    monkeypatch.setattr(gateway_module, "get_settings", lambda: config)
+    primary = FakeAdapter(LLMProvider.OPENAI, LLMError("primary failed"))
+    fallback = FakeAdapter(LLMProvider.GOOGLE, _response(LLMProvider.GOOGLE, "ok"))
+    gateway = LLMGateway({LLMProvider.OPENAI: primary, LLMProvider.GOOGLE: fallback})
+    gateway.begin_cycle()
+
+    with pytest.raises(LLMError, match="Per-cycle LLM request budget exhausted"):
+        await gateway.complete(LLMRequest(messages=[], model=""))
+
+    # The failed primary attempt already spent the only request of the cycle,
+    # so the fallback must not reach the network.
+    assert len(primary.requests) == 1
+    assert len(fallback.requests) == 0
+    status = gateway.usage_status()
+    assert status["cycle_requests_used"] == 1
+    assert status["cycle_request_budget_exhausted"] is True
+    assert status["request_attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_begin_cycle_resets_the_request_counter_only_for_the_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infrastructure.llm import gateway as gateway_module
+
+    config = Settings(
+        _env_file=None,
+        llm_primary_provider=LLMProvider.OPENAI,
+        llm_fallback_providers=[],
+        llm_daily_request_budget=1,
+        llm_cycle_request_budget=1,
+    )
+    monkeypatch.setattr(gateway_module, "get_settings", lambda: config)
+    adapter = FakeAdapter(LLMProvider.OPENAI, _response(LLMProvider.OPENAI, "ok"))
+    gateway = LLMGateway({LLMProvider.OPENAI: adapter})
+    gateway.begin_cycle()
+
+    await gateway.complete(LLMRequest(messages=[], model=""))
+    gateway.begin_cycle()
+
+    status = gateway.usage_status()
+    assert status["cycle_requests_used"] == 0
+    assert status["request_attempts"] == 1
+
+    # Starting a new cycle resets the cycle counter but must not bypass the
+    # daily cap.
+    with pytest.raises(LLMError, match="Daily LLM request budget exhausted"):
+        await gateway.complete(LLMRequest(messages=[], model=""))
+    assert len(adapter.requests) == 1

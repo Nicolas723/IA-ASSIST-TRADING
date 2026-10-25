@@ -59,7 +59,9 @@ class OpenAIAdapter(BaseLLMAdapter):
         return self._provider
 
     @retry(
-        retry=retry_if_exception_type((openai.RateLimitError, openai.APIConnectionError)),
+        # A 429 may be a per-minute limit or a daily quota. Retrying it can
+        # consume the whole daily allowance, so only connection/timeouts retry.
+        retry=retry_if_exception_type(openai.APIConnectionError),
         wait=wait_exponential(multiplier=1, min=2, max=30),
         stop=stop_after_attempt(3),
         reraise=True,
