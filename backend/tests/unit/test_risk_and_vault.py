@@ -109,6 +109,64 @@ def test_position_sizer_fixed_fractional():
 
 
 @pytest.mark.unit
+def test_position_sizer_respects_remaining_asset_exposure():
+    req = PositionSizeRequest(
+        symbol="BTC/USDT",
+        account_balance=10000.0,
+        entry_price=60000.0,
+        stop_loss_price=58000.0,
+        risk_percentage=1.5,
+        current_symbol_exposure_usd=1500.0,
+    )
+
+    res = PositionSizer.calculate(req)
+
+    # Per-asset cap is 20% ($2000); $1500 is already used, so only $500 remain.
+    assert res.is_valid_setup is True
+    assert res.recommended_notional_usd == 500.0
+    assert round(res.recommended_units, 6) == 0.008333
+    assert "remaining exposure capacity" in res.notes
+
+
+@pytest.mark.unit
+def test_position_sizer_respects_remaining_portfolio_exposure():
+    req = PositionSizeRequest(
+        symbol="BTC/USDT",
+        account_balance=10000.0,
+        entry_price=60000.0,
+        stop_loss_price=58000.0,
+        risk_percentage=1.5,
+        current_total_exposure_usd=9700.0,
+    )
+
+    res = PositionSizer.calculate(req)
+
+    # Portfolio cap is 100% ($10000); only $300 remain even though the
+    # per-asset cap would allow $2000.
+    assert res.recommended_notional_usd == 300.0
+    assert round(res.recommended_units, 6) == 0.005
+    assert "remaining exposure capacity" in res.notes
+
+
+@pytest.mark.unit
+def test_position_sizer_invalidates_when_no_exposure_capacity_remains():
+    req = PositionSizeRequest(
+        symbol="BTC/USDT",
+        account_balance=10000.0,
+        entry_price=60000.0,
+        stop_loss_price=58000.0,
+        risk_percentage=1.5,
+        current_total_exposure_usd=10000.0,
+    )
+
+    res = PositionSizer.calculate(req)
+
+    assert res.is_valid_setup is False
+    assert res.recommended_units == 0.0
+    assert "No remaining exposure capacity" in res.notes
+
+
+@pytest.mark.unit
 def test_risk_service_order_validation():
     risk_service = RiskService()
 

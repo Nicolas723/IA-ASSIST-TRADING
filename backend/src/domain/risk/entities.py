@@ -84,6 +84,10 @@ class PositionSizeRequest(BaseModel):
     entry_price: float = 65000.0
     stop_loss_price: float = 63500.0
     take_profit_price: float | None = 68000.0
+    # Existing exposure, so the recommendation fits the remaining capacity
+    # instead of producing an order the risk guard will later reject.
+    current_symbol_exposure_usd: float = 0.0
+    current_total_exposure_usd: float = 0.0
 
 
 class PositionSizeResult(BaseModel):

@@ -71,6 +71,21 @@ class PositionSizer:
             notional_usd = max_notional_allowed
             raw_units = notional_usd / entry
 
+        # Respect the remaining per-asset and aggregate exposure capacity. The
+        # risk guard enforces the same limits at order time; sizing within them
+        # avoids generating an order that would be rejected outright.
+        asset_capacity = max(0.0, max_notional_allowed - request.current_symbol_exposure_usd)
+        portfolio_capacity = max(
+            0.0,
+            balance * (prof.max_portfolio_exposure_pct / 100.0)
+            - request.current_total_exposure_usd,
+        )
+        capacity = min(asset_capacity, portfolio_capacity)
+        capacity_limited = capacity < notional_usd
+        if capacity_limited:
+            notional_usd = capacity
+            raw_units = notional_usd / entry
+
         # Calculate Risk/Reward ratio if Take Profit is specified
         rr_ratio: float | None = None
         potential_profit_usd: float | None = None
@@ -82,12 +97,21 @@ class PositionSizer:
         is_valid = True
         notes_list = []
 
+        if capacity_limited:
+            if capacity <= 0:
+                is_valid = False
+                notes_list.append("No remaining exposure capacity for this symbol or portfolio.")
+            else:
+                notes_list.append(
+                    f"Size capped to remaining exposure capacity (${round(capacity, 2)})."
+                )
+
         if rr_ratio is not None and rr_ratio < prof.min_risk_reward_ratio:
             is_valid = False
             notes_list.append(
                 f"Risk/Reward ({rr_ratio}:1) is below required minimum ({prof.min_risk_reward_ratio}:1)."
             )
-        else:
+        elif is_valid:
             notes_list.append(
                 f"Valid setup. Max loss capped at ${risk_amount_usd} ({risk_pct}% of balance)."
             )

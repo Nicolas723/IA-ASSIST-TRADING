@@ -690,6 +690,8 @@ class AutonomousEngine:
                 entry_price=current_price,
                 stop_loss_price=stop_loss,
                 take_profit_price=take_profit,
+                current_symbol_exposure_usd=float(portfolio.exposure_usd(symbol)),
+                current_total_exposure_usd=float(portfolio.gross_exposure_usd),
             )
             if self.risk_service is not None:
                 sizing = self.risk_service.calculate_position_size(sizing_request)

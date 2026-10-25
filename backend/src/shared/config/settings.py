@@ -248,7 +248,13 @@ class RiskSettings(BaseSettings):
 
 
 class AgentLLMConfig(BaseSettings):
-    """Per-agent LLM provider configuration."""
+    """Deprecated per-agent routing placeholders (unused by the runtime).
+
+    The committee routes every agent through the global primary/fallback chain
+    in ``LLMGateway``. These fields are kept only so old deployments that still
+    define ``AGENT_*_PROVIDER`` variables do not fail validation; they have no
+    effect on routing.
+    """
 
     model_config = SettingsConfigDict(
         env_file=str(_ENV_FILE_PATH),
