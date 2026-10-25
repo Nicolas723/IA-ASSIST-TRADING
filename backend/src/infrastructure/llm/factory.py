@@ -47,6 +47,14 @@ def create_llm_gateway(settings: Settings | None = None) -> LLMGateway | None:
         logger.warning("llm_provider_sdk_missing", provider="openrouter", error=str(exc))
 
     try:
+        if config.deepseek.api_key.strip():
+            from src.infrastructure.llm.deepseek_adapter import DeepSeekAdapter
+
+            adapters[LLMProvider.DEEPSEEK] = DeepSeekAdapter()
+    except ImportError as exc:
+        logger.warning("llm_provider_sdk_missing", provider="deepseek", error=str(exc))
+
+    try:
         if config.ollama.enabled:
             from src.infrastructure.llm.ollama_adapter import OllamaAdapter
 

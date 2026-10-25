@@ -5,6 +5,8 @@ Acts as a gateway to multiple models via openrouter.ai
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import openai
 from openai import AsyncOpenAI
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -51,7 +53,7 @@ class OpenRouterAdapter(BaseLLMAdapter):
 
             response = await self._client.chat.completions.create(
                 model=request.model or self._default_model,
-                messages=messages,
+                messages=cast("Any", messages),
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
                 # Extra headers for OpenRouter

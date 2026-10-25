@@ -26,7 +26,7 @@
   - `PriceActionAnalyst`: Soporte/Resistencia, patrones de velas (Pin bar, envolvente) y conceptos SMC (Smart Money Concepts).
   - `RiskManager`: Volatilidad ATR, sizing de posición dinámico y colocación de Stop-Loss / Take-Profit (mínimo ratio 2.0:1).
   - `AgentCoordinator`: Pondera los votos de los especialistas y genera veredicto de consenso con nivel de convicción.
-  - *Nota*: El comité conecta OpenAI como proveedor principal y admite fallback configurable a Gemini, Anthropic, OpenRouter y Ollama. Sin proveedores configurados conserva análisis determinista; sus resultados aún no entrenan automáticamente los modelos.
+  - *Nota*: El comité usa el proveedor principal configurado y admite fallback a Gemini, Anthropic, OpenRouter, DeepSeek y Ollama. Sin proveedores configurados conserva análisis determinista; sus resultados aún no entrenan automáticamente los modelos.
 
 ### **Frontend (TypeScript / React 19 / Vite)**
 - **UI & Diseño**: Vanilla CSS moderno con glassmorphism, modo oscuro con gradientes cuidados, micro-animaciones y diseño adaptable (desktop y móvil).
@@ -233,7 +233,7 @@ ai-trading-assistant/
 │   │   │   ├── persistence/                    # database.py + models/ (market, trading, audit)
 │   │   │   │                                   #   + repositories/ (candle, trading, decision)
 │   │   │   │                                   #   + migrations/ (Alembic; c4f1a2b3d5e6 = journal + auditoría)
-│   │   │   ├── llm/                            # gateway + adapters (openai, anthropic, gemini, ollama, openrouter)
+│   │   │   ├── llm/                            # gateway + adapters (openai, anthropic, gemini, ollama, openrouter, deepseek)
 │   │   │   ├── security/                       # credential_vault, key_manager
 │   │   │   └── cache/redis_client.py
 │   │   ├── interfaces/
@@ -340,10 +340,11 @@ ai-trading-assistant/
 - **Recorte al notional máximo**: el motor autónomo ajusta la cantidad de una orden real a `REAL_TRADING_MAX_NOTIONAL` antes de enviarla y registra un aviso; el servicio live mantiene el límite como última barrera. Esto evita que el sizing por riesgo (~5.000 USDT) bloqueara todas las órdenes con el límite de 50 USDT.
 - **Claves LLM desde `.env`**: los `BaseSettings` anidados (`OpenAISettings`, `GeminiSettings`, `RiskSettings`, etc.) ahora cargan `_ENV_FILE_PATH`. Antes solo leían variables de proceso, así que el contenedor veía `OPENAI_API_KEY=EMPTY` aunque `/app/.env` tuviera las claves, y el comité caía siempre al análisis determinista.
 - **Proveedor y modelo validados**: `LLM_PRIMARY_PROVIDER=google` con `GOOGLE_DEFAULT_MODEL=gemini-3.8-flash` (el nombre antiguo `GEMINI_DEFAULT_MODEL` no coincidía con el prefijo `GOOGLE_` y `gemini-2.5-flash` ya no está disponible para cuentas nuevas). Una llamada real al comité devolvió `llm_provider=google` en técnico y acción del precio, sin fallback, con ~3,5k tokens. OpenAI responde `insufficient_quota` (sin créditos) y queda como fallback cuando se recargue.
+- **SDK de Gemini y DeepSeek**: el adaptador de Google migró a `google-genai` (el paquete `google-generativeai` está descontinuado) y usa el cliente asíncrono. Se añadió `deepseek` como proveedor compatible con OpenAI (`DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_DEFAULT_MODEL=deepseek-chat`), reutilizando el transporte de OpenAI con etiquetas de proveedor propias. La cuota gratuita de `gemini-3.8-flash` es de 20 peticiones/día; al agotarse, el gateway cae al análisis determinista hasta que se configure otra clave/proveedor o se amplíe el plan.
 - **Presupuestos LLM**: `LLM_DAILY_TOKEN_BUDGET=200000` y `LLM_CYCLE_TOKEN_BUDGET=12000`. El gateway expone `cycle_tokens_used`, `cycle_tokens_remaining` y `cycle_budget_exhausted` en `/api/v1/agents/llm/status`; el contador de ciclo se reinicia al comenzar cada análisis autónomo y no permite eludir el tope diario.
 - **Vault**: el contenedor usa `VAULT_STORAGE_PATH=/app/vault/.vault_store.json`; en el host se copió el mismo vault a `backend/.vault_store.json` para que los scripts locales usen el path por defecto. Ambos archivos siguen ignorados por Git.
 - **CI**: el workflow ahora también se ejecuta en la rama `master` (antes solo `main`/`develop`, por lo que el push a `master` no disparaba comprobaciones).
-- **Verificación local**: **289 tests aprobados**, cobertura 78.18 %, Ruff y MyPy sin errores, `npm run build` correcto. Oxlint mantiene avisos de hooks preexistentes.
+- **Verificación local**: **305 tests aprobados**, cobertura 79.03 %, Ruff y MyPy sin errores, `npm run build` correcto. Oxlint mantiene avisos de hooks preexistentes.
 
 ---
 

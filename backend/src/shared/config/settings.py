@@ -94,6 +94,7 @@ class LLMProvider(StrEnum):
     GOOGLE = "google"
     OLLAMA = "ollama"
     OPENROUTER = "openrouter"
+    DEEPSEEK = "deepseek"
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +208,24 @@ class OpenRouterSettings(BaseSettings):
     default_model: str = Field(default="openai/gpt-4o-mini")
 
 
+class DeepSeekSettings(BaseSettings):
+    """DeepSeek exposes an OpenAI-compatible chat completions API."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="DEEPSEEK_",
+        env_file=str(_ENV_FILE_PATH),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    api_key: str = Field(default="")
+    base_url: str = Field(default="https://api.deepseek.com")
+    default_model: str = Field(default="deepseek-chat")
+    max_tokens: int = Field(default=4096)
+    temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+
+
 class RiskSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="MAX_",
@@ -306,6 +325,7 @@ class Settings(BaseSettings):
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
     openrouter: OpenRouterSettings = Field(default_factory=OpenRouterSettings)
+    deepseek: DeepSeekSettings = Field(default_factory=DeepSeekSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     agent_llm: AgentLLMConfig = Field(default_factory=AgentLLMConfig)
     llm_primary_provider: LLMProvider = Field(default=LLMProvider.OPENAI)
@@ -314,6 +334,7 @@ class Settings(BaseSettings):
             LLMProvider.GOOGLE,
             LLMProvider.ANTHROPIC,
             LLMProvider.OPENROUTER,
+            LLMProvider.DEEPSEEK,
         ]
     )
     llm_fallback_enabled: bool = Field(default=True)

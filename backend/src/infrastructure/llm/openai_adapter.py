@@ -1,8 +1,9 @@
 """
-OpenAI LLM Adapter.
+OpenAI-compatible LLM Adapter.
 
-Implements BaseLLMAdapter for OpenAI's API (GPT-4o, GPT-5.5, o3, etc.)
-Handles retries, rate limiting, and token tracking.
+Implements BaseLLMAdapter for OpenAI's API (GPT-4o, GPT-5.5, o3, etc.) and for
+any provider that exposes the same chat-completions contract (for example
+DeepSeek). Handles retries, rate limiting, and token tracking.
 """
 
 from __future__ import annotations
@@ -28,23 +29,34 @@ logger = get_logger(__name__)
 
 class OpenAIAdapter(BaseLLMAdapter):
     """
-    Adapter for OpenAI API.
+    Adapter for OpenAI and OpenAI-compatible APIs.
 
-    Supports: GPT-4o, GPT-4o-mini, GPT-5.5, o1, o3, o3-mini
+    Supports: GPT-4o, GPT-4o-mini, GPT-5.5, o1, o3, o3-mini, DeepSeek chat.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        default_model: str | None = None,
+        provider: LLMProvider = LLMProvider.OPENAI,
+        provider_label: str = "openai",
+    ) -> None:
         settings = get_settings()
         self._client = AsyncOpenAI(
-            api_key=settings.openai.api_key,
+            api_key=api_key if api_key is not None else settings.openai.api_key,
+            base_url=base_url,
             timeout=60.0,
             max_retries=0,  # We handle retries with tenacity
         )
-        self._default_model = settings.openai.default_model
+        self._default_model = default_model or settings.openai.default_model
+        self._provider = provider
+        self._provider_label = provider_label
 
     @property
     def provider(self) -> LLMProvider:
-        return LLMProvider.OPENAI
+        return self._provider
 
     @retry(
         retry=retry_if_exception_type((openai.RateLimitError, openai.APIConnectionError)),
@@ -79,7 +91,7 @@ class OpenAIAdapter(BaseLLMAdapter):
             return LLMResponse(
                 content=choice.message.content or "",
                 model=response.model,
-                provider=LLMProvider.OPENAI,
+                provider=self._provider,
                 prompt_tokens=usage.prompt_tokens if usage else 0,
                 completion_tokens=usage.completion_tokens if usage else 0,
                 total_tokens=usage.total_tokens if usage else 0,
@@ -88,13 +100,20 @@ class OpenAIAdapter(BaseLLMAdapter):
             )
 
         except openai.RateLimitError as exc:
-            raise LLMRateLimitError(str(exc), provider="openai") from exc
+            raise LLMRateLimitError(str(exc), provider=self._provider_label) from exc
         except TimeoutError as exc:
-            raise LLMTimeoutError("OpenAI request timed out", provider="openai") from exc
+            raise LLMTimeoutError(
+                f"{self._provider_label} request timed out", provider=self._provider_label
+            ) from exc
         except openai.AuthenticationError as exc:
-            raise LLMError(f"OpenAI authentication failed: {exc}", provider="openai") from exc
+            raise LLMError(
+                f"{self._provider_label} authentication failed: {exc}",
+                provider=self._provider_label,
+            ) from exc
         except openai.OpenAIError as exc:
-            raise LLMError(f"OpenAI API error: {exc}", provider="openai") from exc
+            raise LLMError(
+                f"{self._provider_label} API error: {exc}", provider=self._provider_label
+            ) from exc
 
     async def health_check(self) -> bool:
         try:

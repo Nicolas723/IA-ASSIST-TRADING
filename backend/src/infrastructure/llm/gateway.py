@@ -551,6 +551,7 @@ class LLMGateway:
                 LLMProvider.ANTHROPIC,
                 LLMProvider.GOOGLE,
                 LLMProvider.OPENROUTER,
+                LLMProvider.DEEPSEEK,
                 LLMProvider.OLLAMA,
             ]
             providers = [p for p in default_order if p in self._adapters]

@@ -6,8 +6,8 @@ Esta guía explica cómo usar el asistente desde el dashboard. La IA analiza el 
 
 El comité usa el proveedor principal configurado y prueba los fallbacks en orden si el anterior no responde o devuelve una respuesta inválida. Solo se intentan los proveedores que tengan una clave configurada. Ollama puede añadirse como proveedor local activando `OLLAMA_ENABLED=true` y añadiendo `ollama` a `LLM_FALLBACK_PROVIDERS`.
 
-1. Añade en `backend/.env` las claves de los proveedores que quieras usar (`OPENAI_API_KEY`, `GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`). No compartas esas claves en el chat ni en capturas.
-2. Configura `LLM_PRIMARY_PROVIDER` y la cadena `LLM_FALLBACK_PROVIDERS` según tus cuentas y preferencias. Para Google, el modelo se elige con `GOOGLE_DEFAULT_MODEL` (el prefijo es `GOOGLE_`, no `GEMINI_`).
+1. Añade en `backend/.env` las claves de los proveedores que quieras usar (`OPENAI_API_KEY`, `GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`). No compartas esas claves en el chat ni en capturas.
+2. Configura `LLM_PRIMARY_PROVIDER` y la cadena `LLM_FALLBACK_PROVIDERS` según tus cuentas y preferencias. Para Google, el modelo se elige con `GOOGLE_DEFAULT_MODEL` (el prefijo es `GOOGLE_`, no `GEMINI_`). Para DeepSeek usa `DEEPSEEK_DEFAULT_MODEL` (`deepseek-chat` o `deepseek-reasoner`).
 3. Reinicia el backend para que cargue las claves y el modelo.
 4. Consulta `GET /api/v1/agents/llm/status` para ver qué proveedores están configurados y `POST /api/v1/agents/llm/health` para comprobar conectividad. Esas respuestas nunca muestran claves.
 
@@ -17,7 +17,7 @@ Por ciclo, los agentes técnico y de acción del precio generan una solicitud ca
 
 Puedes acotar el gasto con `LLM_DAILY_TOKEN_BUDGET` y `LLM_CYCLE_TOKEN_BUDGET` (0 = sin límite). El tope de ciclo se reinicia al empezar cada análisis autónomo y el diario solo reinicia a medianoche UTC o al reiniciar el backend; empezar un ciclo nuevo nunca permite saltarse el tope diario. Cuando se agota, el comité cae a su análisis determinista y lo registra como fallback.
 
-Validación operativa del 2026-10-24: Google Gemini (`gemini-3.8-flash`) respondió con llamadas reales en técnico y acción del precio; OpenAI estaba configurado pero su cuenta devolvía `insufficient_quota`, así que la ruta primaria quedó en Google. Un proveedor configurado sin créditos no es un proveedor operativo.
+Validación operativa del 2026-10-24: Google Gemini (`gemini-3.8-flash`, SDK `google-genai`) respondió con llamadas reales en técnico y acción del precio; OpenAI estaba configurado pero su cuenta devolvía `insufficient_quota`. La cuota gratuita de Gemini es de 20 peticiones al día por modelo: si se agota, el comité usa el análisis determinista hasta el reinicio de la cuota o hasta configurar otro proveedor. DeepSeek está integrado como proveedor compatible con OpenAI y se activa al definir `DEEPSEEK_API_KEY` y poner `LLM_PRIMARY_PROVIDER=deepseek` (o añadirlo a `LLM_FALLBACK_PROVIDERS`). Un proveedor configurado sin créditos no es un proveedor operativo.
 
 ## Escaneo de mercado en sombra
 
