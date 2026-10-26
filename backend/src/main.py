@@ -13,6 +13,7 @@ Architecture:
 
 from __future__ import annotations
 
+import hmac
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -77,6 +78,7 @@ if TYPE_CHECKING:
 
 settings = get_settings()
 _shadow_scan_collector = None
+_heartbeat_service = None
 
 # ---------------------------------------------------------------------------
 # Initialize logging (must happen before any logger is used)
@@ -127,7 +129,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     - Dispose DB engine
     - Flush pending metrics
     """
-    global _redis_client, _shadow_scan_collector
+    global _heartbeat_service, _redis_client, _shadow_scan_collector
 
     logger.info(
         "application_starting",
@@ -194,6 +196,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
             try:
                 discovered = await live_trading_service.discover_oco_protections()
                 logger.info("live_oco_discovered", count=discovered)
+                # Positions restored from the journal (or opened while OCO was
+                # disabled) need an exchange-side stop too, not only the local
+                # guard. Discovery runs first so an existing OCO is never
+                # duplicated.
+                ensured = await live_trading_service.ensure_oco_protections()
+                logger.info("live_oco_ensured_at_startup", count=ensured)
             except Exception as e:
                 logger.warning("live_oco_discovery_failed", error=str(e))
 
@@ -293,12 +301,33 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         except Exception as e:
             logger.exception("shadow_scan_collector_start_failed", error=str(e))
 
+    # Outbound heartbeat: a dead process cannot send its own alert, so an
+    # external monitor watches these pings instead.
+    if settings.heartbeat_ping_url.strip():
+        try:
+            from src.application.services.heartbeat_service import HeartbeatService
+
+            _heartbeat_service = HeartbeatService(
+                url=settings.heartbeat_ping_url,
+                interval_seconds=settings.heartbeat_interval_seconds,
+            )
+            await _heartbeat_service.start()
+        except Exception as e:
+            logger.warning("heartbeat_start_failed", error=str(e))
+            _heartbeat_service = None
+    else:
+        logger.info("heartbeat_disabled")
+
     logger.info("application_ready", host=settings.server_host, port=settings.server_port)
 
     yield  # Application runs here
 
     # --------------- Shutdown ---------------
     logger.info("application_shutting_down")
+
+    if _heartbeat_service is not None:
+        await _heartbeat_service.stop()
+        _heartbeat_service = None
 
     if _shadow_scan_collector is not None:
         await _shadow_scan_collector.stop()
@@ -360,6 +389,35 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Optional API key. Disabled by default; enable it when the API is reachable
+    # beyond localhost (LAN, VPS or reverse proxy). The frontend sends it as
+    # X-API-Key when VITE_API_KEY is set. WebSocket market data stays open
+    # because browsers cannot attach custom headers to a WebSocket handshake.
+    api_token = settings.api_auth_token.strip()
+    if api_token:
+        public_paths = {"/api/docs", "/api/redoc", "/api/openapi.json"}
+
+        @app.middleware("http")
+        async def api_key_guard(
+            request: Request,
+            call_next: Callable[[Request], Awaitable[Response]],
+        ) -> Response:
+            path = request.url.path
+            if (
+                request.method == "OPTIONS"
+                or not path.startswith("/api")
+                or path in public_paths
+                or path.startswith("/api/v1/ws/")
+            ):
+                return await call_next(request)
+            provided = request.headers.get("x-api-key", "")
+            if not hmac.compare_digest(provided, api_token):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Invalid or missing API key"},
+                )
+            return await call_next(request)
 
     # -------------------------------------------------------------------------
     # Request ID + Logging + Metrics middleware

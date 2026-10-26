@@ -436,6 +436,15 @@ class Settings(BaseSettings):
     server_port: int = Field(default=8000, ge=1024, le=65535)
     server_workers: int = Field(default=1, ge=1)
 
+    # Optional outbound heartbeat (dead-man's switch). When set, the backend
+    # pings this URL every HEARTBEAT_INTERVAL_SECONDS so an external monitor can
+    # alert when the process is down. Empty disables it.
+    heartbeat_ping_url: str = Field(default="")
+    heartbeat_interval_seconds: int = Field(default=60, ge=15, le=3600)
+    # Optional API key enforced on /api/* when set. Empty keeps the local-only
+    # default (bind to 127.0.0.1 and use a reverse proxy for remote access).
+    api_auth_token: str = Field(default="")
+
     # -------------------------------------------------------------------------
     # Nested configuration groups
     # -------------------------------------------------------------------------

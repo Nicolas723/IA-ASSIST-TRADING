@@ -250,6 +250,35 @@ async def get_real_trading_status(
     return service.status()
 
 
+@router.post(
+    "/real/oco/ensure",
+    summary="Attach exchange-side OCO protection to open real positions",
+)
+async def ensure_real_oco(
+    service: LiveTradingService = Depends(get_live_trading_service),
+) -> dict[str, object]:
+    """Discover existing OCOs and create one for every unprotected position.
+
+    This is the manual counterpart of the startup safety net: use it after
+    enabling OCO protection with positions already open.
+    """
+    if not service.settings.real_trading_enabled or not service.settings.real_trading_oco_enabled:
+        raise HTTPException(
+            status_code=409,
+            detail=("La protección OCO requiere modo real y REAL_TRADING_OCO_ENABLED=true."),
+        )
+    discovered = await service.discover_oco_protections()
+    created = await service.ensure_oco_protections()
+    status = service.status()
+    return {
+        "discovered": discovered,
+        "created": created,
+        "oco_protected_positions": status.oco_protected_positions,
+        "oco_unprotected_positions": status.oco_unprotected_positions,
+        "protection_mode": status.protection_mode,
+    }
+
+
 @router.get(
     "/runtime-config",
     response_model=RuntimeTradingConfigResponse,

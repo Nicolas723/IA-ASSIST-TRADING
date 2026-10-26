@@ -86,3 +86,7 @@ infra/postgres_data/
 infra/redis_data/
 infra/prometheus_data/
 infra/grafana_data/
+
+# Runtime backups (database dumps + encrypted vault; never commit)
+backups/
+backend/backups/

@@ -1028,6 +1028,92 @@ async def test_oco_creation_failure_falls_back_to_local_guard() -> None:
     assert adapter.place_calls == 1
 
 
+async def test_oco_without_order_list_id_blocks_further_sells() -> None:
+    alerts = FakeAlert()
+    service, adapter = make_service(
+        settings=real_settings(real_trading_oco_enabled=True), alerts=alerts
+    )
+    adapter.oco_create_response = {"listOrderStatus": "EXECUTING", "orders": []}
+
+    await service.place_order(buy_request(), current_market_price=50_000, confirm=True)
+
+    assert "BTC/USDT" not in service._oco_protections
+    assert Exchange.BINANCE in service._oco_discovery_failed
+    assert any("OCO sin identificador" in alert[0] for alert in alerts.calls)
+    adapter.place_calls = 0
+
+    exits = await service.check_protective_exits({"BTC/USDT": 48_000})
+
+    assert exits == []
+    assert adapter.place_calls == 0
+
+
+async def test_ensure_oco_protects_a_restored_position() -> None:
+    service, adapter = make_service(settings=real_settings(real_trading_oco_enabled=True))
+    service.restore(positions=[make_position()], orders=[], trades=[])
+
+    created = await service.ensure_oco_protections()
+
+    assert created == 1
+    assert len(adapter.oco_create_calls) == 1
+    call = adapter.oco_create_calls[0]
+    assert call["symbol"] == "BTC/USDT"
+    assert call["quantity"] == Decimal("0.1")
+    assert call["take_profit"] == Decimal("55000")
+    assert call["stop_loss"] == Decimal("49000")
+    assert "BTC/USDT" in service._oco_protections
+    status = service.status()
+    assert status.oco_protected_positions == 1
+    assert status.oco_unprotected_positions == 0
+
+
+async def test_ensure_oco_is_idempotent() -> None:
+    service, adapter = make_service(settings=real_settings(real_trading_oco_enabled=True))
+    service.restore(positions=[make_position()], orders=[], trades=[])
+
+    first = await service.ensure_oco_protections()
+    second = await service.ensure_oco_protections()
+
+    assert first == 1
+    assert second == 0
+    assert len(adapter.oco_create_calls) == 1
+
+
+async def test_ensure_oco_skips_when_oco_is_disabled() -> None:
+    service, adapter = make_service(settings=real_settings(real_trading_oco_enabled=False))
+    service.restore(positions=[make_position()], orders=[], trades=[])
+
+    created = await service.ensure_oco_protections()
+
+    assert created == 0
+    assert adapter.oco_create_calls == []
+
+
+async def test_ensure_oco_skips_while_discovery_is_unknown() -> None:
+    service, adapter = make_service(settings=real_settings(real_trading_oco_enabled=True))
+    service.restore(positions=[make_position()], orders=[], trades=[])
+    adapter.fail_open_oco = True
+    await service.discover_oco_protections()
+
+    created = await service.ensure_oco_protections()
+
+    assert created == 0
+    assert adapter.oco_create_calls == []
+
+
+async def test_ensure_oco_skips_targets_on_the_wrong_side_of_price() -> None:
+    service, adapter = make_service(settings=real_settings(real_trading_oco_enabled=True))
+    position = make_position()
+    position.current_price = Decimal("56000")
+    service.restore(positions=[position], orders=[], trades=[])
+
+    created = await service.ensure_oco_protections()
+
+    assert created == 0
+    assert adapter.oco_create_calls == []
+    assert service.status().oco_unprotected_positions == 1
+
+
 async def test_direct_sell_cancels_oco_before_submitting() -> None:
     service, adapter = make_service(settings=real_settings(real_trading_oco_enabled=True))
     await service.place_order(buy_request(), current_market_price=50_000, confirm=True)

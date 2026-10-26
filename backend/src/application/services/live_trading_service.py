@@ -82,6 +82,7 @@ class LiveTradingStatus(BaseModel):
     reconciliation_interval_seconds: int = 300
     oco_enabled: bool = False
     oco_protected_positions: int = 0
+    oco_unprotected_positions: int = 0
     oco_discovery_failed_exchanges: list[str] = Field(default_factory=list)
 
 
@@ -142,6 +143,7 @@ class LiveTradingService:
         self._last_reconcile_at: datetime | None = None
         self._oco_protections: dict[str, OcoProtection] = {}
         self._oco_discovery_failed: set[Exchange] = set()
+        self._last_oco_ensure = 0.0
 
         self._guard_task: asyncio.Task[None] | None = None
         self._price_fetcher: PriceFetcher | None = None
@@ -182,6 +184,17 @@ class LiveTradingService:
             protection_mode = "exchange_oco"
         else:
             protection_mode = "oco_with_local_fallback"
+        oco_unprotected = (
+            sum(
+                1
+                for position in self._positions.values()
+                if position.exchange == Exchange.BINANCE
+                and position.quantity > 0
+                and position.symbol not in self._oco_protections
+            )
+            if oco_enabled
+            else 0
+        )
         return LiveTradingStatus(
             enabled=self.settings.real_trading_enabled,
             execution_mode=self.settings.execution_mode.value,
@@ -201,6 +214,7 @@ class LiveTradingService:
             reconciliation_interval_seconds=(self.settings.real_trading_reconcile_interval_seconds),
             oco_enabled=oco_enabled,
             oco_protected_positions=len(self._oco_protections),
+            oco_unprotected_positions=oco_unprotected,
             oco_discovery_failed_exchanges=sorted(
                 item.value for item in self._oco_discovery_failed
             ),
@@ -465,50 +479,82 @@ class LiveTradingService:
 
     async def _protect_position_with_oco(self, order: Order) -> None:
         """Create a Binance OCO for a filled long entry. Best-effort by design."""
-        if order.average_fill_price is None or order.stop_loss is None or order.take_profit is None:
-            return
-        if (
-            order.take_profit <= order.average_fill_price
-            or order.stop_loss >= order.average_fill_price
-        ):
-            await self._alert(
-                "OCO no colocada",
-                f"{order.symbol}: SL/TP inválidos respecto al precio de entrada. "
-                "Se mantiene el guardián local como protección.",
-                AlertSeverity.WARNING,
-                {"symbol": order.symbol},
-            )
+        if order.average_fill_price is None:
             return
         position = self._positions.get(order.symbol)
         if position is None:
             return
+        await self._create_oco_for_position(
+            position=position,
+            take_profit=order.take_profit,
+            stop_loss=order.stop_loss,
+            coordinator_decision_id=order.coordinator_decision_id,
+            reference_price=order.average_fill_price,
+            source="entry",
+        )
+
+    async def _create_oco_for_position(
+        self,
+        *,
+        position: Position,
+        take_profit: Decimal | None,
+        stop_loss: Decimal | None,
+        coordinator_decision_id: UUID | None = None,
+        reference_price: Decimal | None = None,
+        source: str = "entry",
+    ) -> bool:
+        """Create (or replace) an exchange-side OCO for one long spot position.
+
+        ``reference_price`` is the price the TP/SL must straddle: the fill price
+        for a new entry or the current mark when protecting an existing
+        position. Returning ``False`` means the local guard remains in charge.
+        """
+        if take_profit is None or stop_loss is None:
+            return False
+        reference = reference_price or position.current_price or position.entry_price
+        if reference <= 0 or take_profit <= reference or stop_loss >= reference:
+            await self._alert(
+                "OCO no colocada",
+                f"{position.symbol}: SL/TP no válidos respecto al precio de "
+                f"referencia (${reference:,.2f}). Se mantiene el guardián local "
+                "como protección.",
+                AlertSeverity.WARNING,
+                {"symbol": position.symbol, "source": source},
+            )
+            return False
 
         buffer_pct = self.settings.real_trading_oco_stop_limit_buffer_pct / Decimal("100")
-        stop_limit = order.stop_loss * (Decimal("1") - buffer_pct)
+        stop_limit = stop_loss * (Decimal("1") - buffer_pct)
         if stop_limit <= 0:
-            stop_limit = order.stop_loss
+            stop_limit = stop_loss
         list_client_order_id = f"oco-{uuid4().hex[:24]}"
-        had_existing = order.symbol in self._oco_protections
+        had_existing = position.symbol in self._oco_protections
         existing_cancelled = False
         adapter = self._adapter(Exchange.BINANCE)
         try:
             if had_existing:
-                exit_order = await self._cancel_oco_for_symbol(order.symbol, adapter)
+                exit_order = await self._cancel_oco_for_symbol(position.symbol, adapter)
                 existing_cancelled = True
                 if exit_order is not None:
-                    position = self._positions.get(order.symbol)
-                    if position is None:
-                        return
+                    refreshed = self._positions.get(position.symbol)
+                    if refreshed is None:
+                        return False
+                    position = refreshed
             response = await adapter.create_oco_sell(
-                symbol=order.symbol,
+                symbol=position.symbol,
                 quantity=position.quantity,
-                take_profit=order.take_profit,
-                stop_loss=order.stop_loss,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
                 stop_limit_price=stop_limit,
                 list_client_order_id=list_client_order_id,
             )
         except Exception as exc:
-            logger.warning("live_oco_creation_failed", symbol=order.symbol, error=str(exc))
+            logger.warning(
+                "live_oco_creation_failed",
+                symbol=position.symbol,
+                source=source,
+                error=str(exc),
+            )
             fallback = (
                 "La OCO anterior puede seguir activa; revisa el exchange antes de operar."
                 if had_existing and not existing_cancelled
@@ -516,49 +562,91 @@ class LiveTradingService:
             )
             await self._alert(
                 "OCO no colocada",
-                f"{order.symbol}: no se pudo crear la OCO ({exc}). {fallback}",
+                f"{position.symbol}: no se pudo crear la OCO ({exc}). {fallback}",
                 AlertSeverity.WARNING,
-                {"symbol": order.symbol, "exchange": order.exchange.value},
+                {"symbol": position.symbol, "exchange": position.exchange.value},
             )
-            return
+            return False
         finally:
             await adapter.close()
 
         order_list_id = str(response.get("orderListId") or response.get("orderListID") or "")
         if not order_list_id:
+            # The exchange accepted the request but did not return an id. Treat
+            # discovery as unknown so neither the local guard nor a later
+            # ensure pass can create a duplicate sell before it is resolved.
+            self._oco_discovery_failed.add(Exchange.BINANCE)
             await self._alert(
                 "OCO sin identificador",
-                f"{order.symbol}: Binance aceptó la OCO pero no devolvió orderListId. "
+                f"{position.symbol}: Binance aceptó la OCO pero no devolvió orderListId. "
                 "Revisa las órdenes abiertas del exchange antes de operar.",
                 AlertSeverity.CRITICAL,
-                {"symbol": order.symbol},
+                {"symbol": position.symbol},
             )
-            return
+            return False
 
         protection = OcoProtection(
-            symbol=order.symbol,
+            symbol=position.symbol,
             exchange=Exchange.BINANCE,
             order_list_id=order_list_id,
             list_client_order_id=list_client_order_id,
             quantity=position.quantity,
-            take_profit=order.take_profit,
-            stop_loss=order.stop_loss,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
             stop_limit_price=stop_limit,
-            coordinator_decision_id=order.coordinator_decision_id,
+            coordinator_decision_id=coordinator_decision_id,
             status=self._oco_status(response) or "EXECUTING",
         )
-        self._oco_protections[order.symbol] = protection
+        self._oco_protections[position.symbol] = protection
         await self._alert(
             "OCO real colocada",
-            f"{order.symbol}: OCO {order_list_id} activa. TP ${order.take_profit:,.2f} / "
-            f"SL ${order.stop_loss:,.2f} (stop-limit ${stop_limit:,.2f}).",
+            f"{position.symbol}: OCO {order_list_id} activa. TP ${take_profit:,.2f} / "
+            f"SL ${stop_loss:,.2f} (stop-limit ${stop_limit:,.2f}).",
             AlertSeverity.SUCCESS,
             {
-                "symbol": order.symbol,
+                "symbol": position.symbol,
                 "order_list_id": order_list_id,
                 "quantity": str(position.quantity),
+                "source": source,
             },
         )
+        return True
+
+    async def ensure_oco_protections(self) -> int:
+        """Attach exchange-side OCOs to open Binance positions that lack one.
+
+        This covers positions restored after a restart or opened while OCO was
+        disabled. It is safe to call repeatedly: positions already protected are
+        skipped, and no attempt is made while the exchange-side OCO discovery is
+        in an unknown state (a duplicate sell would be worse than no OCO).
+        """
+        if not (self.settings.real_trading_enabled and self.settings.real_trading_oco_enabled):
+            return 0
+        if Exchange.BINANCE in self._oco_discovery_failed:
+            return 0
+
+        created = 0
+        for position in list(self._positions.values()):
+            if position.exchange != Exchange.BINANCE or position.quantity <= 0:
+                continue
+            if position.symbol in self._oco_protections:
+                continue
+            reference = (
+                position.current_price if position.current_price > 0 else position.entry_price
+            )
+            protected = await self._create_oco_for_position(
+                position=position,
+                take_profit=position.take_profit,
+                stop_loss=position.stop_loss,
+                coordinator_decision_id=position.coordinator_decision_id,
+                reference_price=reference,
+                source="ensure",
+            )
+            if protected:
+                created += 1
+        if created:
+            logger.info("live_oco_ensured", created=created)
+        return created
 
     async def _cancel_oco_for_symbol(
         self, symbol: str, adapter: LiveExchangeAdapter
@@ -1575,9 +1663,14 @@ class LiveTradingService:
                     self._positions
                     and self.settings.real_trading_enabled
                     and self.settings.real_trading_oco_enabled
-                    and self._oco_discovery_failed
                 ):
-                    await self.discover_oco_protections()
+                    now_oco = time.monotonic()
+                    if self._oco_discovery_failed or now_oco - self._last_oco_ensure >= max(
+                        60, self.settings.real_trading_reconcile_interval_seconds
+                    ):
+                        self._last_oco_ensure = now_oco
+                        await self.discover_oco_protections()
+                        await self.ensure_oco_protections()
 
                 if self.settings.real_trading_enabled:
                     now = time.monotonic()

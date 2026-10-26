@@ -1,6 +1,7 @@
 import { StrictMode, Component, type ErrorInfo, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
+import './apiKey'
 import App from './App.tsx'
 
 interface ErrorBoundaryState {
