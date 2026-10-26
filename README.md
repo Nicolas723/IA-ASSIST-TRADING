@@ -312,14 +312,16 @@ El cierre cancela primero la OCO del símbolo y después envía una venta a merc
 
 ### 6.4 Mainnet (solo después de Testnet)
 
-Mainnet está bloqueado por defecto. Para usarlo necesitas:
+Mainnet está bloqueado por defecto y **todo el cambio se hace desde la interfaz**; no hace falta editar `.env` ni modificar código. El orden es:
 
-1. Claves Mainnet guardadas y probadas, sin permisos de retirada.
-2. Activar el **segundo opt-in** en Configuración.
-3. Seleccionar **Mainnet** y confirmar.
-4. Iniciar una sesión Real·Mainnet y aceptar la confirmación final.
+1. **Guardar claves Mainnet**: en Configuración → Conexión con Binance, desmarca «Usar Binance Testnet», pega las claves y guarda. Guardar claves no cambia el entorno activo.
+2. **Probar la conexión** con el checkbox de Testnet desmarcado. Es una prueba de lectura; no envía órdenes.
+3. **Activar el segundo opt-in** en Configuración → Entorno, límites y protecciones.
+4. **Seleccionar Mainnet** en «Red del exchange» y confirmar. Si hay posiciones abiertas, el cambio se bloquea.
+5. **Revisar límites, allowlist y OCO** para capital real.
+6. **Iniciar la sesión** en el Asistente con «Real · usar el entorno configurado» y aceptar la confirmación final, que debe mostrar `BINANCE MAINNET (dinero real)`.
 
-No actives Mainnet para “probar”. Usa Testnet hasta que el comportamiento y las protecciones estén validados. Consulta el [runbook de producción](docs/RUNBOOK_PRODUCCION.md).
+Para volver a Testnet: pausa el bot, cierra o deja constancia de las posiciones, selecciona Testnet y desmarca el segundo opt-in. No actives Mainnet para “probar”. Usa Testnet hasta que el comportamiento y las protecciones estén validados. Consulta el [runbook de producción](docs/RUNBOOK_PRODUCCION.md#11-checklist-para-mainnet-no-ejecutada).
 
 ---
 

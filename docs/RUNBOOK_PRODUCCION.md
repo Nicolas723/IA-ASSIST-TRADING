@@ -458,22 +458,52 @@ restaura el backup del vault y la clave correspondiente.
 
 ## 11. Checklist para Mainnet (no ejecutada)
 
-Mainnet sigue prohibido. Para autorizarlo se deben cumplir **todas** estas
-condiciones y dejar constancia escrita de la decisión:
+Mainnet sigue **desactivado**. Esta checklist prepara la decisión, pero no la
+toma. El cambio de Testnet a Mainnet se hace **solo desde la interfaz**; no
+requiere editar `.env`, reiniciar por un flag nuevo ni modificar código.
+
+### 11.1 Procedimiento solo-frontend
+
+El orden importa:
+
+1. **Guardar claves Mainnet** en Configuración → Conexión con Binance:
+   desmarca «Usar Binance Testnet», pega las claves Mainnet y pulsa
+   «Guardar Claves Seguras». Guardar claves no cambia el entorno activo.
+2. **Probar la conexión** con el mismo checkbox desmarcado. Es una prueba de
+   lectura (ping + saldo); no envía órdenes ni activa Mainnet.
+3. **Activar el segundo opt-in** en Configuración → Entorno, límites y
+   protecciones: «Segundo opt-in: permitir Mainnet». Acepta la confirmación.
+4. **Seleccionar Mainnet** en «Red del exchange». La interfaz pide confirmación
+   y cambia el entorno activo del vault. Si hay posiciones reales abiertas, el
+   cambio se bloquea.
+5. **Revisar límites y protecciones** para capital real: máximo por orden,
+   allowlist, OCO y ejecución autónoma. Pulsa «Guardar límites y protecciones».
+6. **Iniciar la sesión** en el Asistente con «Real · usar el entorno
+   configurado». La confirmación final debe mostrar
+   `BINANCE MAINNET (dinero real)`.
+
+Para volver a Testnet: pausa el bot, cierra o deja constancia de las posiciones,
+selecciona Testnet en «Red del exchange» y desmarca el segundo opt-in. No cambies
+de entorno con posiciones abiertas.
+
+### 11.2 Condiciones previas
 
 - [ ] Testnet ha operado sin incidentes críticos durante un periodo acordado.
 - [ ] OCO validada en Testnet con apertura, reinicio, ejecución de TP/SL y
       cierre manual.
 - [ ] Backup + restauración ensayados y verificados al menos una vez.
 - [ ] `API_KEY_ENCRYPTION_KEY` fijada y respaldada fuera del servidor.
-- [ ] `API_AUTH_TOKEN` activo y backend detrás de TLS/reverse proxy.
+- [ ] Si la API se queda en loopback, `API_AUTH_TOKEN` puede estar vacío; si se
+      expone fuera de la máquina, activarlo con TLS/reverse proxy.
 - [ ] Heartbeat externo probado (incluida una parada controlada).
-- [ ] Alertas Telegram/webhook probadas de extremo a extremo.
+- [ ] Alertas Telegram probadas de extremo a extremo.
 - [ ] Claves Mainnet nuevas, **sin permiso de retirada**, con IP allowlist.
+- [ ] Conexión Mainnet verificada en modo lectura (ping + saldo).
+- [ ] Cuenta Mainnet con saldo y permiso de trading; sin permisos de retirada.
 - [ ] `REAL_TRADING_MAX_NOTIONAL` y allowlist revisados para capital real.
 - [ ] Kill-switch probado y procedimiento de cierre manual documentado.
-- [ ] `ALLOW_MAINNET_TRADING=true` y `trading_environment=mainnet` aplicados de
-      forma explícita con `confirm=true`, sin posiciones abiertas.
+- [ ] Cambio a Mainnet hecho desde la interfaz, con confirmación y sin
+      posiciones abiertas. No editar `.env` ni código para este paso.
 - [ ] Revisión fiscal/legal y tolerancia a pérdida definidas por el operador.
 
 El bot nunca cambia a Mainnet por sí solo y no se debe asumir rentabilidad.
