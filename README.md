@@ -382,6 +382,20 @@ python scripts/backup_runtime_data.py --output-dir D:\ata-backups --keep 14 --ve
 
 Los backups quedan en `backups/` por defecto y están ignorados por Git. **Copia también `API_KEY_ENCRYPTION_KEY` por separado**: sin ella, el vault del backup no se puede descifrar.
 
+Para programarlo en Windows, el repositorio incluye `scripts/backup-daily.ps1`, que ejecuta el backup con verificación, retiene 14 copias y escribe el resultado en `backups/backup-task.log`. Registra una tarea diaria (por ejemplo, `ATA Backup diario` a las 03:00) que ejecute ese script con el usuario actual, para que Docker Desktop sea accesible. El comando completo está en [el runbook](docs/RUNBOOK_PRODUCCION.md#53-programar-backups).
+
+```powershell
+# Comprobar la tarea (si ya la has creado)
+Get-ScheduledTask -TaskName "ATA Backup diario" | Select-Object TaskName, State
+Get-ScheduledTaskInfo -TaskName "ATA Backup diario" |
+    Select-Object LastRunTime, LastTaskResult, NextRunTime
+
+# Revisar el último resultado
+Get-Content backups\backup-task.log -Tail 20
+```
+
+`LastTaskResult = 0` significa que el último backup terminó bien. Si el equipo está apagado a las 03:00, la tarea se ejecuta al volver a estar disponible. Mantén además una copia **off-site** en otro disco o almacenamiento cifrado.
+
 Restaurar (con el backend detenido):
 
 ```powershell
@@ -400,7 +414,7 @@ Programa el backup a diario con el Programador de tareas de Windows o `cron`. Re
 - **Nunca** subas `backend/.env`, `backend/.vault_store.json` ni `backups/` al repositorio.
 - Usa claves de exchange **sin permiso de retirada** y, si es posible, restringidas por IP.
 - El stack escucha en `127.0.0.1` por defecto. No lo expongas a Internet sin HTTPS, firewall y autenticación.
-- Si necesitas acceder desde otra máquina, configura `API_AUTH_TOKEN` en `backend/.env` y `VITE_API_KEY` en `frontend/.env` con el mismo valor. Todas las peticiones a `/api/*` deberán enviar `X-API-Key`.
+- Si el proyecto se queda en tu equipo y la API sigue publicada en `127.0.0.1`, puedes dejar `API_AUTH_TOKEN` vacío. Si necesitas acceder desde otra máquina, configúralo en `backend/.env` y pon el mismo valor en `VITE_API_KEY` dentro de `frontend/.env`; todas las peticiones a `/api/*` deberán enviar `X-API-Key`.
 - Rota `APP_SECRET_KEY` solo si entiendes el impacto en el vault. Para producción, fija `API_KEY_ENCRYPTION_KEY` explícitamente.
 - Configura alertas (`ALERTS_ENABLED`, Telegram, email o webhook) y un heartbeat externo (`HEARTBEAT_PING_URL`) para detectar caídas.
 - Revisa los logs y las órdenes del exchange periódicamente. Un proceso caído no puede avisar por sí mismo.

@@ -156,11 +156,37 @@ Opciones útiles:
 
 ### 5.3 Programar backups
 
-Windows (Programador de tareas), diario a las 03:00:
+Windows: el wrapper `scripts/backup-daily.ps1` ejecuta el backup con
+verificación, retiene 14 copias y registra todo en `backups/backup-task.log`.
+Crea la tarea diaria a las 03:00 (ejecutar como el usuario actual, que es quien
+tiene acceso a Docker Desktop):
 
 ```powershell
-schtasks /Create /SC DAILY /ST 03:00 /TN "ATA Backup" /TR "C:\ruta\ai-trading-assistant\backend\.venv\Scripts\python.exe C:\ruta\ai-trading-assistant\backend\scripts\backup_runtime_data.py --verify --keep 14"
+$root = "C:\ruta\ai-trading-assistant"
+$action = New-ScheduledTaskAction -Execute "powershell.exe" `
+  -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$root\scripts\backup-daily.ps1`""
+$trigger = New-ScheduledTaskTrigger -Daily -At 03:00
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
+  -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
+  -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName "ATA Backup diario" -Action $action `
+  -Trigger $trigger -Settings $settings -Principal $principal -Force
 ```
+
+Verificación:
+
+```powershell
+Get-ScheduledTask -TaskName "ATA Backup diario" | Select-Object TaskName, State
+Get-ScheduledTaskInfo -TaskName "ATA Backup diario" |
+  Select-Object LastRunTime, LastTaskResult, NextRunTime
+Get-Content backups\backup-task.log -Tail 20
+```
+
+`LastTaskResult = 0` indica éxito. La tarea se ejecuta al volver a estar
+disponible si el equipo estaba apagado a las 03:00. Como corre en modo
+interactivo, requiere que el usuario haya iniciado sesión para que Docker
+Desktop esté accesible.
 
 Linux (cron), diario a las 03:00:
 
