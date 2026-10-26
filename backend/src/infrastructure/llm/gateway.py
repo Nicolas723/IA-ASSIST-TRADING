@@ -468,20 +468,35 @@ class LLMGateway:
         """Provider names with credentials/adapters configured (never secrets)."""
         return sorted(provider.value for provider in self._adapters)
 
+    def _provider_chain(self) -> list[LLMProvider]:
+        """Configured routing order, skipping providers without credentials.
+
+        The requested primary may be missing while its key is not set yet; the
+        first configured fallback then becomes the effective primary, so status
+        endpoints describe what will actually be attempted.
+        """
+        requested = self._settings.llm_primary_provider
+        chain = [requested]
+        if self._settings.llm_fallback_enabled:
+            chain.extend(
+                provider
+                for provider in self._settings.llm_fallback_providers
+                if provider != requested
+            )
+        return [provider for provider in chain if provider in self._adapters]
+
     @property
     def primary_provider(self) -> str:
+        chain = self._provider_chain()
+        if chain:
+            return chain[0].value
         return self._settings.llm_primary_provider.value
 
     @property
     def fallback_providers(self) -> list[str]:
         if not self._settings.llm_fallback_enabled:
             return []
-        primary = self._settings.llm_primary_provider
-        return [
-            provider.value
-            for provider in self._settings.llm_fallback_providers
-            if provider != primary and provider in self._adapters
-        ]
+        return [provider.value for provider in self._provider_chain()[1:]]
 
     async def complete(
         self,

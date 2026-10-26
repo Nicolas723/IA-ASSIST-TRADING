@@ -1,23 +1,50 @@
 """
 Anthropic Claude LLM Adapter.
+
+The gateway owns retries and fallbacks, so this adapter makes exactly one call
+and maps every SDK failure to a domain error. That keeps rate limits, billing
+problems and bad credentials visible to the routing layer instead of being
+swallowed by a local retry loop.
 """
 
 from __future__ import annotations
 
+from typing import cast
+
 import anthropic
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from src.infrastructure.llm.gateway import BaseLLMAdapter, LLMRequest, LLMResponse
 from src.shared.config.settings import LLMProvider, get_settings
-from src.shared.exceptions.domain import LLMError, LLMRateLimitError, LLMTimeoutError
+from src.shared.exceptions.domain import (
+    LLMError,
+    LLMQuotaError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+)
+
+
+def _retry_after_seconds(exc: anthropic.APIStatusError) -> int | None:
+    """Read the provider's Retry-After header when it is a positive integer."""
+    try:
+        value = exc.response.headers.get("retry-after")
+        if value is None:
+            return None
+        seconds: int = int(float(value))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
 
 
 class AnthropicAdapter(BaseLLMAdapter):
-    """Adapter for Anthropic Claude API."""
+    """Adapter for the Anthropic Claude Messages API."""
 
     def __init__(self) -> None:
         settings = get_settings()
-        self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic.api_key)
+        self._client = anthropic.AsyncAnthropic(
+            api_key=settings.anthropic.api_key,
+            timeout=60.0,
+            max_retries=0,  # The gateway decides when to try the next provider.
+        )
         self._default_model = settings.anthropic.default_model
         self._max_tokens = settings.anthropic.max_tokens
 
@@ -25,31 +52,32 @@ class AnthropicAdapter(BaseLLMAdapter):
     def provider(self) -> LLMProvider:
         return LLMProvider.ANTHROPIC
 
-    @retry(
-        retry=retry_if_exception_type(anthropic.RateLimitError),
-        wait=wait_exponential(multiplier=1, min=2, max=60),
-        stop=stop_after_attempt(3),
-        reraise=True,
-    )
     async def complete(self, request: LLMRequest) -> LLMResponse:
         try:
-            messages = [
-                {"role": msg.role, "content": msg.content}
-                for msg in request.messages
-                if msg.role != "system"  # Anthropic uses separate system param
-            ]
+            messages = cast(
+                "list[anthropic.types.MessageParam]",
+                [
+                    {"role": msg.role, "content": msg.content}
+                    for msg in request.messages
+                    if msg.role != "system"  # Anthropic uses a separate system param
+                ],
+            )
 
             response = await self._client.messages.create(
                 model=request.model or self._default_model,
                 max_tokens=min(request.max_tokens, self._max_tokens),
-                temperature=request.temperature,
+                # Current Claude models reject the sampling parameters, so the
+                # adapter relies on the provider default instead of sending
+                # request.temperature.
                 system=request.system_prompt or "",
                 messages=messages,
             )
 
-            content = ""
-            if response.content and response.content[0].type == "text":
-                content = response.content[0].text
+            content = "".join(
+                block.text
+                for block in response.content
+                if isinstance(block, anthropic.types.TextBlock)
+            )
 
             return LLMResponse(
                 content=content,
@@ -63,11 +91,39 @@ class AnthropicAdapter(BaseLLMAdapter):
             )
 
         except anthropic.RateLimitError as exc:
-            raise LLMRateLimitError(str(exc), provider="anthropic") from exc
+            raise LLMRateLimitError(
+                str(exc),
+                provider="anthropic",
+                retry_after_seconds=_retry_after_seconds(exc),
+            ) from exc
+        except anthropic.AuthenticationError as exc:
+            # A rejected key will not fix itself: park the provider so the
+            # daemon does not spend an attempt on every cycle.
+            raise LLMQuotaError(
+                f"Anthropic rejected the API key: {exc}",
+                provider="anthropic",
+                cooldown_seconds=3600,
+            ) from exc
+        except anthropic.PermissionDeniedError as exc:
+            raise LLMQuotaError(
+                f"Anthropic denied access to this model: {exc}",
+                provider="anthropic",
+                cooldown_seconds=3600,
+            ) from exc
+        except anthropic.APIStatusError as exc:
+            if exc.status_code == 402:
+                raise LLMQuotaError(
+                    f"Anthropic has insufficient balance: {exc}",
+                    provider="anthropic",
+                    cooldown_seconds=1800,
+                ) from exc
+            raise LLMError(f"Anthropic API error: {exc}", provider="anthropic") from exc
+        except anthropic.APITimeoutError as exc:
+            raise LLMTimeoutError("Anthropic request timed out", provider="anthropic") from exc
         except TimeoutError as exc:
             raise LLMTimeoutError("Anthropic request timed out", provider="anthropic") from exc
-        except anthropic.AuthenticationError as exc:
-            raise LLMError(f"Anthropic auth failed: {exc}", provider="anthropic") from exc
+        except anthropic.APIConnectionError as exc:
+            raise LLMError(f"Anthropic connection error: {exc}", provider="anthropic") from exc
         except anthropic.APIError as exc:
             raise LLMError(f"Anthropic API error: {exc}", provider="anthropic") from exc
 

@@ -334,12 +334,11 @@ class Settings(BaseSettings):
     deepseek: DeepSeekSettings = Field(default_factory=DeepSeekSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     agent_llm: AgentLLMConfig = Field(default_factory=AgentLLMConfig)
-    llm_primary_provider: LLMProvider = Field(default=LLMProvider.OPENAI)
+    llm_primary_provider: LLMProvider = Field(default=LLMProvider.ANTHROPIC)
     llm_fallback_providers: list[LLMProvider] = Field(
         default_factory=lambda: [
+            LLMProvider.OPENAI,
             LLMProvider.GOOGLE,
-            LLMProvider.ANTHROPIC,
-            LLMProvider.OPENROUTER,
             LLMProvider.DEEPSEEK,
         ]
     )
