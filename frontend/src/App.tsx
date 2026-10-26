@@ -109,6 +109,7 @@ interface LLMUsageBucket {
 }
 
 interface LLMStatusData {  mode: string;
+  scan_mode?: string;
   primary_provider?: string | null;
   configured_providers: string[];
   fallback_providers?: string[];
@@ -151,6 +152,30 @@ interface LLMStatusData {  mode: string;
     cost_estimate_note: string;
     date_utc: string;
   };
+}
+
+type LLMScanModeValue = 'savings' | 'normal' | 'high';
+
+interface LLMScanModePresetData {
+  mode: LLMScanModeValue;
+  label: string;
+  description: string;
+  max_markets: number;
+  parallel: boolean;
+  estimated_llm_calls_per_analysis: number;
+  llm_cycle_request_budget: number;
+  llm_daily_request_budget: number;
+  llm_cycle_token_budget: number;
+  llm_daily_token_budget: number;
+}
+
+interface LLMScanModeData {
+  mode: LLMScanModeValue;
+  active: LLMScanModePresetData;
+  presets: LLMScanModePresetData[];
+  effective_budgets: Record<string, number>;
+  runtime_override_active: boolean;
+  note: string;
 }
 
 interface DriftWindowMetrics {
@@ -531,6 +556,8 @@ export default function App() {
   const [latestShadowScan, setLatestShadowScan] = useState<ShadowScanData | null>(null);
   const [opportunityAssessment, setOpportunityAssessment] = useState<OpportunityAssessmentData | null>(null);
   const [llmStatus, setLlmStatus] = useState<LLMStatusData | null>(null);
+  const [llmScanMode, setLlmScanMode] = useState<LLMScanModeData | null>(null);
+  const [isUpdatingScanMode, setIsUpdatingScanMode] = useState<boolean>(false);
   const [researchContext, setResearchContext] = useState<ResearchContextData | null>(null);
 
   // Credenciales
@@ -645,6 +672,37 @@ export default function App() {
       .then((res) => (res.ok ? res.json() : null))
       .then((data: LLMStatusData | null) => setLlmStatus(data))
       .catch((err) => console.error('Error estado LLM', err));
+  };
+
+  const refreshLLMScanMode = () => {
+    fetch('/api/v1/agents/llm/scan-mode')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: LLMScanModeData | null) => setLlmScanMode(data))
+      .catch((err) => console.error('Error modo de consumo IA', err));
+  };
+
+  const handleScanModeChange = (mode: LLMScanModeValue) => {
+    if (isUpdatingScanMode || llmScanMode?.mode === mode) return;
+    setIsUpdatingScanMode(true);
+    fetch('/api/v1/agents/llm/scan-mode', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        return data as LLMScanModeData;
+      })
+      .then((data) => {
+        setLlmScanMode(data);
+        refreshLLMStatus();
+        toast.success(
+          `Modo de consumo IA: ${data.active.label}. Se aplicará en el próximo análisis.`,
+        );
+      })
+      .catch((err) => toast.error(`No se pudo cambiar el modo de IA: ${err.message}`))
+      .finally(() => setIsUpdatingScanMode(false));
   };
 
   const refreshResearchContext = () => {
@@ -796,6 +854,7 @@ export default function App() {
     refreshConcentration();
     refreshOpportunities();
     refreshLLMStatus();
+    refreshLLMScanMode();
     refreshResearchContext();
     refreshRealTrading();
     refreshRuntimeConfig();
@@ -1550,6 +1609,44 @@ export default function App() {
                     <option value="REAL">Real · usar el entorno configurado</option>
                   </select>
                 </label>
+
+                <div className="input-group">
+                  <span className="input-label">Consumo de IA</span>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', marginTop: '6px' }}>
+                    {(llmScanMode?.presets ?? []).map((preset) => (
+                      <button
+                        key={preset.mode}
+                        type="button"
+                        className={`btn ${llmScanMode?.mode === preset.mode ? 'btn-primary' : 'btn-secondary'}`}
+                        style={{ padding: '8px 6px', fontSize: '11px', justifyContent: 'center' }}
+                        disabled={isUpdatingScanMode}
+                        onClick={() => handleScanModeChange(preset.mode)}
+                        title={preset.description}
+                      >
+                        {preset.mode === 'savings' ? '🪙' : preset.mode === 'normal' ? '⚖️' : '🚀'}{' '}
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                  <span style={{ fontSize: '11px', color: '#94a3b8', marginTop: '6px' }}>
+                    {llmScanMode?.active.description ??
+                      'Elige cuántos mercados analiza el comité de IA y si lo hace en paralelo.'}
+                  </span>
+                  {llmScanMode && (
+                    <span style={{ fontSize: '11px', color: '#94a3b8' }}>
+                      {llmScanMode.active.max_markets} mercado(s) ·{' '}
+                      {llmScanMode.active.parallel ? 'en paralelo' : 'en secuencia'} · tope{' '}
+                      {llmScanMode.active.llm_cycle_request_budget} peticiones y{' '}
+                      {llmScanMode.active.llm_cycle_token_budget.toLocaleString('es-ES')} tokens
+                      por ciclo. El cambio se aplica en el próximo análisis, sin reiniciar el bot.
+                    </span>
+                  )}
+                  <span style={{ fontSize: '11px', color: '#f59e0b' }}>
+                    Los topes son límites duros, no un gasto objetivo: el coste real depende de tu
+                    proveedor y modelo.
+                  </span>
+                </div>
+
                 <details className="advanced-options">
                   <summary>Ajustes de estrategia</summary>
                   <div className="advanced-options-content">
@@ -2883,6 +2980,18 @@ export default function App() {
                 fontSize: '12px',
               }}
             >
+              <span>
+                <strong>Modo IA:</strong>{' '}
+                {llmScanMode
+                  ? `${llmScanMode.active.label} · ${llmScanMode.active.max_markets} mercado(s) ${
+                      llmScanMode.active.parallel ? 'en paralelo' : 'en secuencia'
+                    }`
+                  : llmStatus?.scan_mode === 'high'
+                  ? 'Alto consumo'
+                  : llmStatus?.scan_mode === 'normal'
+                  ? 'Consumo normal'
+                  : 'Ahorro'}
+              </span>
               <span>
                 <strong>IA:</strong>{' '}
                 {llmStatus?.mode === 'llm_with_fallback'

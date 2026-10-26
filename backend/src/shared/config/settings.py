@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
@@ -35,6 +36,9 @@ _ENV_FILE_PATH = Path(__file__).resolve().parents[3] / ".env"
 # Runtime overrides are persisted next to the encrypted credential vault so they
 # can be changed from the UI without editing .env or restarting the backend.
 _DEFAULT_RUNTIME_CONFIG_PATH = _ENV_FILE_PATH.parent / "vault" / ".runtime_config.json"
+# LLM consumption mode is persisted separately so a trading-config save never
+# drops it and vice versa.
+_DEFAULT_RUNTIME_LLM_CONFIG_PATH = _ENV_FILE_PATH.parent / "vault" / ".runtime_llm_config.json"
 
 # Only these fields are allowed to be overridden from the UI. Keeping this list
 # explicit prevents accidental persistence of secrets or unrelated settings.
@@ -48,6 +52,16 @@ RUNTIME_TRADING_FIELDS = (
     "enable_autonomous_real_trading",
     "real_trading_oco_enabled",
     "trading_environment",
+)
+
+# LLM scan mode plus the budgets derived from it. The mode controls how many
+# markets are sent to the committee and whether those analyses run in parallel.
+RUNTIME_LLM_FIELDS = (
+    "llm_scan_mode",
+    "llm_cycle_request_budget",
+    "llm_daily_request_budget",
+    "llm_cycle_token_budget",
+    "llm_daily_token_budget",
 )
 
 logger = logging.getLogger(__name__)
@@ -95,6 +109,84 @@ class LLMProvider(StrEnum):
     OLLAMA = "ollama"
     OPENROUTER = "openrouter"
     DEEPSEEK = "deepseek"
+    GROQ = "groq"
+
+
+class LLMScanMode(StrEnum):
+    """How much market breadth the LLM committee consumes per analysis."""
+
+    SAVINGS = "savings"
+    NORMAL = "normal"
+    HIGH = "high"
+
+
+@dataclass(frozen=True, slots=True)
+class LLMScanModePreset:
+    """Markets, parallelism and safety caps for one consumption mode."""
+
+    label: str
+    description: str
+    max_markets: int
+    parallel: bool
+    llm_cycle_request_budget: int
+    llm_daily_request_budget: int
+    llm_cycle_token_budget: int
+    llm_daily_token_budget: int
+
+    @property
+    def estimated_llm_calls_per_analysis(self) -> int:
+        """Two LLM specialists per committee (the risk manager is deterministic)."""
+        return self.max_markets * 2
+
+
+# The budgets are hard caps, not spending targets. They scale with breadth so
+# the selected mode can actually finish its analyses, while a broken provider
+# chain still stops after a bounded number of attempts.
+LLM_SCAN_MODE_PRESETS: dict[LLMScanMode, LLMScanModePreset] = {
+    LLMScanMode.SAVINGS: LLMScanModePreset(
+        label="Ahorro",
+        description=(
+            "Un solo mercado por análisis, elegido por el escaneo determinista. "
+            "Menor consumo de tokens y peticiones."
+        ),
+        max_markets=1,
+        parallel=False,
+        llm_cycle_request_budget=8,
+        llm_daily_request_budget=18,
+        llm_cycle_token_budget=12_000,
+        llm_daily_token_budget=200_000,
+    ),
+    LLMScanMode.NORMAL: LLMScanModePreset(
+        label="Consumo normal",
+        description=(
+            "Hasta tres mercados por análisis, en secuencia. Equilibrio entre cobertura y coste."
+        ),
+        max_markets=3,
+        parallel=False,
+        llm_cycle_request_budget=24,
+        llm_daily_request_budget=72,
+        llm_cycle_token_budget=40_000,
+        llm_daily_token_budget=600_000,
+    ),
+    LLMScanMode.HIGH: LLMScanModePreset(
+        label="Alto consumo",
+        description=(
+            "Todos los mercados del universo, analizados en paralelo en el mismo "
+            "ciclo. Mayor cobertura y mayor coste por análisis."
+        ),
+        max_markets=10,
+        parallel=True,
+        llm_cycle_request_budget=80,
+        llm_daily_request_budget=300,
+        llm_cycle_token_budget=120_000,
+        llm_daily_token_budget=2_000_000,
+    ),
+}
+
+
+def llm_scan_mode_preset(mode: LLMScanMode) -> LLMScanModePreset:
+    """Return the preset for a mode, defaulting to the safest one."""
+    return LLM_SCAN_MODE_PRESETS.get(mode, LLM_SCAN_MODE_PRESETS[LLMScanMode.SAVINGS])
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +318,29 @@ class DeepSeekSettings(BaseSettings):
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
 
 
+class GroqSettings(BaseSettings):
+    """Groq exposes an OpenAI-compatible API with a permanent free tier.
+
+    Free plan limits (per model, checked 2026-10): 30 RPM, 1,000 RPD,
+    8,000 TPM and 200,000 TPD. Use the savings or normal scan mode with this
+    provider; high mode sends too many parallel calls for the per-minute cap.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="GROQ_",
+        env_file=str(_ENV_FILE_PATH),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    api_key: str = Field(default="")
+    base_url: str = Field(default="https://api.groq.com/openai/v1")
+    default_model: str = Field(default="openai/gpt-oss-120b")
+    max_tokens: int = Field(default=4096)
+    temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+
+
 class RiskSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="MAX_",
@@ -332,6 +447,7 @@ class Settings(BaseSettings):
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
     openrouter: OpenRouterSettings = Field(default_factory=OpenRouterSettings)
     deepseek: DeepSeekSettings = Field(default_factory=DeepSeekSettings)
+    groq: GroqSettings = Field(default_factory=GroqSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     agent_llm: AgentLLMConfig = Field(default_factory=AgentLLMConfig)
     llm_primary_provider: LLMProvider = Field(default=LLMProvider.ANTHROPIC)
@@ -343,6 +459,9 @@ class Settings(BaseSettings):
         ]
     )
     llm_fallback_enabled: bool = Field(default=True)
+    # Consumption mode selected from the UI. It controls how many markets are
+    # analyzed per committee run and whether those analyses run in parallel.
+    llm_scan_mode: LLMScanMode = Field(default=LLMScanMode.SAVINGS)
     # Optional per-process daily token cap. 0 disables the cap. The counter is
     # in-memory and resets at UTC midnight or on restart.
     llm_daily_token_budget: int = Field(default=0, ge=0)
@@ -598,6 +717,40 @@ def runtime_config_path() -> Path:
     return Path(configured) if configured else _DEFAULT_RUNTIME_CONFIG_PATH
 
 
+def runtime_llm_config_path() -> Path:
+    """Return the JSON file used for UI-managed LLM scan-mode overrides."""
+    configured = os.getenv("RUNTIME_LLM_CONFIG_PATH", "").strip()
+    return Path(configured) if configured else _DEFAULT_RUNTIME_LLM_CONFIG_PATH
+
+
+def _load_overrides(
+    path: Path,
+    allowed_fields: tuple[str, ...],
+    *,
+    env_variable: str,
+    log_name: str,
+    honor_pytest_guard: bool,
+) -> dict[str, Any]:
+    if honor_pytest_guard:
+        explicit = os.getenv(env_variable, "").strip()
+        if not explicit and "pytest" in sys.modules:
+            return {}
+    if not path.exists():
+        return {}
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("%s_load_failed path=%s error=%s", log_name, path, exc)
+        return {}
+
+    if not isinstance(raw, dict):
+        logger.warning("%s_invalid_payload path=%s", log_name, path)
+        return {}
+
+    return {key: value for key, value in raw.items() if key in allowed_fields}
+
+
 def load_runtime_overrides(path: Path | None = None) -> dict[str, Any]:
     """
     Read UI-managed trading overrides from disk.
@@ -606,26 +759,24 @@ def load_runtime_overrides(path: Path | None = None) -> dict[str, Any]:
     configuration cannot make the suite non-deterministic. Tests that exercise
     this loader pass an explicit ``path`` or set ``RUNTIME_CONFIG_PATH``.
     """
-    if path is None:
-        explicit = os.getenv("RUNTIME_CONFIG_PATH", "").strip()
-        if not explicit and "pytest" in sys.modules:
-            return {}
-        path = runtime_config_path()
+    return _load_overrides(
+        path or runtime_config_path(),
+        RUNTIME_TRADING_FIELDS,
+        env_variable="RUNTIME_CONFIG_PATH",
+        log_name="runtime_config",
+        honor_pytest_guard=path is None,
+    )
 
-    if not path.exists():
-        return {}
 
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        logger.warning("runtime_config_load_failed path=%s error=%s", path, exc)
-        return {}
-
-    if not isinstance(raw, dict):
-        logger.warning("runtime_config_invalid_payload path=%s", path)
-        return {}
-
-    return {key: value for key, value in raw.items() if key in RUNTIME_TRADING_FIELDS}
+def load_runtime_llm_overrides(path: Path | None = None) -> dict[str, Any]:
+    """Read UI-managed LLM scan-mode overrides from disk."""
+    return _load_overrides(
+        path or runtime_llm_config_path(),
+        RUNTIME_LLM_FIELDS,
+        env_variable="RUNTIME_LLM_CONFIG_PATH",
+        log_name="runtime_llm_config",
+        honor_pytest_guard=path is None,
+    )
 
 
 def _validated_with_overrides(base: Settings, overrides: dict[str, Any]) -> Settings:
@@ -634,14 +785,7 @@ def _validated_with_overrides(base: Settings, overrides: dict[str, Any]) -> Sett
     return Settings.model_validate(data)
 
 
-def apply_runtime_overrides(target: Settings, overrides: dict[str, Any]) -> Settings:
-    """
-    Apply validated overrides in-place.
-
-    Services hold a reference to the cached Settings instance, so mutating it is
-    what makes a configuration change effective immediately without a restart.
-    """
-    filtered = {key: value for key, value in overrides.items() if key in RUNTIME_TRADING_FIELDS}
+def _apply_filtered_overrides(target: Settings, filtered: dict[str, Any]) -> Settings:
     if not filtered:
         return target
 
@@ -649,6 +793,23 @@ def apply_runtime_overrides(target: Settings, overrides: dict[str, Any]) -> Sett
     for field_name in Settings.model_fields:
         setattr(target, field_name, getattr(validated, field_name))
     return target
+
+
+def apply_runtime_overrides(target: Settings, overrides: dict[str, Any]) -> Settings:
+    """
+    Apply validated trading overrides in-place.
+
+    Services hold a reference to the cached Settings instance, so mutating it is
+    what makes a configuration change effective immediately without a restart.
+    """
+    filtered = {key: value for key, value in overrides.items() if key in RUNTIME_TRADING_FIELDS}
+    return _apply_filtered_overrides(target, filtered)
+
+
+def apply_llm_runtime_overrides(target: Settings, overrides: dict[str, Any]) -> Settings:
+    """Apply validated LLM scan-mode and budget overrides in-place."""
+    filtered = {key: value for key, value in overrides.items() if key in RUNTIME_LLM_FIELDS}
+    return _apply_filtered_overrides(target, filtered)
 
 
 # ---------------------------------------------------------------------------
@@ -663,10 +824,10 @@ def get_settings() -> Settings:
 
     Using lru_cache ensures settings are parsed from environment
     only once per process. In tests, clear with get_settings.cache_clear().
-    UI-managed trading overrides are merged on top of the .env values.
+    UI-managed trading and LLM overrides are merged on top of the .env values.
     """
     base = Settings()
-    overrides = load_runtime_overrides()
+    overrides = {**load_runtime_overrides(), **load_runtime_llm_overrides()}
     if not overrides:
         return base
     try:

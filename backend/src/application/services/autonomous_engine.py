@@ -35,7 +35,11 @@ from src.domain.trading.entities import (
     PositionSide,
 )
 from src.infrastructure.exchange.paper import PlaceOrderRequest
-from src.shared.config.settings import get_settings
+from src.shared.config.settings import (
+    LLMScanModePreset,
+    get_settings,
+    llm_scan_mode_preset,
+)
 from src.shared.exceptions.domain import RiskViolationError, ValidationError
 from src.shared.logging.setup import get_logger
 
@@ -731,64 +735,54 @@ class AutonomousEngine:
             self.add_log(level="ERROR", message="MarketDataService not bound to AutonomousEngine")
             return
 
-        # 1. Deterministic multi-market pre-scan. The expensive LLM committee
-        #    only runs on the best candidate that the execution allowlist
-        #    permits; every other market is still measured and logged.
-        symbol = primary_symbol
-        scan_result = await self._pre_scan(universe, market_service)
         allowed = self._allowed_symbols()
-        if scan_result is not None:
-            eligible = [
-                candidate for candidate in scan_result.ranked if candidate.symbol in allowed
-            ]
-            if eligible:
-                chosen = eligible[0]
-                symbol = chosen.symbol
-                self.add_log(
-                    level="INFO",
-                    message=(
-                        f"Candidato elegido: {symbol} "
-                        f"(score {chosen.selection_score:+.2f}; "
-                        f"{chosen.lookback_return_pct:+.2f}% en "
-                        f"{scan_result.lookback_candles} velas; "
-                        f"{chosen.trend_regime or 'sin régimen'}). "
-                        f"Elegibles por allowlist: {len(eligible)}/{len(scan_result.ranked)}."
-                    ),
-                    symbol=symbol,
-                )
-            else:
-                self.add_log(
-                    level="WARNING",
-                    message=(
-                        f"Ningún mercado observado está en la allowlist de ejecución "
-                        f"({', '.join(sorted(allowed)) or 'vacía'}); "
-                        f"se analiza {primary_symbol}."
-                    ),
-                    symbol=primary_symbol,
-                )
-
-        # 2. Fetch the selected market's REAL-TIME price (ticker 'last'), not
-        #    the last closed candle. A 1h candle only updates once per hour, so
-        #    `candles[-1].close` would stay frozen while the chart keeps moving.
-        current_price = await self._latest_price(symbol, market_service)
-        if current_price is None:
-            self.add_log(
-                level="WARNING",
-                message=f"No candles returned for {symbol}",
-                symbol=symbol,
-            )
-        else:
-            self.last_price = current_price
-            self.last_symbol = symbol
-
-        # 3. Refresh every open position, not only the analyzed symbol. A
-        #    multi-market session can hold ETH while the committee looks at BTC.
         mode = self._mode()
         service = self._execution_service()
+        preset = llm_scan_mode_preset(get_settings().llm_scan_mode)
+
+        # 1. Deterministic multi-market pre-scan. The expensive LLM committee
+        #    runs only on the markets the selected consumption mode allows.
+        scan_result = await self._pre_scan(universe, market_service)
+        selected = self._select_analysis_symbols(
+            scan_result,
+            primary_symbol=primary_symbol,
+            allowed=allowed,
+            preset=preset,
+        )
+
+        # 2. Fetch each selected market's REAL-TIME price (ticker 'last'), not
+        #    the last closed candle. A 1h candle only updates once per hour, so
+        #    `candles[-1].close` would stay frozen while the chart keeps moving.
+        selected_prices: dict[str, float] = {}
+        for symbol in selected:
+            price = await self._latest_price(symbol, market_service)
+            if price is None:
+                self.add_log(
+                    level="WARNING",
+                    message=f"No candles returned for {symbol}",
+                    symbol=symbol,
+                )
+                continue
+            selected_prices[symbol] = price
+
+        if selected_prices:
+            first_symbol = next(iter(selected_prices))
+            self.last_price = selected_prices[first_symbol]
+            self.last_symbol = first_symbol
+        else:
+            self.add_log(
+                level="WARNING",
+                message=(
+                    "No se pudo obtener precio de ningún mercado seleccionado; "
+                    "el ciclo continúa solo con la gestión de posiciones."
+                ),
+                symbol=primary_symbol,
+            )
+
+        # 3. Refresh every open position, not only the analyzed symbols. A
+        #    multi-market session can hold ETH while the committee looks at BTC.
         open_positions: list[Position] = []
-        price_map: dict[str, float] = {}
-        if current_price is not None:
-            price_map[symbol] = current_price
+        price_map: dict[str, float] = dict(selected_prices)
         if service:
             try:
                 open_positions = list(service.get_positions(mode))
@@ -881,7 +875,8 @@ class AutonomousEngine:
         # Entry analysis is the only part gated by the execution allowlist.
         # Position tracking above already ran, so a disallowed market can never
         # trap an open position.
-        if symbol not in allowed:
+        excluded = [symbol for symbol in selected if symbol not in allowed]
+        for symbol in excluded:
             self.add_log(
                 level="WARNING",
                 message=(
@@ -890,8 +885,11 @@ class AutonomousEngine:
                 ),
                 symbol=symbol,
             )
-            return
-        if current_price is None:
+
+        entry_symbols = [
+            symbol for symbol in selected if symbol in allowed and symbol in selected_prices
+        ]
+        if not entry_symbols:
             return
 
         # 5. Multi-Agent Committee Consensus Evaluation
@@ -915,20 +913,119 @@ class AutonomousEngine:
 
         self._last_analysis_at = datetime.now(tz=UTC)
 
-        # AgentService.run_analysis starts a fresh per-cycle LLM budget itself,
-        # so both the engine and the manual /agents/analyze endpoint get one.
-        decision: CoordinatorDecision = await agent_service.run_analysis(
-            symbol=symbol,
-            timeframe=self.config.timeframe,
-            lookback_candles=100,
-        )
+        # AgentService.run_analyses starts one fresh per-cycle LLM budget for the
+        # whole batch, so high mode cannot multiply the cycle cap per market.
+        try:
+            results = await agent_service.run_analyses(
+                entry_symbols,
+                timeframe=self.config.timeframe,
+                lookback_candles=100,
+                parallel=preset.parallel and len(entry_symbols) > 1,
+            )
+        except Exception as exc:
+            logger.warning("committee_batch_failed", error=str(exc))
+            self.add_log(
+                level="ERROR",
+                message=f"Error al ejecutar el comité: {exc}",
+                symbol=entry_symbols[0],
+            )
+            return
+
+        if not results:
+            self.add_log(
+                level="WARNING",
+                message="El comité no devolvió decisiones para los mercados seleccionados.",
+                symbol=entry_symbols[0],
+            )
+            return
+
+        for index, (symbol, decision) in enumerate(results):
+            await self._apply_decision(
+                symbol=symbol,
+                current_price=selected_prices.get(symbol),
+                decision=decision,
+                service=service,
+                mode=mode,
+                market_service=market_service,
+                update_last=index == 0,
+            )
+
+    def _select_analysis_symbols(
+        self,
+        scan_result: PreScanResult | None,
+        *,
+        primary_symbol: str,
+        allowed: set[str],
+        preset: LLMScanModePreset,
+    ) -> list[str]:
+        """Pick the markets the current consumption mode will send to the LLM."""
+        if scan_result is None:
+            return [primary_symbol]
+
+        eligible = [candidate for candidate in scan_result.ranked if candidate.symbol in allowed]
+        if not eligible:
+            self.add_log(
+                level="WARNING",
+                message=(
+                    f"Ningún mercado observado está en la allowlist de ejecución "
+                    f"({', '.join(sorted(allowed)) or 'vacía'}); "
+                    f"se analiza {primary_symbol}."
+                ),
+                symbol=primary_symbol,
+            )
+            return [primary_symbol]
+
+        limit = max(1, preset.max_markets)
+        chosen = eligible[:limit]
+        if len(chosen) == 1:
+            candidate = chosen[0]
+            self.add_log(
+                level="INFO",
+                message=(
+                    f"Candidato elegido: {candidate.symbol} "
+                    f"(score {candidate.selection_score:+.2f}; "
+                    f"{candidate.lookback_return_pct:+.2f}% en "
+                    f"{scan_result.lookback_candles} velas; "
+                    f"{candidate.trend_regime or 'sin régimen'}). "
+                    f"Elegibles por allowlist: {len(eligible)}/{len(scan_result.ranked)}."
+                ),
+                symbol=candidate.symbol,
+            )
+        else:
+            self.add_log(
+                level="INFO",
+                message=(
+                    f"Modo {preset.label}: {len(chosen)} mercados por análisis "
+                    f"({'en paralelo' if preset.parallel else 'en secuencia'}): "
+                    f"{', '.join(candidate.symbol for candidate in chosen)}. "
+                    f"Elegibles por allowlist: {len(eligible)}/{len(scan_result.ranked)}."
+                ),
+                symbol=chosen[0].symbol,
+            )
+        return [candidate.symbol for candidate in chosen]
+
+    async def _apply_decision(
+        self,
+        *,
+        symbol: str,
+        current_price: float | None,
+        decision: CoordinatorDecision,
+        service: TradingService | LiveTradingService | None,
+        mode: ExecutionMode,
+        market_service: MarketDataService,
+        update_last: bool,
+    ) -> None:
+        """Log one committee verdict and, if actionable, size and place it."""
+        if current_price is None:
+            return
 
         signal_str = str(decision.final_signal.value)
         raw_conf = float(decision.aggregate_confidence)
         confidence_pct = raw_conf * 100.0 if raw_conf <= 1.0 else raw_conf
 
-        self.last_signal = signal_str.upper()
-        self.last_confidence = round(confidence_pct, 1)
+        if update_last:
+            self.last_signal = signal_str.upper()
+            self.last_confidence = round(confidence_pct, 1)
 
         log_msg = (
             f"AI Committee Verdict: {signal_str.upper()} "
@@ -952,6 +1049,7 @@ class AutonomousEngine:
                 signal=signal_str.upper(),
                 confidence_pct=confidence_pct,
                 price=current_price,
+                symbol=symbol,
             )
             return
 
@@ -962,6 +1060,7 @@ class AutonomousEngine:
                 signal=signal_str.upper(),
                 confidence_pct=confidence_pct,
                 price=current_price,
+                symbol=symbol,
             )
             return
 
@@ -972,6 +1071,7 @@ class AutonomousEngine:
                 signal=signal_str.upper(),
                 confidence_pct=confidence_pct,
                 price=current_price,
+                symbol=symbol,
             )
             return
 
@@ -991,6 +1091,7 @@ class AutonomousEngine:
                     signal=signal_str.upper(),
                     confidence_pct=confidence_pct,
                     price=current_price,
+                    symbol=symbol,
                 )
                 return
 
@@ -1011,6 +1112,7 @@ class AutonomousEngine:
                         signal=signal_str.upper(),
                         confidence_pct=confidence_pct,
                         price=current_price,
+                        symbol=symbol,
                     )
                     return
 
@@ -1044,6 +1146,7 @@ class AutonomousEngine:
                         confidence_pct=confidence_pct,
                         price=current_price,
                         order_id=str(closed_order.id)[:8],
+                        symbol=symbol,
                     )
                     if mode != ExecutionMode.REAL:
                         await self._notify(
@@ -1061,6 +1164,7 @@ class AutonomousEngine:
                     signal=signal_str.upper(),
                     confidence_pct=confidence_pct,
                     price=current_price,
+                    symbol=symbol,
                 )
                 return
 
@@ -1080,6 +1184,7 @@ class AutonomousEngine:
                     signal=signal_str.upper(),
                     confidence_pct=confidence_pct,
                     price=current_price,
+                    symbol=symbol,
                 )
                 return
             if correlation_decision.action == "reduce":
@@ -1089,6 +1194,7 @@ class AutonomousEngine:
                     signal=signal_str.upper(),
                     confidence_pct=confidence_pct,
                     price=current_price,
+                    symbol=symbol,
                 )
             elif correlation_decision.action == "unavailable":
                 logger.info(
@@ -1144,6 +1250,7 @@ class AutonomousEngine:
                     signal=signal_str.upper(),
                     confidence_pct=confidence_pct,
                     price=current_price,
+                    symbol=symbol,
                 )
                 return
 
@@ -1166,6 +1273,7 @@ class AutonomousEngine:
                         signal=signal_str.upper(),
                         confidence_pct=confidence_pct,
                         price=current_price,
+                        symbol=symbol,
                     )
                     quantity = capped_quantity
                 if quantity <= 0:
@@ -1179,6 +1287,7 @@ class AutonomousEngine:
                         signal=signal_str.upper(),
                         confidence_pct=confidence_pct,
                         price=current_price,
+                        symbol=symbol,
                     )
                     return
 
@@ -1194,6 +1303,7 @@ class AutonomousEngine:
                         signal=signal_str.upper(),
                         confidence_pct=confidence_pct,
                         price=current_price,
+                        symbol=symbol,
                     )
                     return
                 reconciled, gate_error = await self.live_trading_service.preflight_reconciliation()
@@ -1208,6 +1318,7 @@ class AutonomousEngine:
                         signal=signal_str.upper(),
                         confidence_pct=confidence_pct,
                         price=current_price,
+                        symbol=symbol,
                     )
                     return
 
@@ -1258,6 +1369,7 @@ class AutonomousEngine:
                 confidence_pct=confidence_pct,
                 price=current_price,
                 order_id=str(executed_order.id)[:8],
+                symbol=symbol,
             )
             logger.info(
                 "autonomous_order_placed",
@@ -1273,6 +1385,7 @@ class AutonomousEngine:
                 signal=signal_str.upper(),
                 confidence_pct=confidence_pct,
                 price=current_price,
+                symbol=symbol,
             )
         except Exception as e:
             self.add_log(
@@ -1281,4 +1394,5 @@ class AutonomousEngine:
                 signal=signal_str.upper(),
                 confidence_pct=confidence_pct,
                 price=current_price,
+                symbol=symbol,
             )

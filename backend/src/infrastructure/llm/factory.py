@@ -55,6 +55,14 @@ def create_llm_gateway(settings: Settings | None = None) -> LLMGateway | None:
         logger.warning("llm_provider_sdk_missing", provider="deepseek", error=str(exc))
 
     try:
+        if config.groq.api_key.strip():
+            from src.infrastructure.llm.groq_adapter import GroqAdapter
+
+            adapters[LLMProvider.GROQ] = GroqAdapter()
+    except ImportError as exc:
+        logger.warning("llm_provider_sdk_missing", provider="groq", error=str(exc))
+
+    try:
         if config.ollama.enabled:
             from src.infrastructure.llm.ollama_adapter import OllamaAdapter
 

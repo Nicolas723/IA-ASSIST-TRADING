@@ -10,6 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from src.application.services.agent_service import AgentInfo, AgentService
+from src.application.services.llm_scan_mode_service import (
+    LLMScanModeResponse,
+    LLMScanModeService,
+    LLMScanModeUpdate,
+)
 from src.application.services.market_data_service import MarketDataService
 from src.application.services.market_scan_service import (
     MarketScanService,
@@ -45,17 +50,39 @@ async def get_llm_status(
     if llm_gateway is None:
         return {
             "mode": "deterministic_fallback",
+            "scan_mode": get_settings().llm_scan_mode.value,
             "primary_provider": None,
             "configured_providers": [],
             "fallback_providers": [],
         }
     return {
         "mode": "llm_with_fallback",
+        "scan_mode": get_settings().llm_scan_mode.value,
         "primary_provider": llm_gateway.primary_provider,
         "configured_providers": llm_gateway.configured_providers,
         "fallback_providers": llm_gateway.fallback_providers,
         "usage": llm_gateway.usage_status(),
     }
+
+
+@router.get(
+    "/llm/scan-mode",
+    response_model=LLMScanModeResponse,
+    summary="Show the AI consumption mode and its budgets",
+)
+async def get_llm_scan_mode() -> LLMScanModeResponse:
+    """Return the active mode plus every selectable preset."""
+    return LLMScanModeService().snapshot()
+
+
+@router.put(
+    "/llm/scan-mode",
+    response_model=LLMScanModeResponse,
+    summary="Switch between savings, normal and high AI consumption",
+)
+async def update_llm_scan_mode(payload: LLMScanModeUpdate) -> LLMScanModeResponse:
+    """Apply and persist a consumption mode; the next cycle uses it."""
+    return LLMScanModeService().update(payload.mode)
 
 
 @router.post("/llm/health", summary="Check configured AI provider connectivity")

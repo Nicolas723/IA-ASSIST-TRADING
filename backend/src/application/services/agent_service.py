@@ -4,8 +4,9 @@ AgentService — Application Layer for AI Agent Orchestration and Multi-Agent Co
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -137,23 +138,104 @@ class AgentService:
         timeframe: str = "1h",
         lookback_candles: int = 100,
     ) -> CoordinatorDecision:
-        normalized_symbol = symbol.replace("-", "/").replace("_", "/").upper()
-        tf = Timeframe(timeframe)
-
         # Every analysis (scheduled cycle or manual /agents/analyze call) gets a
         # fresh per-cycle LLM budget. The daily caps are untouched.
         self.begin_cycle()
 
+        normalized_symbol, _tf, candles, research_context = await self._prepare_analysis(
+            symbol, timeframe, lookback_candles
+        )
+        decision = await self._coordinate_task(
+            normalized_symbol, timeframe, candles, research_context
+        )
+        await self._record_decision(decision)
+        return decision
+
+    async def run_analyses(
+        self,
+        symbols: list[str],
+        timeframe: str = "1h",
+        lookback_candles: int = 100,
+        parallel: bool = False,
+    ) -> list[tuple[str, CoordinatorDecision]]:
+        """Analyze several markets under one per-cycle LLM budget.
+
+        Candles and research context are fetched sequentially because the market
+        service shares a single AsyncSession; only the committee LLM calls run
+        concurrently when ``parallel`` is true. A failure in one market never
+        cancels the others.
+        """
+        normalized = list(
+            dict.fromkeys(
+                symbol.strip().replace("-", "/").replace("_", "/").upper()
+                for symbol in symbols
+                if symbol.strip()
+            )
+        )
+        if not normalized:
+            return []
+
+        self.begin_cycle()
+        prepared: list[tuple[str, Timeframe, list[Candle], str]] = []
+        for symbol in normalized:
+            try:
+                prepared.append(await self._prepare_analysis(symbol, timeframe, lookback_candles))
+            except Exception as exc:
+                logger.warning(
+                    "agent_analysis_input_failed",
+                    symbol=symbol,
+                    error=str(exc),
+                )
+        if not prepared:
+            return []
+
+        outcomes: list[Any] = []
+        if parallel:
+            outcomes = list(
+                await asyncio.gather(
+                    *(
+                        self._coordinate_task(symbol, timeframe, candles, research)
+                        for symbol, _tf, candles, research in prepared
+                    ),
+                    return_exceptions=True,
+                )
+            )
+        else:
+            for symbol, _tf, candles, research in prepared:
+                try:
+                    outcomes.append(
+                        await self._coordinate_task(symbol, timeframe, candles, research)
+                    )
+                except Exception as exc:
+                    outcomes.append(exc)
+
+        results: list[tuple[str, CoordinatorDecision]] = []
+        for (symbol, _tf, _candles, _research), outcome in zip(prepared, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                logger.warning("agent_analysis_failed", symbol=symbol, error=str(outcome))
+                continue
+            await self._record_decision(outcome)
+            results.append((symbol, outcome))
+        return results
+
+    async def _prepare_analysis(
+        self,
+        symbol: str,
+        timeframe: str,
+        lookback_candles: int,
+    ) -> tuple[str, Timeframe, list[Candle], str]:
+        """Fetch and validate everything the committee needs for one market."""
+        normalized_symbol = symbol.strip().replace("-", "/").replace("_", "/").upper()
+        tf = Timeframe(timeframe)
+
         if not self.market_service:
             raise ValueError("MarketDataService is required for AgentService")
 
-        # 1. Fetch candles
         candles = await self.market_service.get_candles(
             symbol=normalized_symbol,
             timeframe=tf,
             limit=lookback_candles,
         )
-
         if not candles:
             raise ValueError(
                 f"No market data available for {normalized_symbol} to run AI analysis."
@@ -164,29 +246,35 @@ class AgentService:
         except ValueError as exc:
             raise ValueError(f"Market data for {normalized_symbol} is unusable: {exc}") from exc
 
-        # 2. Build MarketContext
+        research_context = await self._research_context_for(normalized_symbol, timeframe)
+        return normalized_symbol, tf, candles, research_context
+
+    async def _coordinate_task(
+        self,
+        symbol: str,
+        timeframe: str,
+        candles: list[Candle],
+        research_context: str,
+    ) -> CoordinatorDecision:
         context = MarketContext(
-            symbol=normalized_symbol,
+            symbol=symbol,
             exchange=Exchange.BINANCE,
             timestamp=datetime.now(tz=UTC),
             candles={timeframe: candles},
         )
-
-        # 3. Create AgentTask
         task = AgentTask(
             task_id=uuid4(),
             agent_type=AgentType.COORDINATOR,
-            symbol=normalized_symbol,
+            symbol=symbol,
             market_context=context,
             timeframes_to_analyze=[timeframe],
             lookback_candles=max(len(candles), 10),
-            research_context=await self._research_context_for(normalized_symbol, timeframe),
+            research_context=research_context,
         )
+        return await self.coordinator.coordinate(task)
 
-        # 4. Run Coordinator
-        decision = await self.coordinator.coordinate(task)
-
-        # 5. Save to audit trail (in-memory cache + durable store)
+    async def _record_decision(self, decision: CoordinatorDecision) -> None:
+        """Keep the in-memory audit trail and persist the durable copy."""
         self._decision_history.insert(0, decision)
         if len(self._decision_history) > 100:
             self._decision_history = self._decision_history[:100]
@@ -203,13 +291,11 @@ class AgentService:
 
         logger.info(
             "ai_committee_analysis_completed",
-            symbol=normalized_symbol,
+            symbol=decision.symbol,
             verdict=decision.final_signal.value,
             confidence=decision.aggregate_confidence,
             consensus=decision.consensus_level,
         )
-
-        return decision
 
     async def _research_context_for(self, symbol: str, timeframe: str) -> str:
         """Load guarded research context only when explicitly enabled.

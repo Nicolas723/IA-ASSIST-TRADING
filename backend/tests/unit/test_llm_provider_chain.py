@@ -11,12 +11,14 @@ from src.infrastructure.llm import (
     factory,
     gateway,
     gemini_adapter,
+    groq_adapter,
     openai_adapter,
 )
 from src.shared.config.settings import (
     AnthropicSettings,
     DeepSeekSettings,
     GeminiSettings,
+    GroqSettings,
     LLMProvider,
     OllamaSettings,
     OpenAISettings,
@@ -35,6 +37,7 @@ def _settings(
     openai_key: str = "",
     google_key: str = "",
     deepseek_key: str = "",
+    groq_key: str = "",
     primary: LLMProvider | None = None,
     fallbacks: list[LLMProvider] | None = None,
     fallback_enabled: bool = True,
@@ -55,6 +58,7 @@ def _settings(
         anthropic=AnthropicSettings(_env_file=None, api_key=anthropic_key),
         gemini=GeminiSettings(_env_file=None, api_key=google_key),
         deepseek=DeepSeekSettings(_env_file=None, api_key=deepseek_key),
+        groq=GroqSettings(_env_file=None, api_key=groq_key),
         openrouter=OpenRouterSettings(_env_file=None, api_key=""),
         ollama=OllamaSettings(_env_file=None, enabled=False),
         **overrides,
@@ -68,6 +72,7 @@ def _patch_adapters(monkeypatch: pytest.MonkeyPatch) -> None:
         (openai_adapter, "OpenAIAdapter", LLMProvider.OPENAI),
         (gemini_adapter, "GeminiAdapter", LLMProvider.GOOGLE),
         (deepseek_adapter, "DeepSeekAdapter", LLMProvider.DEEPSEEK),
+        (groq_adapter, "GroqAdapter", LLMProvider.GROQ),
     ):
         monkeypatch.setattr(
             module,

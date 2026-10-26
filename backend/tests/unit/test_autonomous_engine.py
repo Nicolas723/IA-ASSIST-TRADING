@@ -33,6 +33,40 @@ from src.domain.trading.entities import (
     Position,
     PositionSide,
 )
+from src.shared.config.settings import LLMScanMode
+
+
+def _committee(agent: MagicMock, **kwargs: object) -> AsyncMock:
+    """Install a committee stub that supports single and batched analysis.
+
+    The engine calls ``run_analyses`` for every cycle, while manual endpoints
+    and older tests use ``run_analysis``. Both share one AsyncMock so existing
+    assertions keep working and the batch keeps the per-symbol decision.
+    """
+    single = AsyncMock(**kwargs)
+    agent.run_analysis = single
+
+    async def run_analyses(
+        symbols: list[str],
+        timeframe: str = "1h",
+        lookback_candles: int = 100,
+        parallel: bool = False,
+    ) -> list[tuple[str, CoordinatorDecision]]:
+        _ = parallel
+        results: list[tuple[str, CoordinatorDecision]] = []
+        for symbol in symbols:
+            decision = await single(
+                symbol=symbol,
+                timeframe=timeframe,
+                lookback_candles=lookback_candles,
+            )
+            if isinstance(decision, CoordinatorDecision) and decision.symbol != symbol:
+                decision = decision.model_copy(update={"symbol": symbol})
+            results.append((symbol, decision))
+        return results
+
+    agent.run_analyses = AsyncMock(side_effect=run_analyses)
+    return single
 
 
 @pytest.mark.unit
@@ -120,7 +154,7 @@ async def test_autonomous_cycle_execution():
         recommended_stop=63896.0,
         recommended_target=67808.0,
     )
-    mock_agent.run_analysis = AsyncMock(return_value=mock_decision)
+    _committee(mock_agent, return_value=mock_decision)
 
     mock_trading = MagicMock()
     mock_trading.get_portfolio.return_value = Portfolio(
@@ -176,7 +210,8 @@ async def test_autonomous_cycle_uses_live_ticker_price():
     mock_market.get_candles = AsyncMock()
 
     mock_agent = MagicMock()
-    mock_agent.run_analysis = AsyncMock(
+    _committee(
+        mock_agent,
         return_value=CoordinatorDecision(
             symbol="BTC/USDT",
             final_signal=SignalDirection.NEUTRAL,
@@ -186,7 +221,7 @@ async def test_autonomous_cycle_uses_live_ticker_price():
             recommended_entry=70000.0,
             recommended_stop=69000.0,
             recommended_target=72000.0,
-        )
+        ),
     )
 
     engine = AutonomousEngine(agent_service=mock_agent, market_service=mock_market)
@@ -203,7 +238,8 @@ async def test_autonomous_engine_abstains_when_committee_risk_approval_is_false(
     market = MagicMock()
     market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
     agent = MagicMock()
-    agent.run_analysis = AsyncMock(
+    _committee(
+        agent,
         return_value=CoordinatorDecision(
             symbol="BTC/USDT",
             final_signal=SignalDirection.STRONG_BUY,
@@ -220,7 +256,7 @@ async def test_autonomous_engine_abstains_when_committee_risk_approval_is_false(
                     severity=RiskFlagSeverity.CRITICAL,
                 )
             ],
-        )
+        ),
     )
     trading = MagicMock()
 
@@ -268,7 +304,7 @@ async def test_autonomous_sell_signal_never_sells_untracked_wallet_balance():
     market = MagicMock()
     market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
     agent = MagicMock()
-    agent.run_analysis = AsyncMock(return_value=_sell_decision())
+    _committee(agent, return_value=_sell_decision())
     trading = MagicMock()
     trading.get_portfolio.return_value = _paper_portfolio()
     trading.get_positions.return_value = []
@@ -287,7 +323,7 @@ async def test_autonomous_sell_signal_closes_only_its_tracked_position():
     market = MagicMock()
     market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
     agent = MagicMock()
-    agent.run_analysis = AsyncMock(return_value=_sell_decision())
+    _committee(agent, return_value=_sell_decision())
     position_id = "tracked-position"
     position = SimpleNamespace(
         id=position_id,
@@ -328,7 +364,8 @@ async def test_real_order_quantity_is_capped_to_max_notional(monkeypatch) -> Non
     market = MagicMock()
     market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
     agent = MagicMock()
-    agent.run_analysis = AsyncMock(
+    _committee(
+        agent,
         return_value=CoordinatorDecision(
             symbol="BTC/USDT",
             final_signal=SignalDirection.BUY,
@@ -339,7 +376,7 @@ async def test_real_order_quantity_is_capped_to_max_notional(monkeypatch) -> Non
             recommended_entry=65000.0,
             recommended_stop=63700.0,
             recommended_target=67600.0,
-        )
+        ),
     )
     risk = MagicMock()
     risk.calculate_position_size.return_value = PositionSizeResult(
@@ -383,6 +420,7 @@ async def test_real_order_quantity_is_capped_to_max_notional(monkeypatch) -> Non
         "src.application.services.autonomous_engine.get_settings",
         lambda: SimpleNamespace(
             real_trading_max_notional=Decimal("50"),
+            llm_scan_mode=LLMScanMode.SAVINGS,
             correlation_guard_enabled=False,
         ),
     )
@@ -412,7 +450,8 @@ async def test_real_entry_is_suspended_when_reconciliation_fails(monkeypatch) ->
     market = MagicMock()
     market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
     agent = MagicMock()
-    agent.run_analysis = AsyncMock(
+    _committee(
+        agent,
         return_value=CoordinatorDecision(
             symbol="BTC/USDT",
             final_signal=SignalDirection.BUY,
@@ -423,7 +462,7 @@ async def test_real_entry_is_suspended_when_reconciliation_fails(monkeypatch) ->
             recommended_entry=65000.0,
             recommended_stop=63700.0,
             recommended_target=67600.0,
-        )
+        ),
     )
     live = MagicMock()
     live.get_portfolio.return_value = Portfolio(
@@ -456,6 +495,7 @@ async def test_real_entry_is_suspended_when_reconciliation_fails(monkeypatch) ->
         "src.application.services.autonomous_engine.get_settings",
         lambda: SimpleNamespace(
             real_trading_max_notional=Decimal("50"),
+            llm_scan_mode=LLMScanMode.SAVINGS,
             correlation_guard_enabled=False,
         ),
     )
@@ -485,7 +525,7 @@ async def test_real_exit_is_not_blocked_by_reconciliation_failure() -> None:
     market = MagicMock()
     market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
     agent = MagicMock()
-    agent.run_analysis = AsyncMock(return_value=_sell_decision())
+    _committee(agent, return_value=_sell_decision())
     position = SimpleNamespace(
         id="tracked-position",
         symbol="BTC/USDT",
@@ -534,14 +574,15 @@ async def test_committee_analysis_is_throttled_between_fast_cycles() -> None:
     market = MagicMock()
     market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
     agent = MagicMock()
-    agent.run_analysis = AsyncMock(
+    _committee(
+        agent,
         return_value=CoordinatorDecision(
             symbol="BTC/USDT",
             final_signal=SignalDirection.NEUTRAL,
             aggregate_confidence=0.4,
             consensus_level=0.5,
             reasoning_summary="Mixed signals across agents; no clear directional edge detected right now.",
-        )
+        ),
     )
 
     engine = AutonomousEngine(agent_service=agent, market_service=market)
@@ -562,14 +603,15 @@ async def test_zero_analysis_interval_runs_the_committee_every_cycle() -> None:
     market = MagicMock()
     market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
     agent = MagicMock()
-    agent.run_analysis = AsyncMock(
+    _committee(
+        agent,
         return_value=CoordinatorDecision(
             symbol="BTC/USDT",
             final_signal=SignalDirection.NEUTRAL,
             aggregate_confidence=0.4,
             consensus_level=0.5,
             reasoning_summary="Mixed signals across agents; no clear directional edge detected right now.",
-        )
+        ),
     )
 
     engine = AutonomousEngine(agent_service=agent, market_service=market)
@@ -612,6 +654,7 @@ _PATTERN_C = [0.01, 0.01, -0.01, -0.01, 0.01, 0.01, -0.01, -0.01]
 def _correlation_settings(**overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "real_trading_max_notional": Decimal("50"),
+        "llm_scan_mode": LLMScanMode.SAVINGS,
         "correlation_guard_enabled": True,
         "correlation_reduce_threshold": 0.75,
         "correlation_block_threshold": 0.95,
@@ -636,7 +679,8 @@ def _paper_guard_fixture(
         )
     )
     agent = MagicMock()
-    agent.run_analysis = AsyncMock(
+    _committee(
+        agent,
         return_value=CoordinatorDecision(
             symbol="BTC/USDT",
             final_signal=SignalDirection.BUY,
@@ -647,7 +691,7 @@ def _paper_guard_fixture(
             recommended_entry=65000.0,
             recommended_stop=63700.0,
             recommended_target=67600.0,
-        )
+        ),
     )
     risk = MagicMock()
     risk.calculate_position_size.return_value = PositionSizeResult(
@@ -830,7 +874,7 @@ async def test_engine_scans_multiple_markets_and_analyzes_the_best_allowed() -> 
         side_effect=lambda symbol: Decimal("65000") if symbol == "BTC/USDT" else Decimal("3000")
     )
     agent = MagicMock()
-    agent.run_analysis = AsyncMock(return_value=_neutral_decision("ETH/USDT"))
+    _committee(agent, return_value=_neutral_decision("ETH/USDT"))
 
     engine = AutonomousEngine(agent_service=agent, market_service=market)
     engine.config = AutonomousBotConfig(
@@ -856,7 +900,7 @@ async def test_engine_tracks_and_exits_positions_on_other_symbols() -> None:
         side_effect=lambda symbol: Decimal("65000") if symbol == "BTC/USDT" else Decimal("1000")
     )
     agent = MagicMock()
-    agent.run_analysis = AsyncMock(return_value=_neutral_decision("BTC/USDT"))
+    _committee(agent, return_value=_neutral_decision("BTC/USDT"))
 
     position = Position(
         symbol="ETH/USDT",
@@ -922,7 +966,7 @@ async def test_real_allowlist_restricts_which_scanned_market_is_analyzed(
     market.get_candles = AsyncMock(side_effect=get_candles)
     market.get_latest_price = AsyncMock(return_value=Decimal("3000"))
     agent = MagicMock()
-    agent.run_analysis = AsyncMock(return_value=_neutral_decision("SOL/USDT"))
+    _committee(agent, return_value=_neutral_decision("SOL/USDT"))
     live = MagicMock()
     live.get_positions.return_value = []
 
@@ -931,6 +975,7 @@ async def test_real_allowlist_restricts_which_scanned_market_is_analyzed(
         lambda: SimpleNamespace(
             real_trading_allowed_symbols=["BTC/USDT", "SOL/USDT"],
             real_trading_max_notional=Decimal("50"),
+            llm_scan_mode=LLMScanMode.SAVINGS,
             correlation_guard_enabled=False,
         ),
     )
@@ -972,7 +1017,7 @@ async def test_real_engine_skips_analysis_when_no_scanned_market_is_allowed(
     market.get_candles = AsyncMock(side_effect=get_candles)
     market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
     agent = MagicMock()
-    agent.run_analysis = AsyncMock(return_value=_neutral_decision("BTC/USDT"))
+    _committee(agent, return_value=_neutral_decision("BTC/USDT"))
     live = MagicMock()
     live.get_positions.return_value = []
 
@@ -981,6 +1026,7 @@ async def test_real_engine_skips_analysis_when_no_scanned_market_is_allowed(
         lambda: SimpleNamespace(
             real_trading_allowed_symbols=["XRP/USDT"],
             real_trading_max_notional=Decimal("50"),
+            llm_scan_mode=LLMScanMode.SAVINGS,
             correlation_guard_enabled=False,
         ),
     )
@@ -1070,13 +1116,13 @@ async def test_cycle_never_reuses_the_request_scoped_services() -> None:
     stale_market.get_candles = AsyncMock(side_effect=RuntimeError("session is closed"))
     stale_market.get_latest_price = AsyncMock(side_effect=RuntimeError("session is closed"))
     stale_agent = MagicMock()
-    stale_agent.run_analysis = AsyncMock(side_effect=RuntimeError("session is closed"))
+    _committee(stale_agent, side_effect=RuntimeError("session is closed"))
 
     fresh_market = MagicMock()
     fresh_market.get_candles = AsyncMock(return_value=_trend_candles(1.0, "BTC/USDT"))
     fresh_market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
     fresh_agent = MagicMock()
-    fresh_agent.run_analysis = AsyncMock(return_value=_neutral_decision("BTC/USDT"))
+    _committee(fresh_agent, return_value=_neutral_decision("BTC/USDT"))
 
     lifecycle: list[str] = []
 

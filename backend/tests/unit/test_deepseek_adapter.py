@@ -18,6 +18,7 @@ from src.shared.config.settings import (
     AnthropicSettings,
     DeepSeekSettings,
     GeminiSettings,
+    GroqSettings,
     LLMProvider,
     OllamaSettings,
     OpenAISettings,
@@ -113,6 +114,7 @@ def test_factory_registers_deepseek_when_key_is_configured(
         openrouter=OpenRouterSettings(_env_file=None, api_key=""),
         ollama=OllamaSettings(_env_file=None, enabled=False),
         deepseek=DeepSeekSettings(_env_file=None, api_key="deepseek-key"),
+        groq=GroqSettings(_env_file=None, api_key=""),
     )
     fake_adapter = SimpleNamespace(provider=LLMProvider.DEEPSEEK)
     monkeypatch.setattr(deepseek_module, "DeepSeekAdapter", lambda: fake_adapter)
