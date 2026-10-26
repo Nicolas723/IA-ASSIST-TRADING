@@ -2,6 +2,7 @@
 Unit tests for AutonomousEngine and Autonomous Bot lifecycle.
 """
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 
 from src.application.services.autonomous_engine import (
     AutonomousBotConfig,
+    AutonomousCycleServices,
     AutonomousEngine,
 )
 from src.domain.agents.entities import (
@@ -1053,3 +1055,58 @@ async def test_emergency_kill_uses_each_position_mark_not_the_last_tick() -> Non
     await engine.emergency_kill()
 
     assert trading.close_position.call_args.kwargs["current_market_price"] == 2000.0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_cycle_never_reuses_the_request_scoped_services() -> None:
+    """A background cycle must not touch the session the request just closed.
+
+    Regression for ``IllegalStateChangeError``: the engine used to keep the
+    ``MarketDataService``/``AgentService`` injected by ``/autonomous/start``,
+    whose ``AsyncSession`` FastAPI closes as soon as the response is sent.
+    """
+    stale_market = MagicMock()
+    stale_market.get_candles = AsyncMock(side_effect=RuntimeError("session is closed"))
+    stale_market.get_latest_price = AsyncMock(side_effect=RuntimeError("session is closed"))
+    stale_agent = MagicMock()
+    stale_agent.run_analysis = AsyncMock(side_effect=RuntimeError("session is closed"))
+
+    fresh_market = MagicMock()
+    fresh_market.get_candles = AsyncMock(return_value=_trend_candles(1.0, "BTC/USDT"))
+    fresh_market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
+    fresh_agent = MagicMock()
+    fresh_agent.run_analysis = AsyncMock(return_value=_neutral_decision("BTC/USDT"))
+
+    lifecycle: list[str] = []
+
+    @asynccontextmanager
+    async def factory():
+        lifecycle.append("open")
+        try:
+            yield AutonomousCycleServices(
+                market_service=fresh_market,
+                agent_service=fresh_agent,
+            )
+        finally:
+            lifecycle.append("close")
+
+    engine = AutonomousEngine(
+        agent_service=stale_agent,
+        market_service=stale_market,
+        cycle_service_factory=factory,
+    )
+    engine.config = AutonomousBotConfig(
+        symbol="BTC/USDT",
+        scan_symbols=["BTC/USDT"],
+        llm_analysis_interval_seconds=0,
+    )
+
+    await engine._execute_cycle()
+
+    assert lifecycle == ["open", "close"]
+    assert engine.total_cycles == 1
+    fresh_agent.run_analysis.assert_awaited_once()
+    stale_agent.run_analysis.assert_not_called()
+    stale_market.get_candles.assert_not_called()
+    stale_market.get_latest_price.assert_not_called()

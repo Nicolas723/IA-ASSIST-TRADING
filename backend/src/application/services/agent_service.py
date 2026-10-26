@@ -85,12 +85,17 @@ class AgentService:
         market_service: MarketDataService | None = None,
         decision_repository: DecisionRepositoryPort | None = None,
         research_repository: ResearchContextPort | None = None,
+        decision_history: list[CoordinatorDecision] | None = None,
     ) -> None:
         self.coordinator = coordinator or AgentCoordinator()
         self.market_service = market_service
         self.decision_repository = decision_repository
         self.research_repository = research_repository
-        self._decision_history: list[CoordinatorDecision] = []
+        # Background cycles build a short-lived AgentService per cycle. Passing
+        # the shared list keeps the in-memory audit trail continuous for the UI.
+        self._decision_history: list[CoordinatorDecision] = (
+            decision_history if decision_history is not None else []
+        )
 
     def begin_cycle(self) -> None:
         """Reset the per-cycle LLM token counter before a new analysis run."""

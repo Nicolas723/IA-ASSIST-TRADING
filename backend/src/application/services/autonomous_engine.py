@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -53,6 +54,23 @@ logger = get_logger(__name__)
 # Injected by DI: persists an executed order to the durable journal.
 JournalCallback = Callable[["Order", "TradingService"], Awaitable[bool]]
 LiveJournalCallback = Callable[["Order"], Awaitable[bool]]
+
+
+@dataclass(slots=True)
+class AutonomousCycleServices:
+    """Services built for exactly one background cycle.
+
+    FastAPI closes a request's ``AsyncSession`` as soon as the response is sent,
+    but the daemon outlives that request. The engine therefore asks the DI layer
+    for a fresh, request-independent bundle per cycle instead of reusing the
+    session-bound services that started it.
+    """
+
+    market_service: MarketDataService
+    agent_service: AgentService
+
+
+CycleServiceFactory = Callable[[], contextlib.AbstractAsyncContextManager[AutonomousCycleServices]]
 
 
 class AutonomousBotConfig(BaseModel):
@@ -151,6 +169,7 @@ class AutonomousEngine:
         live_trading_service: LiveTradingService | None = None,
         journal_real: LiveJournalCallback | None = None,
         alert_service: AlertService | None = None,
+        cycle_service_factory: CycleServiceFactory | None = None,
     ) -> None:
         self.agent_service = agent_service
         self.trading_service = trading_service
@@ -160,6 +179,9 @@ class AutonomousEngine:
         self.live_trading_service = live_trading_service
         self.journal_real = journal_real
         self.alert_service = alert_service
+        # Background cycles must not reuse request-scoped sessions. When the
+        # DI layer provides this factory, every cycle gets its own services.
+        self._cycle_service_factory = cycle_service_factory
 
         self.is_running = False
         self.config = AutonomousBotConfig()
@@ -223,12 +245,17 @@ class AutonomousEngine:
             return {self.config.symbol}
         return {normalize_symbol(symbol) for symbol in raw}
 
-    async def _latest_price(self, symbol: str) -> float | None:
+    async def _latest_price(
+        self,
+        symbol: str,
+        market_service: MarketDataService | None = None,
+    ) -> float | None:
         """Return the real-time ticker price, falling back to the last candle."""
-        if self.market_service is None:
+        service = market_service or self.market_service
+        if service is None:
             return None
         try:
-            return float(await self.market_service.get_latest_price(symbol))
+            return float(await service.get_latest_price(symbol))
         except Exception as exc:
             logger.warning(
                 "ticker_price_unavailable_falling_back_to_candle",
@@ -236,7 +263,7 @@ class AutonomousEngine:
                 error=str(exc),
             )
         try:
-            candles = await self.market_service.get_candles(
+            candles = await service.get_candles(
                 symbol=symbol,
                 timeframe=Timeframe(self.config.timeframe),
                 limit=100,
@@ -248,12 +275,17 @@ class AutonomousEngine:
             logger.warning("candle_price_unavailable", symbol=symbol, error=str(exc))
             return None
 
-    async def _pre_scan(self, universe: list[str]) -> PreScanResult | None:
+    async def _pre_scan(
+        self,
+        universe: list[str],
+        market_service: MarketDataService | None = None,
+    ) -> PreScanResult | None:
         """Run the deterministic multi-market ranking (never raises)."""
-        if self.market_service is None or len(universe) < 2:
+        service = market_service or self.market_service
+        if service is None or len(universe) < 2:
             return None
         try:
-            result = await MarketPreScanService(self.market_service).scan(
+            result = await MarketPreScanService(service).scan(
                 universe,
                 timeframe=self.config.timeframe,
                 lookback_candles=24,
@@ -321,6 +353,7 @@ class AutonomousEngine:
         *,
         symbol: str,
         open_positions: list[Position],
+        market_service: MarketDataService | None = None,
     ) -> CorrelationGuardDecision:
         """Measure positive correlation with the other open positions.
 
@@ -351,7 +384,8 @@ class AutonomousEngine:
                 sample_size=0,
                 reason="No other open position to compare.",
             )
-        if self.market_service is None:
+        data_service = market_service or self.market_service
+        if data_service is None:
             return CorrelationGuardDecision(
                 action="unavailable",
                 size_multiplier=1.0,
@@ -364,12 +398,12 @@ class AutonomousEngine:
         timeframe = Timeframe(self.config.timeframe)
         limit = int(settings.correlation_lookback) + 1
         try:
-            candidate_candles = await self.market_service.get_candles(
+            candidate_candles = await data_service.get_candles(
                 symbol=symbol, timeframe=timeframe, limit=limit
             )
             existing_candles = {}
             for other in other_symbols:
-                existing_candles[other] = await self.market_service.get_candles(
+                existing_candles[other] = await data_service.get_candles(
                     symbol=other, timeframe=timeframe, limit=limit
                 )
         except Exception as exc:
@@ -669,12 +703,31 @@ class AutonomousEngine:
                 break
 
     async def _execute_cycle(self) -> None:
+        """Run one cycle using services that outlive the starting request.
+
+        The API builds its services around the request's ``AsyncSession`` and
+        closes it when the response is sent. A background cycle must therefore
+        obtain a fresh bundle instead of touching a session that is already
+        closing; direct construction (tests, scripts) keeps the injected ones.
+        """
         self.total_cycles += 1
         self.last_cycle_at = datetime.now(tz=UTC)
+        factory = self._cycle_service_factory
+        if factory is None:
+            await self._run_cycle(self.market_service, self.agent_service)
+            return
+        async with factory() as services:
+            await self._run_cycle(services.market_service, services.agent_service)
+
+    async def _run_cycle(
+        self,
+        market_service: MarketDataService | None,
+        agent_service: AgentService | None,
+    ) -> None:
         primary_symbol = self.config.symbol
         universe = self.config.scan_symbols or [primary_symbol]
 
-        if not self.market_service:
+        if not market_service:
             self.add_log(level="ERROR", message="MarketDataService not bound to AutonomousEngine")
             return
 
@@ -682,7 +735,7 @@ class AutonomousEngine:
         #    only runs on the best candidate that the execution allowlist
         #    permits; every other market is still measured and logged.
         symbol = primary_symbol
-        scan_result = await self._pre_scan(universe)
+        scan_result = await self._pre_scan(universe, market_service)
         allowed = self._allowed_symbols()
         if scan_result is not None:
             eligible = [
@@ -717,7 +770,7 @@ class AutonomousEngine:
         # 2. Fetch the selected market's REAL-TIME price (ticker 'last'), not
         #    the last closed candle. A 1h candle only updates once per hour, so
         #    `candles[-1].close` would stay frozen while the chart keeps moving.
-        current_price = await self._latest_price(symbol)
+        current_price = await self._latest_price(symbol, market_service)
         if current_price is None:
             self.add_log(
                 level="WARNING",
@@ -748,7 +801,7 @@ class AutonomousEngine:
                     continue
                 tick: float | None = None
                 try:
-                    tick = float(await self.market_service.get_latest_price(pos.symbol))
+                    tick = float(await market_service.get_latest_price(pos.symbol))
                 except Exception as exc:
                     logger.debug(
                         "position_ticker_unavailable",
@@ -842,7 +895,7 @@ class AutonomousEngine:
             return
 
         # 5. Multi-Agent Committee Consensus Evaluation
-        if not self.agent_service:
+        if not agent_service:
             self.add_log(level="WARNING", message="AgentService not bound to AutonomousEngine")
             return
 
@@ -864,7 +917,7 @@ class AutonomousEngine:
 
         # AgentService.run_analysis starts a fresh per-cycle LLM budget itself,
         # so both the engine and the manual /agents/analyze endpoint get one.
-        decision: CoordinatorDecision = await self.agent_service.run_analysis(
+        decision: CoordinatorDecision = await agent_service.run_analysis(
             symbol=symbol,
             timeframe=self.config.timeframe,
             lookback_candles=100,
@@ -1018,6 +1071,7 @@ class AutonomousEngine:
             correlation_decision = await self._correlation_guard_for(
                 symbol=symbol,
                 open_positions=open_positions,
+                market_service=market_service,
             )
             if correlation_decision.blocks:
                 self.add_log(

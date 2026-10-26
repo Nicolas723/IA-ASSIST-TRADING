@@ -4,6 +4,8 @@ API Dependencies — FastAPI Dependency Injection.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Annotated
 
 from fastapi import Depends
@@ -11,7 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.services.agent_service import AgentService
 from src.application.services.alert_service import AlertService
-from src.application.services.autonomous_engine import AutonomousEngine
+from src.application.services.autonomous_engine import (
+    AutonomousCycleServices,
+    AutonomousEngine,
+)
 from src.application.services.concentration_service import ConcentrationService
 from src.application.services.indicator_service import IndicatorService
 from src.application.services.journal import (
@@ -42,7 +47,7 @@ from src.infrastructure.exchange.paper import PaperExchange
 from src.infrastructure.llm.factory import create_llm_gateway
 from src.infrastructure.llm.gateway import LLMGateway
 from src.infrastructure.market_data.rest_fetcher import RetryingMarketDataFetcher
-from src.infrastructure.persistence.database import get_db
+from src.infrastructure.persistence.database import get_db, get_db_session
 from src.infrastructure.persistence.repositories.candle_repository import TimescaleCandleRepository
 from src.infrastructure.persistence.repositories.decision_repository import SqlDecisionRepository
 from src.infrastructure.persistence.repositories.research_repository import SqlResearchRepository
@@ -55,7 +60,12 @@ from src.shared.config.settings import get_settings
 from src.shared.plugins.registry import PluginRegistry
 
 if TYPE_CHECKING:
+    from src.domain.agents.entities import CoordinatorDecision
     from src.domain.trading.entities import Order
+
+# Shared in-memory audit trail. Request handlers and per-cycle background
+# services both append to it so the UI history does not reset every cycle.
+_decision_history: list[CoordinatorDecision] = []
 
 # Single shared adapter instance
 _market_data_adapter: CcxtBaseAdapter | None = None
@@ -220,6 +230,7 @@ def get_agent_service(
             market_service=market_service,
             decision_repository=decision_repository,
             research_repository=research_repository,
+            decision_history=_decision_history,
         )
     else:
         _agent_service.market_service = market_service
@@ -285,31 +296,58 @@ def get_live_trading_service() -> LiveTradingService:
     return _live_trading_service
 
 
+@asynccontextmanager
+async def autonomous_cycle_services() -> AsyncIterator[AutonomousCycleServices]:
+    """Build services for exactly one background cycle.
+
+    The daemon outlives the HTTP request that starts it. Reusing the request's
+    ``AsyncSession`` caused ``IllegalStateChangeError`` because FastAPI closed
+    the session while the cycle was still using it. Opening a session here gives
+    every cycle an independent, fully owned connection.
+    """
+    async with get_db_session() as session:
+        market_service = MarketDataService(
+            exchange=get_market_data_fetcher(),
+            repository=TimescaleCandleRepository(session),
+        )
+        agent_service = AgentService(
+            coordinator=AgentCoordinator(llm_gateway=get_llm_gateway()),
+            market_service=market_service,
+            decision_repository=SqlDecisionRepository(session),
+            research_repository=SqlResearchRepository(session),
+            decision_history=_decision_history,
+        )
+        yield AutonomousCycleServices(
+            market_service=market_service,
+            agent_service=agent_service,
+        )
+
+
 def get_autonomous_engine(
-    agent_service: Annotated[AgentService, Depends(get_agent_service)],
     trading_service: Annotated[TradingService, Depends(get_trading_service)],
-    market_service: Annotated[MarketDataService, Depends(get_market_data_service)],
     risk_service: Annotated[RiskService, Depends(get_risk_service)],
 ) -> AutonomousEngine:
+    """Singleton daemon that owns its database sessions per cycle.
+
+    It deliberately does not depend on request-scoped services: those are bound
+    to a session FastAPI closes as soon as the response is sent.
+    """
     global _autonomous_engine
     if _autonomous_engine is None:
         _autonomous_engine = AutonomousEngine(
-            agent_service=agent_service,
             trading_service=trading_service,
-            market_service=market_service,
             risk_service=risk_service,
             journal=persist_order_to_database,
             live_trading_service=get_live_trading_service(),
             journal_real=_persist_live_order,
             alert_service=get_alert_service(),
+            cycle_service_factory=autonomous_cycle_services,
         )
     else:
-        _autonomous_engine.agent_service = agent_service
         _autonomous_engine.trading_service = trading_service
-        _autonomous_engine.market_service = market_service
         _autonomous_engine.risk_service = risk_service
-        _autonomous_engine.journal = persist_order_to_database
         _autonomous_engine.live_trading_service = get_live_trading_service()
+        _autonomous_engine.journal = persist_order_to_database
         _autonomous_engine.journal_real = _persist_live_order
         _autonomous_engine.alert_service = get_alert_service()
     return _autonomous_engine
