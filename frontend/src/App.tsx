@@ -357,6 +357,7 @@ interface AutonomousLogEntry {
 
 interface AutonomousBotConfig {
   symbol: string;
+  scan_symbols?: string[];
   timeframe: string;
   interval_seconds: number;
   llm_analysis_interval_seconds?: number;
@@ -380,6 +381,7 @@ interface AutonomousBotStatus {
   last_cycle_at?: string | null;
   last_analysis_at?: string | null;
   last_price?: number | null;
+  last_symbol?: string | null;
   last_signal?: string | null;
   last_confidence?: number | null;
   last_error?: string | null;
@@ -1478,6 +1480,18 @@ export default function App() {
                       ? `último: ${new Date(autonomousStatus.last_analysis_at).toLocaleTimeString()}`
                       : 'aún sin ejecutar en esta sesión'}
                     {' · '}las salidas y el SL/TP se revisan cada {autonomousStatus?.config.interval_seconds}s
+                  </div>
+                )}
+
+                {Boolean(autonomousStatus?.config.scan_symbols?.length) && (
+                  <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '4px' }}>
+                    Escaneo multimercado:{' '}
+                    <strong style={{ color: '#cbd5e1' }}>
+                      {(autonomousStatus?.config.scan_symbols || []).join(' · ')}
+                    </strong>
+                    {autonomousStatus?.last_symbol
+                      ? ` · último analizado: ${autonomousStatus.last_symbol}`
+                      : ''}
                   </div>
                 )}
 

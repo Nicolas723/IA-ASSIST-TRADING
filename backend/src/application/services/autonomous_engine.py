@@ -11,11 +11,16 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.application.services.correlation_guard import (
     CorrelationGuardDecision,
     evaluate_correlation_guard,
+)
+from src.application.services.market_prescan_service import (
+    MarketPreScanService,
+    PreScanResult,
+    normalize_symbol,
 )
 from src.domain.market.entities import Timeframe
 from src.domain.notifications.entities import AlertSeverity
@@ -52,6 +57,10 @@ LiveJournalCallback = Callable[["Order"], Awaitable[bool]]
 
 class AutonomousBotConfig(BaseModel):
     symbol: str = "BTC/USDT"
+    # Markets considered by the deterministic pre-scan. The primary `symbol` is
+    # always included. An empty list means "use SHADOW_SCAN_SYMBOLS" when the
+    # session starts; the engine then analyzes only the best allowed market.
+    scan_symbols: list[str] = Field(default_factory=list, max_length=10)
     timeframe: str = "1h"
     interval_seconds: int = Field(default=60, ge=2, le=3600)
     # Minimum seconds between full LLM committee runs. Position tracking and
@@ -66,6 +75,28 @@ class AutonomousBotConfig(BaseModel):
     auto_execute: bool = True
     stop_loss_pct: float = Field(default=2.0, ge=0.5, le=15.0)
     take_profit_pct: float = Field(default=4.0, ge=0.5, le=30.0)
+
+    @field_validator("symbol")
+    @classmethod
+    def normalize_primary_symbol(cls, value: str) -> str:
+        symbol = normalize_symbol(value)
+        if "/" not in symbol:
+            raise ValueError(f"Símbolo inválido: {value!r}. Usa formato BASE/QUOTE.")
+        return symbol
+
+    @field_validator("scan_symbols")
+    @classmethod
+    def normalize_scan_symbols(cls, values: list[str]) -> list[str]:
+        symbols: list[str] = []
+        for raw in values:
+            symbol = normalize_symbol(raw)
+            if not symbol:
+                continue
+            if "/" not in symbol:
+                raise ValueError(f"Símbolo inválido: {raw!r}. Usa formato BASE/QUOTE.")
+            if symbol not in symbols:
+                symbols.append(symbol)
+        return symbols
 
     @model_validator(mode="after")
     def validate_reward_risk_ratio(self) -> AutonomousBotConfig:
@@ -97,6 +128,7 @@ class AutonomousBotStatus(BaseModel):
     last_cycle_at: datetime | None = None
     last_analysis_at: datetime | None = None
     last_price: float | None = None
+    last_symbol: str | None = None
     last_signal: str | None = None
     last_confidence: float | None = None
     last_error: str | None = None
@@ -136,6 +168,7 @@ class AutonomousEngine:
         self.started_at: datetime | None = None
         self.last_cycle_at: datetime | None = None
         self.last_price: float | None = None
+        self.last_symbol: str | None = None
         self.last_signal: str | None = None
         self.last_confidence: float | None = None
         self.last_error: str | None = None
@@ -157,6 +190,131 @@ class AutonomousEngine:
         if self._mode() == ExecutionMode.REAL:
             return self.live_trading_service
         return self.trading_service
+
+    def _resolve_scan_universe(self, requested: list[str]) -> list[str]:
+        """Normalize the requested universe and always include the primary symbol.
+
+        An empty request means "use the configured shadow-scan universe". Passing
+        the primary symbol alone keeps the legacy single-market behaviour and
+        avoids extra market-data calls.
+        """
+        raw = list(requested)
+        if not raw:
+            raw = [self.config.symbol, *get_settings().shadow_scan_symbols]
+        universe: list[str] = []
+        for item in raw:
+            symbol = normalize_symbol(item)
+            if "/" not in symbol:
+                continue
+            if symbol not in universe:
+                universe.append(symbol)
+        if self.config.symbol not in universe:
+            universe.insert(0, self.config.symbol)
+        return universe[:10]
+
+    def _allowed_symbols(self) -> set[str]:
+        """Symbols eligible for entry analysis in the current execution mode."""
+        if self._mode() != ExecutionMode.REAL:
+            return set(self.config.scan_symbols or [self.config.symbol])
+        raw = getattr(get_settings(), "real_trading_allowed_symbols", None)
+        if raw is None:
+            # Conservative fallback: never widen execution when the setting is
+            # missing from an injected/test configuration.
+            return {self.config.symbol}
+        return {normalize_symbol(symbol) for symbol in raw}
+
+    async def _latest_price(self, symbol: str) -> float | None:
+        """Return the real-time ticker price, falling back to the last candle."""
+        if self.market_service is None:
+            return None
+        try:
+            return float(await self.market_service.get_latest_price(symbol))
+        except Exception as exc:
+            logger.warning(
+                "ticker_price_unavailable_falling_back_to_candle",
+                symbol=symbol,
+                error=str(exc),
+            )
+        try:
+            candles = await self.market_service.get_candles(
+                symbol=symbol,
+                timeframe=Timeframe(self.config.timeframe),
+                limit=100,
+            )
+            if not candles:
+                return None
+            return float(candles[-1].close)
+        except Exception as exc:
+            logger.warning("candle_price_unavailable", symbol=symbol, error=str(exc))
+            return None
+
+    async def _pre_scan(self, universe: list[str]) -> PreScanResult | None:
+        """Run the deterministic multi-market ranking (never raises)."""
+        if self.market_service is None or len(universe) < 2:
+            return None
+        try:
+            result = await MarketPreScanService(self.market_service).scan(
+                universe,
+                timeframe=self.config.timeframe,
+                lookback_candles=24,
+            )
+        except Exception as exc:
+            logger.warning("autonomous_prescan_failed", error=str(exc))
+            self.add_log(
+                level="WARNING",
+                message=f"No se pudo completar el escaneo multimercado: {exc}",
+            )
+            return None
+
+        observed = [candidate for candidate in result.candidates if candidate.rank is not None]
+        if not observed:
+            self.add_log(
+                level="WARNING",
+                message=(
+                    f"Escaneo de {len(result.candidates)} mercados sin datos "
+                    "suficientes; se analiza el símbolo principal."
+                ),
+            )
+            return result
+
+        ordered = result.ranked
+        summary = " · ".join(
+            f"{candidate.symbol} {candidate.lookback_return_pct:+.2f}% "
+            f"({candidate.trend_regime or 'sin régimen'})"
+            for candidate in ordered
+            if candidate.lookback_return_pct is not None
+        )
+        self.add_log(
+            level="INFO",
+            message=(
+                f"🔎 Escaneo {len(result.candidates)} mercados ({result.timeframe}): {summary}."
+            ),
+            symbol=ordered[0].symbol,
+        )
+        return result
+
+    @staticmethod
+    def _exit_reason(pos: Position, price: float) -> tuple[bool, str]:
+        """Return whether a position hit its local stop-loss or take-profit."""
+        if pos.side == PositionSide.LONG:
+            if pos.stop_loss and price <= float(pos.stop_loss):
+                return True, (
+                    f"Stop-Loss triggered at ${price:,.2f} (SL: ${float(pos.stop_loss):,.2f})"
+                )
+            if pos.take_profit and price >= float(pos.take_profit):
+                return True, (
+                    f"Take-Profit triggered at ${price:,.2f} (TP: ${float(pos.take_profit):,.2f})"
+                )
+        elif pos.side == PositionSide.SHORT:
+            if pos.stop_loss and price >= float(pos.stop_loss):
+                return True, (
+                    f"Stop-Loss triggered at ${price:,.2f} (SL: ${float(pos.stop_loss):,.2f})"
+                )
+            if pos.take_profit and price <= float(pos.take_profit):
+                return True, (
+                    f"Take-Profit triggered at ${price:,.2f} (TP: ${float(pos.take_profit):,.2f})"
+                )
+        return False, ""
 
     async def _correlation_guard_for(
         self,
@@ -262,10 +420,11 @@ class AutonomousEngine:
         confidence_pct: float | None = None,
         price: float | None = None,
         order_id: str | None = None,
+        symbol: str | None = None,
     ) -> None:
         entry = AutonomousLogEntry(
             cycle=self.total_cycles,
-            symbol=self.config.symbol,
+            symbol=symbol or self.last_symbol or self.config.symbol,
             level=level,
             message=message,
             signal=signal,
@@ -300,6 +459,7 @@ class AutonomousEngine:
             last_cycle_at=self.last_cycle_at,
             last_analysis_at=self._last_analysis_at,
             last_price=self.last_price,
+            last_symbol=self.last_symbol,
             last_signal=self.last_signal,
             last_confidence=self.last_confidence,
             last_error=self.last_error,
@@ -313,6 +473,12 @@ class AutonomousEngine:
 
         if config:
             self.config = config
+
+        # Resolve the scan universe once, at session start, so the status
+        # endpoint shows exactly what the daemon will scan. An empty list falls
+        # back to the configured shadow-scan universe; the primary symbol is
+        # always included.
+        self.config.scan_symbols = self._resolve_scan_universe(self.config.scan_symbols)
 
         mode = self._mode()
         if mode == ExecutionMode.REAL:
@@ -332,11 +498,30 @@ class AutonomousEngine:
         self.is_running = True
         self.started_at = datetime.now(tz=UTC)
         self.last_error = None
+        self.last_symbol = None
         self._last_analysis_at = None
         self.add_log(
             level="INFO",
             message=f"🚀 Autonomous Trading Daemon started for {self.config.symbol} ({self.config.timeframe}) every {self.config.interval_seconds}s.",
         )
+        self.add_log(
+            level="INFO",
+            message=(
+                f"🔎 Multi-market scan universe ({len(self.config.scan_symbols)}): "
+                f"{', '.join(self.config.scan_symbols)}. One candidate is sent to "
+                "the committee per analysis; execution still requires the allowlist."
+            ),
+        )
+        if mode == ExecutionMode.REAL:
+            allowed = sorted(self._allowed_symbols())
+            self.add_log(
+                level="INFO",
+                message=(
+                    f"Allowlist REAL activa: {', '.join(allowed) or 'ninguna'}. "
+                    f"Analizables: "
+                    f"{', '.join(s for s in self.config.scan_symbols if s in allowed) or 'ninguno'}."
+                ),
+            )
         if self.config.llm_analysis_interval_seconds > 0:
             self.add_log(
                 level="INFO",
@@ -414,15 +599,18 @@ class AutonomousEngine:
             try:
                 positions = service.get_positions(mode)
                 for pos in positions:
-                    # Prefer the last live tick; fall back to the position's own
-                    # current price. Never invent a hardcoded price.
-                    close_price = self.last_price
-                    if close_price is None and pos.current_price > 0:
-                        close_price = float(pos.current_price)
+                    # Prefer the position's own last mark; never close an ETH
+                    # position at a BTC price in a multi-market session.
+                    close_price: float | None = (
+                        float(pos.current_price) if pos.current_price > 0 else None
+                    )
+                    if close_price is None and pos.symbol == self.last_symbol:
+                        close_price = self.last_price
                     if close_price is None:
                         logger.error(
                             "emergency_kill_missing_price",
                             position_id=str(pos.id),
+                            symbol=pos.symbol,
                         )
                         continue
 
@@ -483,112 +671,177 @@ class AutonomousEngine:
     async def _execute_cycle(self) -> None:
         self.total_cycles += 1
         self.last_cycle_at = datetime.now(tz=UTC)
-        symbol = self.config.symbol.replace("-", "/").replace("_", "/").upper()
+        primary_symbol = self.config.symbol
+        universe = self.config.scan_symbols or [primary_symbol]
 
         if not self.market_service:
             self.add_log(level="ERROR", message="MarketDataService not bound to AutonomousEngine")
             return
 
-        # 1. Fetch current REAL-TIME price (ticker 'last'), not the last closed candle.
-        #    A 1h candle only updates once per hour, so `candles[-1].close` would stay
-        #    frozen while the chart keeps moving. We fall back to the candle close only
-        #    if the ticker is temporarily unavailable, so the daemon never crashes.
-        current_price: float | None = None
-        try:
-            current_price = float(await self.market_service.get_latest_price(symbol))
-        except Exception as ticker_err:
-            logger.warning(
-                "ticker_price_unavailable_falling_back_to_candle",
-                symbol=symbol,
-                error=str(ticker_err),
-            )
-
-        if current_price is None:
-            try:
-                candles = await self.market_service.get_candles(
+        # 1. Deterministic multi-market pre-scan. The expensive LLM committee
+        #    only runs on the best candidate that the execution allowlist
+        #    permits; every other market is still measured and logged.
+        symbol = primary_symbol
+        scan_result = await self._pre_scan(universe)
+        allowed = self._allowed_symbols()
+        if scan_result is not None:
+            eligible = [
+                candidate for candidate in scan_result.ranked if candidate.symbol in allowed
+            ]
+            if eligible:
+                chosen = eligible[0]
+                symbol = chosen.symbol
+                self.add_log(
+                    level="INFO",
+                    message=(
+                        f"Candidato elegido: {symbol} "
+                        f"(score {chosen.selection_score:+.2f}; "
+                        f"{chosen.lookback_return_pct:+.2f}% en "
+                        f"{scan_result.lookback_candles} velas; "
+                        f"{chosen.trend_regime or 'sin régimen'}). "
+                        f"Elegibles por allowlist: {len(eligible)}/{len(scan_result.ranked)}."
+                    ),
                     symbol=symbol,
-                    timeframe=Timeframe(self.config.timeframe),
-                    limit=100,
                 )
-                if not candles:
-                    self.add_log(level="WARNING", message=f"No candles returned for {symbol}")
-                    return
+            else:
+                self.add_log(
+                    level="WARNING",
+                    message=(
+                        f"Ningún mercado observado está en la allowlist de ejecución "
+                        f"({', '.join(sorted(allowed)) or 'vacía'}); "
+                        f"se analiza {primary_symbol}."
+                    ),
+                    symbol=primary_symbol,
+                )
 
-                current_price = float(candles[-1].close)
-            except Exception as e:
-                self.add_log(level="ERROR", message=f"Failed to fetch market data: {e}")
-                return
+        # 2. Fetch the selected market's REAL-TIME price (ticker 'last'), not
+        #    the last closed candle. A 1h candle only updates once per hour, so
+        #    `candles[-1].close` would stay frozen while the chart keeps moving.
+        current_price = await self._latest_price(symbol)
+        if current_price is None:
+            self.add_log(
+                level="WARNING",
+                message=f"No candles returned for {symbol}",
+                symbol=symbol,
+            )
+        else:
+            self.last_price = current_price
+            self.last_symbol = symbol
 
-        self.last_price = current_price
-
-        # Keep open positions' unrealized PnL fresh with the latest tick.
+        # 3. Refresh every open position, not only the analyzed symbol. A
+        #    multi-market session can hold ETH while the committee looks at BTC.
         mode = self._mode()
         service = self._execution_service()
+        open_positions: list[Position] = []
+        price_map: dict[str, float] = {}
+        if current_price is not None:
+            price_map[symbol] = current_price
         if service:
             try:
-                service.update_market_prices({symbol: current_price}, mode)
-            except Exception as e:
-                logger.warning("position_price_update_failed", error=str(e))
+                open_positions = list(service.get_positions(mode))
+            except Exception as exc:
+                logger.warning("position_list_failed", error=str(exc))
+                open_positions = []
 
-        # 2. Check existing open positions for Stop-Loss / Take-Profit triggers
-        if service:
+            for pos in open_positions:
+                if pos.symbol in price_map:
+                    continue
+                tick: float | None = None
+                try:
+                    tick = float(await self.market_service.get_latest_price(pos.symbol))
+                except Exception as exc:
+                    logger.debug(
+                        "position_ticker_unavailable",
+                        symbol=pos.symbol,
+                        error=str(exc),
+                    )
+                if tick is None or tick <= 0:
+                    try:
+                        mark = float(pos.current_price)
+                    except (TypeError, ValueError):
+                        mark = 0.0
+                    tick = mark if mark > 0 else None
+                if tick is not None:
+                    price_map[pos.symbol] = tick
+
             try:
-                open_positions = service.get_positions(mode)
-                for pos in open_positions:
-                    if pos.symbol == symbol:
-                        # Evaluate TP/SL
-                        triggered = False
-                        reason = ""
-                        if pos.side == PositionSide.LONG:
-                            if pos.stop_loss and current_price <= float(pos.stop_loss):
-                                triggered = True
-                                reason = f"Stop-Loss triggered at ${current_price:,.2f} (SL: ${float(pos.stop_loss):,.2f})"
-                            elif pos.take_profit and current_price >= float(pos.take_profit):
-                                triggered = True
-                                reason = f"Take-Profit triggered at ${current_price:,.2f} (TP: ${float(pos.take_profit):,.2f})"
-                        elif pos.side == PositionSide.SHORT:
-                            if pos.stop_loss and current_price >= float(pos.stop_loss):
-                                triggered = True
-                                reason = f"Stop-Loss triggered at ${current_price:,.2f} (SL: ${float(pos.stop_loss):,.2f})"
-                            elif pos.take_profit and current_price <= float(pos.take_profit):
-                                triggered = True
-                                reason = f"Take-Profit triggered at ${current_price:,.2f} (TP: ${float(pos.take_profit):,.2f})"
+                service.update_market_prices(price_map, mode)
+            except Exception as exc:
+                logger.warning("position_price_update_failed", error=str(exc))
 
-                        if triggered:
-                            if mode == ExecutionMode.REAL and self.live_trading_service is not None:
-                                closed_order = await self.live_trading_service.close_position(
-                                    position_id=pos.id,
-                                    current_market_price=current_price,
-                                    mode=mode,
-                                    confirm=True,
-                                    exchange=pos.exchange,
-                                )
-                            elif self.trading_service is not None:
-                                closed_order = self.trading_service.close_position(
-                                    position_id=pos.id,
-                                    current_market_price=current_price,
-                                    mode=ExecutionMode.PAPER,
-                                )
-                            else:
-                                closed_order = None
-                            if closed_order is not None:
-                                await self._persist_execution(closed_order, mode)
-                                if mode != ExecutionMode.REAL:
-                                    await self._notify(
-                                        "Salida automática (paper)",
-                                        reason,
-                                        AlertSeverity.WARNING,
-                                        {"symbol": symbol, "reason": reason},
-                                    )
-                            self.add_log(
-                                level="WARNING",
-                                message=f"🛡️ Auto-Exit: {reason}",
-                                price=current_price,
-                            )
-            except Exception as e:
-                logger.warning("position_tracking_error", error=str(e))
+        # 4. Check every open position for Stop-Loss / Take-Profit triggers
+        #    using that position's own market price.
+        for pos in open_positions:
+            pos_price = price_map.get(pos.symbol)
+            if pos_price is None:
+                logger.warning(
+                    "position_price_missing",
+                    position_id=str(pos.id),
+                    symbol=pos.symbol,
+                )
+                continue
 
-        # 3. Multi-Agent Committee Consensus Evaluation
+            triggered, reason = self._exit_reason(pos, pos_price)
+            if not triggered:
+                continue
+
+            try:
+                if mode == ExecutionMode.REAL and self.live_trading_service is not None:
+                    closed_order = await self.live_trading_service.close_position(
+                        position_id=pos.id,
+                        current_market_price=pos_price,
+                        mode=mode,
+                        confirm=True,
+                        exchange=pos.exchange,
+                    )
+                elif self.trading_service is not None:
+                    closed_order = self.trading_service.close_position(
+                        position_id=pos.id,
+                        current_market_price=pos_price,
+                        mode=ExecutionMode.PAPER,
+                    )
+                else:
+                    closed_order = None
+                if closed_order is not None:
+                    await self._persist_execution(closed_order, mode)
+                    if mode != ExecutionMode.REAL:
+                        await self._notify(
+                            "Salida automática (paper)",
+                            reason,
+                            AlertSeverity.WARNING,
+                            {"symbol": pos.symbol, "reason": reason},
+                        )
+                self.add_log(
+                    level="WARNING",
+                    message=f"🛡️ Auto-Exit: {reason}",
+                    price=pos_price,
+                    symbol=pos.symbol,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "position_exit_failed",
+                    position_id=str(pos.id),
+                    symbol=pos.symbol,
+                    error=str(exc),
+                )
+
+        # Entry analysis is the only part gated by the execution allowlist.
+        # Position tracking above already ran, so a disallowed market can never
+        # trap an open position.
+        if symbol not in allowed:
+            self.add_log(
+                level="WARNING",
+                message=(
+                    f"{symbol} no está en la allowlist de ejecución; se omite el "
+                    "análisis de entrada y solo se siguen las posiciones abiertas."
+                ),
+                symbol=symbol,
+            )
+            return
+        if current_price is None:
+            return
+
+        # 5. Multi-Agent Committee Consensus Evaluation
         if not self.agent_service:
             self.add_log(level="WARNING", message="AgentService not bound to AutonomousEngine")
             return
@@ -631,7 +884,7 @@ class AutonomousEngine:
             f"@ ${current_price:,.2f}"
         )
 
-        # 4. Check if signal meets execution threshold
+        # 6. Check if signal meets execution threshold
         is_actionable = signal_str.upper() in ("BUY", "STRONG_BUY", "SELL", "STRONG_SELL")
         meets_confidence = confidence_pct >= self.config.min_confidence_pct
 
@@ -669,7 +922,7 @@ class AutonomousEngine:
             )
             return
 
-        # 5. Order Sizing & Placement
+        # 7. Order Sizing & Placement
         if not service:
             return
 

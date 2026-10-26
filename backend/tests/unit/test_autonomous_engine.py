@@ -2,7 +2,7 @@
 Unit tests for AutonomousEngine and Autonomous Bot lifecycle.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -773,3 +773,283 @@ async def test_disabled_correlation_guard_skips_market_lookups(monkeypatch) -> N
     request = risk.calculate_position_size.call_args.args[0]
     assert request.correlation_multiplier == 1.0
     trading.place_order.assert_called_once()
+
+
+def _trend_candles(total_return_pct: float, symbol: str, points: int = 25) -> list[Candle]:
+    step = total_return_pct / (points - 1)
+    closes = [100.0]
+    for _ in range(points - 1):
+        closes.append(closes[-1] * (1.0 + step / 100.0))
+    start = datetime.now(tz=UTC) - timedelta(hours=points)
+    return [
+        Candle(
+            symbol=symbol,
+            exchange=Exchange.BINANCE,
+            timeframe=Timeframe.H1,
+            timestamp=start + timedelta(hours=index),
+            ohlcv=OHLCV(
+                open=Decimal(str(close)),
+                high=Decimal(str(close)),
+                low=Decimal(str(close)),
+                close=Decimal(str(close)),
+                volume=Decimal("1"),
+            ),
+            is_closed=True,
+        )
+        for index, close in enumerate(closes)
+    ]
+
+
+def _neutral_decision(symbol: str) -> CoordinatorDecision:
+    return CoordinatorDecision(
+        symbol=symbol,
+        final_signal=SignalDirection.NEUTRAL,
+        aggregate_confidence=0.4,
+        consensus_level=0.5,
+        reasoning_summary="Mixed signals across agents; no clear directional edge detected right now.",
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_engine_scans_multiple_markets_and_analyzes_the_best_allowed() -> None:
+    market = MagicMock()
+    candles = {
+        "BTC/USDT": _trend_candles(1.0, "BTC/USDT"),
+        "ETH/USDT": _trend_candles(9.0, "ETH/USDT"),
+        "SOL/USDT": _trend_candles(-5.0, "SOL/USDT"),
+    }
+
+    async def get_candles(symbol: str, **_kwargs: object) -> list[Candle]:
+        return candles[symbol]
+
+    market.get_candles = AsyncMock(side_effect=get_candles)
+    market.get_latest_price = AsyncMock(
+        side_effect=lambda symbol: Decimal("65000") if symbol == "BTC/USDT" else Decimal("3000")
+    )
+    agent = MagicMock()
+    agent.run_analysis = AsyncMock(return_value=_neutral_decision("ETH/USDT"))
+
+    engine = AutonomousEngine(agent_service=agent, market_service=market)
+    engine.config = AutonomousBotConfig(
+        symbol="BTC/USDT",
+        scan_symbols=["BTC/USDT", "ETH/USDT", "SOL/USDT"],
+        llm_analysis_interval_seconds=0,
+    )
+
+    await engine._execute_cycle()
+
+    assert agent.run_analysis.call_args.kwargs["symbol"] == "ETH/USDT"
+    assert engine.last_symbol == "ETH/USDT"
+    assert engine.last_price == 3000.0
+    assert any("Escaneo 3 mercados" in log.message for log in engine._logs)
+    assert any("Candidato elegido: ETH/USDT" in log.message for log in engine._logs)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_engine_tracks_and_exits_positions_on_other_symbols() -> None:
+    market = MagicMock()
+    market.get_latest_price = AsyncMock(
+        side_effect=lambda symbol: Decimal("65000") if symbol == "BTC/USDT" else Decimal("1000")
+    )
+    agent = MagicMock()
+    agent.run_analysis = AsyncMock(return_value=_neutral_decision("BTC/USDT"))
+
+    position = Position(
+        symbol="ETH/USDT",
+        exchange=Exchange.BINANCE,
+        mode=ExecutionMode.PAPER,
+        side=PositionSide.LONG,
+        entry_price=Decimal("1200"),
+        quantity=Decimal("1"),
+        current_price=Decimal("1200"),
+        stop_loss=Decimal("1100"),
+    )
+    trading = MagicMock()
+    trading.get_positions.return_value = [position]
+    trading.close_position.return_value = Order(
+        symbol="ETH/USDT",
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET,
+        quantity=Decimal("1"),
+        price=Decimal("1000"),
+        exchange=Exchange.BINANCE,
+        mode=ExecutionMode.PAPER,
+        status=OrderStatus.FILLED,
+    )
+
+    engine = AutonomousEngine(
+        agent_service=agent,
+        market_service=market,
+        trading_service=trading,
+    )
+    engine.config = AutonomousBotConfig(
+        symbol="BTC/USDT",
+        scan_symbols=["BTC/USDT"],
+        llm_analysis_interval_seconds=0,
+    )
+
+    await engine._execute_cycle()
+
+    trading.close_position.assert_called_once()
+    assert trading.close_position.call_args.kwargs["current_market_price"] == 1000.0
+    trading.update_market_prices.assert_called_once()
+    assert trading.update_market_prices.call_args.args[0] == {
+        "BTC/USDT": 65000.0,
+        "ETH/USDT": 1000.0,
+    }
+    assert any("Auto-Exit" in log.message and log.symbol == "ETH/USDT" for log in engine._logs)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_real_allowlist_restricts_which_scanned_market_is_analyzed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    market = MagicMock()
+    candles = {
+        "BTC/USDT": _trend_candles(1.0, "BTC/USDT"),
+        "ETH/USDT": _trend_candles(9.0, "ETH/USDT"),
+        "SOL/USDT": _trend_candles(5.0, "SOL/USDT"),
+    }
+
+    async def get_candles(symbol: str, **_kwargs: object) -> list[Candle]:
+        return candles[symbol]
+
+    market.get_candles = AsyncMock(side_effect=get_candles)
+    market.get_latest_price = AsyncMock(return_value=Decimal("3000"))
+    agent = MagicMock()
+    agent.run_analysis = AsyncMock(return_value=_neutral_decision("SOL/USDT"))
+    live = MagicMock()
+    live.get_positions.return_value = []
+
+    monkeypatch.setattr(
+        "src.application.services.autonomous_engine.get_settings",
+        lambda: SimpleNamespace(
+            real_trading_allowed_symbols=["BTC/USDT", "SOL/USDT"],
+            real_trading_max_notional=Decimal("50"),
+            correlation_guard_enabled=False,
+        ),
+    )
+
+    engine = AutonomousEngine(
+        agent_service=agent,
+        market_service=market,
+        live_trading_service=live,
+    )
+    engine.config = AutonomousBotConfig(
+        symbol="BTC/USDT",
+        scan_symbols=["BTC/USDT", "ETH/USDT", "SOL/USDT"],
+        execution_mode="real",
+        confirm_real_trading=True,
+        llm_analysis_interval_seconds=0,
+    )
+
+    await engine._execute_cycle()
+
+    # ETH has the strongest move but is not in the allowlist; SOL is the best
+    # eligible candidate.
+    assert agent.run_analysis.call_args.kwargs["symbol"] == "SOL/USDT"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_real_engine_skips_analysis_when_no_scanned_market_is_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    market = MagicMock()
+    candles = {
+        "BTC/USDT": _trend_candles(1.0, "BTC/USDT"),
+        "ETH/USDT": _trend_candles(9.0, "ETH/USDT"),
+    }
+
+    async def get_candles(symbol: str, **_kwargs: object) -> list[Candle]:
+        return candles[symbol]
+
+    market.get_candles = AsyncMock(side_effect=get_candles)
+    market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
+    agent = MagicMock()
+    agent.run_analysis = AsyncMock(return_value=_neutral_decision("BTC/USDT"))
+    live = MagicMock()
+    live.get_positions.return_value = []
+
+    monkeypatch.setattr(
+        "src.application.services.autonomous_engine.get_settings",
+        lambda: SimpleNamespace(
+            real_trading_allowed_symbols=["XRP/USDT"],
+            real_trading_max_notional=Decimal("50"),
+            correlation_guard_enabled=False,
+        ),
+    )
+
+    engine = AutonomousEngine(
+        agent_service=agent,
+        market_service=market,
+        live_trading_service=live,
+    )
+    engine.config = AutonomousBotConfig(
+        symbol="BTC/USDT",
+        scan_symbols=["BTC/USDT", "ETH/USDT"],
+        execution_mode="real",
+        confirm_real_trading=True,
+        llm_analysis_interval_seconds=0,
+    )
+
+    await engine._execute_cycle()
+
+    agent.run_analysis.assert_not_called()
+    assert any("allowlist" in log.message for log in engine._logs)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_config_normalizes_scan_symbols_and_start_resolves_the_universe() -> None:
+    config = AutonomousBotConfig(
+        symbol="eth-usdt",
+        scan_symbols=["sol_usdt", "ETH/USDT", "sol-usdt"],
+    )
+    assert config.symbol == "ETH/USDT"
+    assert config.scan_symbols == ["SOL/USDT", "ETH/USDT"]
+
+    engine = AutonomousEngine()
+    await engine.start(AutonomousBotConfig(symbol="BTC/USDT"))
+    try:
+        assert engine.config.scan_symbols[0] == "BTC/USDT"
+        assert len(engine.config.scan_symbols) > 1
+    finally:
+        await engine.stop()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_emergency_kill_uses_each_position_mark_not_the_last_tick() -> None:
+    position = Position(
+        symbol="ETH/USDT",
+        exchange=Exchange.BINANCE,
+        mode=ExecutionMode.PAPER,
+        side=PositionSide.LONG,
+        entry_price=Decimal("2000"),
+        quantity=Decimal("1"),
+        current_price=Decimal("2000"),
+    )
+    trading = MagicMock()
+    trading.get_positions.return_value = [position]
+    trading.close_position.return_value = Order(
+        symbol="ETH/USDT",
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET,
+        quantity=Decimal("1"),
+        price=Decimal("2000"),
+        exchange=Exchange.BINANCE,
+        mode=ExecutionMode.PAPER,
+        status=OrderStatus.FILLED,
+    )
+
+    engine = AutonomousEngine(trading_service=trading, market_service=MagicMock())
+    engine.last_price = 65000.0
+    engine.last_symbol = "BTC/USDT"
+
+    await engine.emergency_kill()
+
+    assert trading.close_position.call_args.kwargs["current_market_price"] == 2000.0

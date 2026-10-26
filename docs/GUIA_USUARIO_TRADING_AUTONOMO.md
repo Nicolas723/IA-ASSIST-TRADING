@@ -19,6 +19,26 @@ Puedes acotar el gasto con `LLM_DAILY_TOKEN_BUDGET` y `LLM_CYCLE_TOKEN_BUDGET` y
 
 Validación operativa del 2026-10-24/25: Google Gemini (`gemini-3.8-flash`, SDK `google-genai`) respondió con llamadas reales en técnico y acción del precio; OpenAI estaba configurado pero su cuenta devolvía `insufficient_quota`. DeepSeek quedó activado como primario (`deepseek-chat`, `LLM_PRIMARY_PROVIDER=deepseek`) con Google como fallback, pero su cuenta devolvió `402 Insufficient Balance`: la clave es válida y el proveedor queda aparcado 30 minutos hasta que se recargue. La cuota gratuita de Gemini es de 20 peticiones al día por modelo y se reinicia a medianoche del Pacífico (≈07:00–08:00 UTC), no a medianoche UTC. Para no agotarla en una hora, el bot ejecuta el comité completo como máximo cada `llm_analysis_interval_seconds` (30 min por defecto) mientras sigue gestionando salidas y SL/TP en cada ciclo corto. Si la cuota se agota, el comité usa el análisis determinista hasta el reinicio o hasta configurar otro proveedor. Un proveedor configurado sin créditos no es un proveedor operativo.
 
+## Escaneo multimercado del bot autónomo
+
+El bot puede vigilar varios mercados a la vez sin multiplicar las llamadas al LLM. Al iniciar la sesión resuelve un universo con `scan_symbols` (lista explícita en `POST /api/v1/autonomous/start`) o, si se omite, con `SHADOW_SCAN_SYMBOLS`. El símbolo principal siempre se incluye y el máximo es 10 mercados. Ejemplo de inicio con universo explícito:
+
+```json
+{
+  "symbol": "BTC/USDT",
+  "scan_symbols": ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT"],
+  "timeframe": "1h",
+  "interval_seconds": 300,
+  "llm_analysis_interval_seconds": 1800,
+  "execution_mode": "real",
+  "confirm_real_trading": true
+}
+```
+
+En cada ciclo el motor consulta velas cerradas de todos los mercados de forma secuencial, calcula el retorno reciente y el régimen descriptivo, y los ordena con un ajuste pequeño de tendencia (±0,5 puntos). Solo el mejor candidato **permitido por `REAL_TRADING_ALLOWED_SYMBOLS`** se envía al comité; el resto queda medido en los logs. La puntuación es un criterio para elegir qué mercado analizar, no un retorno esperado, una probabilidad de éxito ni una recomendación. El comité y el Risk Guard siguen decidiendo si se opera.
+
+El seguimiento de SL/TP revisa **todas** las posiciones abiertas con el precio de su propio símbolo, aunque el comité esté analizando otro mercado. En modo real, un mercado fuera de la allowlist se sigue escaneando y sus posiciones se gestionan, pero no se abre una entrada nueva en él. La allowlist se cambia en Configuración > Control de ejecución; ampliarla no requiere reiniciar el motor, pero sí iniciar una sesión nueva para que el universo se resuelva con los cambios.
+
 ## Escaneo de mercado en sombra
 
 `POST /api/v1/agents/scan/shadow` compara hasta cinco símbolos por solicitud sin crear órdenes ni llamar a los modelos LLM. Ejemplo:
