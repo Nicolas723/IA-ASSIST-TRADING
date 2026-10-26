@@ -30,6 +30,7 @@ x-backend-base: &backend-base
     dockerfile: Dockerfile.dev
   volumes:
     - ../../backend/src:/app/src:ro          # Hot-reload source
+    - ../../backend/alembic.ini:/app/alembic.ini:ro
     - ../../backend/.env:/app/.env:ro
     - ../../backend/tests:/app/tests:ro
     - ../../backend/vault:/app/vault          # Persist encrypted credentials
