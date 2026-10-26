@@ -363,6 +363,18 @@ class Settings(BaseSettings):
     llm_input_cost_per_million_usd: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     llm_output_cost_per_million_usd: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
 
+    # Correlation-aware sizing for new long exposure. Spot automation is
+    # long-only, so only positive correlation with an existing position is
+    # penalised: a negative correlation diversifies instead of concentrating.
+    # The guard compares simple returns of closed candles and only acts when at
+    # least `correlation_min_samples` timestamps overlap. Set
+    # CORRELATION_GUARD_ENABLED=false to keep the previous behaviour.
+    correlation_guard_enabled: bool = Field(default=True)
+    correlation_reduce_threshold: float = Field(default=0.75, gt=0, le=1)
+    correlation_block_threshold: float = Field(default=0.95, gt=0, le=1)
+    correlation_min_samples: int = Field(default=30, ge=10)
+    correlation_lookback: int = Field(default=200, ge=30)
+
     # -------------------------------------------------------------------------
     # Trading
     # -------------------------------------------------------------------------
@@ -560,6 +572,16 @@ class Settings(BaseSettings):
         if len(set(symbols)) != len(symbols):
             raise ValueError("Shadow scan symbols must be unique.")
         return symbols
+
+    @field_validator("correlation_block_threshold")
+    @classmethod
+    def validate_correlation_thresholds(cls, value: float, info: Any) -> float:
+        reduce_threshold = info.data.get("correlation_reduce_threshold")
+        if reduce_threshold is not None and value <= reduce_threshold:
+            raise ValueError(
+                "CORRELATION_BLOCK_THRESHOLD must be greater than CORRELATION_REDUCE_THRESHOLD."
+            )
+        return value
 
 
 # ---------------------------------------------------------------------------

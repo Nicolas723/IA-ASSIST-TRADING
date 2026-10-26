@@ -23,7 +23,11 @@ class PositionSizer:
         stop = request.stop_loss_price
         tp = request.take_profit_price
         balance = request.account_balance
-        risk_pct = min(request.risk_percentage, prof.max_risk_per_trade_pct)
+        correlation_multiplier = min(1.0, max(0.0, request.correlation_multiplier))
+        risk_pct = min(
+            request.risk_percentage * correlation_multiplier,
+            prof.max_risk_per_trade_pct,
+        )
 
         if entry <= 0 or stop <= 0:
             return PositionSizeResult(
@@ -114,6 +118,12 @@ class PositionSizer:
         elif is_valid:
             notes_list.append(
                 f"Valid setup. Max loss capped at ${risk_amount_usd} ({risk_pct}% of balance)."
+            )
+
+        if correlation_multiplier < 1.0:
+            notes_list.append(
+                "Correlation guard reduced risk to "
+                f"{round(risk_pct, 2)}% ({correlation_multiplier:.0%} of the requested risk)."
             )
 
         return PositionSizeResult(

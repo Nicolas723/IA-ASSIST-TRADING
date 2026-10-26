@@ -109,6 +109,42 @@ def test_position_sizer_fixed_fractional():
 
 
 @pytest.mark.unit
+def test_position_sizer_applies_correlation_multiplier():
+    req = PositionSizeRequest(
+        symbol="BTC/USDT",
+        account_balance=10000.0,
+        entry_price=60000.0,
+        stop_loss_price=55000.0,  # $5000 per BTC risk
+        risk_percentage=1.5,
+        correlation_multiplier=0.5,
+    )
+    res = PositionSizer.calculate(req)
+
+    assert res.is_valid_setup is True
+    assert res.risk_percentage == 0.75
+    assert res.risk_amount_usd == 75.0
+    # $75 risk / $5000 per unit = 0.015 BTC (half of the unpenalised 0.03).
+    assert round(res.recommended_units, 4) == 0.015
+    assert "Correlation guard" in res.notes
+
+
+@pytest.mark.unit
+def test_position_sizer_keeps_full_risk_without_correlation_penalty():
+    req = PositionSizeRequest(
+        symbol="BTC/USDT",
+        account_balance=10000.0,
+        entry_price=60000.0,
+        stop_loss_price=58000.0,
+        risk_percentage=1.5,
+    )
+    res = PositionSizer.calculate(req)
+
+    assert res.risk_percentage == 1.5
+    assert res.risk_amount_usd == 150.0
+    assert "Correlation guard" not in res.notes
+
+
+@pytest.mark.unit
 def test_position_sizer_respects_remaining_asset_exposure():
     req = PositionSizeRequest(
         symbol="BTC/USDT",

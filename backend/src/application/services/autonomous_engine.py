@@ -13,6 +13,10 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
+from src.application.services.correlation_guard import (
+    CorrelationGuardDecision,
+    evaluate_correlation_guard,
+)
 from src.domain.market.entities import Timeframe
 from src.domain.notifications.entities import AlertSeverity
 from src.domain.risk.entities import PositionSizeRequest, RiskProfile
@@ -37,6 +41,7 @@ if TYPE_CHECKING:
     from src.application.services.risk_service import RiskService
     from src.application.services.trading_service import TradingService
     from src.domain.agents.entities import CoordinatorDecision
+    from src.domain.trading.entities import Position
 
 logger = get_logger(__name__)
 
@@ -152,6 +157,87 @@ class AutonomousEngine:
         if self._mode() == ExecutionMode.REAL:
             return self.live_trading_service
         return self.trading_service
+
+    async def _correlation_guard_for(
+        self,
+        *,
+        symbol: str,
+        open_positions: list[Position],
+    ) -> CorrelationGuardDecision:
+        """Measure positive correlation with the other open positions.
+
+        The guard is best-effort: missing market data keeps the requested size
+        and is reported, because it is a diversification control and not the
+        last line of defense. It only reduces or blocks new long exposure.
+        """
+        settings = get_settings()
+        if not settings.correlation_guard_enabled:
+            return CorrelationGuardDecision(
+                action="allow",
+                size_multiplier=1.0,
+                max_correlation=None,
+                correlated_symbol=None,
+                sample_size=0,
+                reason="Correlation guard disabled.",
+            )
+
+        other_symbols = sorted(
+            {position.symbol for position in open_positions if position.symbol != symbol}
+        )
+        if not other_symbols:
+            return CorrelationGuardDecision(
+                action="allow",
+                size_multiplier=1.0,
+                max_correlation=None,
+                correlated_symbol=None,
+                sample_size=0,
+                reason="No other open position to compare.",
+            )
+        if self.market_service is None:
+            return CorrelationGuardDecision(
+                action="unavailable",
+                size_multiplier=1.0,
+                max_correlation=None,
+                correlated_symbol=None,
+                sample_size=0,
+                reason="Market data service unavailable.",
+            )
+
+        timeframe = Timeframe(self.config.timeframe)
+        limit = int(settings.correlation_lookback) + 1
+        try:
+            candidate_candles = await self.market_service.get_candles(
+                symbol=symbol, timeframe=timeframe, limit=limit
+            )
+            existing_candles = {}
+            for other in other_symbols:
+                existing_candles[other] = await self.market_service.get_candles(
+                    symbol=other, timeframe=timeframe, limit=limit
+                )
+        except Exception as exc:
+            logger.warning(
+                "correlation_guard_data_unavailable",
+                symbol=symbol,
+                positions=other_symbols,
+                error=str(exc),
+            )
+            return CorrelationGuardDecision(
+                action="unavailable",
+                size_multiplier=1.0,
+                max_correlation=None,
+                correlated_symbol=None,
+                sample_size=0,
+                reason=f"No se pudieron cargar las velas para correlacionar: {exc}",
+            )
+
+        return evaluate_correlation_guard(
+            candidate_symbol=symbol,
+            candidate_candles=candidate_candles,
+            existing_candles=existing_candles,
+            reduce_threshold=float(settings.correlation_reduce_threshold),
+            block_threshold=float(settings.correlation_block_threshold),
+            min_samples=int(settings.correlation_min_samples),
+        )
 
     async def _notify(
         self,
@@ -672,6 +758,38 @@ class AutonomousEngine:
                 )
                 return
 
+            # Correlation-aware sizing: spot automation is long-only, so a new
+            # long in a symbol that has been moving with an existing holding
+            # adds concentration instead of diversification. Only positive
+            # correlation is penalised; the guard never creates a signal.
+            correlation_decision = await self._correlation_guard_for(
+                symbol=symbol,
+                open_positions=open_positions,
+            )
+            if correlation_decision.blocks:
+                self.add_log(
+                    level="WARNING",
+                    message=f"{log_msg} — Entrada bloqueada por correlación: {correlation_decision.reason}",
+                    signal=signal_str.upper(),
+                    confidence_pct=confidence_pct,
+                    price=current_price,
+                )
+                return
+            if correlation_decision.action == "reduce":
+                self.add_log(
+                    level="INFO",
+                    message=f"{log_msg} — {correlation_decision.reason}",
+                    signal=signal_str.upper(),
+                    confidence_pct=confidence_pct,
+                    price=current_price,
+                )
+            elif correlation_decision.action == "unavailable":
+                logger.info(
+                    "correlation_guard_unavailable",
+                    symbol=symbol,
+                    reason=correlation_decision.reason,
+                )
+
             # Size by loss at the stop, not by allocating risk% of equity as
             # notional. The shared RiskService profile also caps risk and
             # per-asset allocation; the Risk Guard in TradingService remains
@@ -694,6 +812,7 @@ class AutonomousEngine:
                 take_profit_price=take_profit,
                 current_symbol_exposure_usd=float(portfolio.exposure_usd(symbol)),
                 current_total_exposure_usd=float(portfolio.gross_exposure_usd),
+                correlation_multiplier=correlation_decision.size_multiplier,
             )
             if self.risk_service is not None:
                 sizing = self.risk_service.calculate_position_size(sizing_request)

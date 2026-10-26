@@ -86,6 +86,8 @@ La ingesta pública de velas puede usar Binance o Bybit con `MARKET_DATA_EXCHANG
 
 El porcentaje de riesgo configura el riesgo teórico calculado hasta el Stop Loss, no el porcentaje de saldo usado como valor nominal de la posición. El tamaño se limita además por el perfil de riesgo y los límites de orden: asignación por activo (posición existente + orden nueva) y exposición bruta total de la cartera. Risk Guard realiza un preflight independiente y el veto del Risk Manager impide la entrada. No se garantiza la pérdida máxima por gaps, slippage, comisiones ni fallos de ejecución. El bot usa Stop Loss de 2% y objetivo de 4% (RR 2:1) por defecto.
 
+Antes de dimensionar una compra, el bot compara el movimiento reciente del candidato con el de las demás posiciones abiertas. Si la correlación positiva es alta reduce el riesgo; si es muy alta, omite la entrada. Se configura con `CORRELATION_GUARD_ENABLED` (activado por defecto), `CORRELATION_REDUCE_THRESHOLD=0.75`, `CORRELATION_BLOCK_THRESHOLD=0.95`, `CORRELATION_MIN_SAMPLES=30` y `CORRELATION_LOOKBACK=200`. La correlación es una medida descriptiva de retornos pasados, no una probabilidad de pérdida ni una previsión, y no sustituye al resto de límites. Con una sola posición abierta no se aplica.
+
 ## 2. Probar con Binance Testnet
 
 1. En **Configuración → Conexión con Binance**, elige **Testnet**, introduce las claves API de Testnet y guarda/probar conexión.

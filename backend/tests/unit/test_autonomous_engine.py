@@ -28,6 +28,7 @@ from src.domain.trading.entities import (
     OrderStatus,
     OrderType,
     Portfolio,
+    Position,
     PositionSide,
 )
 
@@ -378,7 +379,10 @@ async def test_real_order_quantity_is_capped_to_max_notional(monkeypatch) -> Non
     )
     monkeypatch.setattr(
         "src.application.services.autonomous_engine.get_settings",
-        lambda: SimpleNamespace(real_trading_max_notional=Decimal("50")),
+        lambda: SimpleNamespace(
+            real_trading_max_notional=Decimal("50"),
+            correlation_guard_enabled=False,
+        ),
     )
 
     engine = AutonomousEngine(
@@ -448,7 +452,10 @@ async def test_real_entry_is_suspended_when_reconciliation_fails(monkeypatch) ->
     )
     monkeypatch.setattr(
         "src.application.services.autonomous_engine.get_settings",
-        lambda: SimpleNamespace(real_trading_max_notional=Decimal("50")),
+        lambda: SimpleNamespace(
+            real_trading_max_notional=Decimal("50"),
+            correlation_guard_enabled=False,
+        ),
     )
 
     engine = AutonomousEngine(
@@ -570,3 +577,199 @@ async def test_zero_analysis_interval_runs_the_committee_every_cycle() -> None:
     await engine._execute_cycle()
 
     assert agent.run_analysis.await_count == 2
+
+
+def _correlation_candles(returns: list[float], symbol: str) -> list[Candle]:
+    closes = [100.0]
+    for value in returns:
+        closes.append(closes[-1] * (1.0 + value))
+    start = 1700000000
+    return [
+        Candle(
+            symbol=symbol,
+            exchange=Exchange.BINANCE,
+            timeframe=Timeframe.H1,
+            timestamp=datetime.fromtimestamp(start + index * 3600, tz=UTC),
+            ohlcv=OHLCV(
+                open=Decimal(str(close)),
+                high=Decimal(str(close)),
+                low=Decimal(str(close)),
+                close=Decimal(str(close)),
+                volume=Decimal("1"),
+            ),
+            is_closed=True,
+        )
+        for index, close in enumerate(closes)
+    ]
+
+
+_PATTERN_A = [0.01, -0.01, 0.01, -0.01, 0.01, -0.01, 0.01, -0.01]
+_PATTERN_C = [0.01, 0.01, -0.01, -0.01, 0.01, 0.01, -0.01, -0.01]
+
+
+def _correlation_settings(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "real_trading_max_notional": Decimal("50"),
+        "correlation_guard_enabled": True,
+        "correlation_reduce_threshold": 0.75,
+        "correlation_block_threshold": 0.95,
+        "correlation_min_samples": 4,
+        "correlation_lookback": 200,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _paper_guard_fixture(
+    *,
+    existing_returns: list[float],
+) -> tuple[AutonomousEngine, MagicMock, MagicMock]:
+    market = MagicMock()
+    market.get_latest_price = AsyncMock(return_value=Decimal("65000"))
+    market.get_candles = AsyncMock(
+        side_effect=lambda symbol, **_kwargs: (
+            _correlation_candles(_PATTERN_A, symbol)
+            if symbol == "BTC/USDT"
+            else _correlation_candles(existing_returns, symbol)
+        )
+    )
+    agent = MagicMock()
+    agent.run_analysis = AsyncMock(
+        return_value=CoordinatorDecision(
+            symbol="BTC/USDT",
+            final_signal=SignalDirection.BUY,
+            aggregate_confidence=0.85,
+            consensus_level=0.9,
+            reasoning_summary="Bullish momentum with committee consensus and risk approval.",
+            risk_approved=True,
+            recommended_entry=65000.0,
+            recommended_stop=63700.0,
+            recommended_target=67600.0,
+        )
+    )
+    risk = MagicMock()
+    risk.calculate_position_size.return_value = PositionSizeResult(
+        symbol="BTC/USDT",
+        account_balance=10000.0,
+        risk_percentage=1.0,
+        risk_amount_usd=100.0,
+        price_risk_per_unit=1300.0,
+        price_risk_pct=2.0,
+        recommended_units=0.01,
+        recommended_notional_usd=650.0,
+        risk_reward_ratio=2.0,
+        potential_profit_usd=200.0,
+        is_valid_setup=True,
+        notes="",
+    )
+    trading = MagicMock()
+    trading.get_portfolio.return_value = Portfolio(
+        mode=ExecutionMode.PAPER,
+        exchange=Exchange.BINANCE,
+        total_balance=Decimal("10000"),
+        available_balance=Decimal("10000"),
+        locked_balance=Decimal("0"),
+        positions=[],
+    )
+    trading.get_positions.return_value = [
+        Position(
+            symbol="ETH/USDT",
+            exchange=Exchange.BINANCE,
+            mode=ExecutionMode.PAPER,
+            side=PositionSide.LONG,
+            entry_price=Decimal("2000"),
+            quantity=Decimal("1"),
+            current_price=Decimal("2000"),
+        )
+    ]
+    trading.place_order.return_value = Order(
+        symbol="BTC/USDT",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        quantity=Decimal("0.01"),
+        price=Decimal("65000"),
+        exchange=Exchange.BINANCE,
+        mode=ExecutionMode.PAPER,
+        status=OrderStatus.FILLED,
+    )
+
+    engine = AutonomousEngine(
+        agent_service=agent,
+        market_service=market,
+        risk_service=risk,
+        trading_service=trading,
+    )
+    engine.config = AutonomousBotConfig(execution_mode="paper", risk_per_trade_pct=1.0)
+    return engine, risk, trading
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_buy_entry_is_reduced_by_correlation_guard(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.application.services.autonomous_engine.get_settings",
+        lambda: _correlation_settings(),
+    )
+    blended = [0.8 * left + 0.6 * right for left, right in zip(_PATTERN_A, _PATTERN_C, strict=True)]
+    engine, risk, trading = _paper_guard_fixture(existing_returns=blended)
+
+    await engine._execute_cycle()
+
+    request = risk.calculate_position_size.call_args.args[0]
+    assert request.correlation_multiplier == pytest.approx(0.75, abs=1e-2)
+    trading.place_order.assert_called_once()
+    assert any("Correlación positiva" in log.message for log in engine._logs)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_buy_entry_is_blocked_by_correlation_guard(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.application.services.autonomous_engine.get_settings",
+        lambda: _correlation_settings(),
+    )
+    engine, risk, trading = _paper_guard_fixture(existing_returns=list(_PATTERN_A))
+
+    await engine._execute_cycle()
+
+    risk.calculate_position_size.assert_not_called()
+    trading.place_order.assert_not_called()
+    assert any(
+        "bloqueada por correlación" in log.message and log.level == "WARNING"
+        for log in engine._logs
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_uncorrelated_entry_keeps_full_risk(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.application.services.autonomous_engine.get_settings",
+        lambda: _correlation_settings(),
+    )
+    engine, risk, trading = _paper_guard_fixture(existing_returns=list(_PATTERN_C))
+
+    await engine._execute_cycle()
+
+    request = risk.calculate_position_size.call_args.args[0]
+    assert request.correlation_multiplier == 1.0
+    trading.place_order.assert_called_once()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_disabled_correlation_guard_skips_market_lookups(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.application.services.autonomous_engine.get_settings",
+        lambda: _correlation_settings(correlation_guard_enabled=False),
+    )
+    engine, risk, trading = _paper_guard_fixture(existing_returns=list(_PATTERN_A))
+
+    await engine._execute_cycle()
+
+    market = engine.market_service
+    assert market is not None
+    market.get_candles.assert_not_awaited()
+    request = risk.calculate_position_size.call_args.args[0]
+    assert request.correlation_multiplier == 1.0
+    trading.place_order.assert_called_once()

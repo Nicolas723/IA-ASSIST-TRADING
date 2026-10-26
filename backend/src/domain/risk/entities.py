@@ -88,6 +88,9 @@ class PositionSizeRequest(BaseModel):
     # instead of producing an order the risk guard will later reject.
     current_symbol_exposure_usd: float = 0.0
     current_total_exposure_usd: float = 0.0
+    # Correlation-aware sizing: 1.0 keeps the requested risk, values below 1.0
+    # shrink it proportionally to the diversification penalty.
+    correlation_multiplier: float = Field(default=1.0, gt=0, le=1)
 
 
 class PositionSizeResult(BaseModel):
