@@ -16,6 +16,7 @@ Design decisions:
 from __future__ import annotations
 
 import abc
+import asyncio
 import json
 import time
 from dataclasses import dataclass, field, replace
@@ -217,6 +218,10 @@ class LLMGateway:
     def __init__(self, adapters: dict[LLMProvider, BaseLLMAdapter]) -> None:
         self._adapters = adapters
         self._settings = get_settings()
+        # A provider SDK without its own timeout can hang the whole cycle.
+        # Bound every call here so the gateway can cancel it and try the next
+        # provider instead of leaving the autonomous loop blocked.
+        self._request_timeout_seconds = float(self._settings.llm_request_timeout_seconds)
         self._usage_date: date = datetime.now(tz=UTC).date()
         self._tokens_used_today = 0
         self._requests_today = 0
@@ -571,7 +576,14 @@ class LLMGateway:
                         metadata=request.metadata,
                     )
                 started = time.perf_counter()
-                response = await adapter.complete(provider_request)
+                try:
+                    async with asyncio.timeout(self._request_timeout_seconds):
+                        response = await adapter.complete(provider_request)
+                except TimeoutError as exc:
+                    raise LLMTimeoutError(
+                        f"{p.value} exceeded the {self._request_timeout_seconds:.0f}s request cap",
+                        provider=p.value,
+                    ) from exc
                 latency_ms = (time.perf_counter() - started) * 1000.0
                 # Tokens are spent once the provider answers, even if the
                 # payload later fails schema validation.

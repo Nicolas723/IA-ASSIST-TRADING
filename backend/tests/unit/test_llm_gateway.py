@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from src.infrastructure.llm.gateway import (
@@ -551,3 +553,27 @@ async def test_expired_cooldown_lets_the_provider_retry() -> None:
 
     assert result.content == "recovered"
     assert gateway.usage_status()["provider_cooldowns"] == []
+
+
+class HangingAdapter(FakeAdapter):
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        await asyncio.sleep(30)
+        return _response(self._provider, "{}")
+
+
+@pytest.mark.asyncio
+async def test_gateway_cancels_a_hung_provider_and_falls_back() -> None:
+    primary = HangingAdapter(LLMProvider.OPENAI, None)
+    fallback = FakeAdapter(
+        LLMProvider.GOOGLE,
+        _response(LLMProvider.GOOGLE, '{"signal":"neutral","confidence":0.5,"reasoning":"ok"}'),
+    )
+    gateway = LLMGateway({LLMProvider.OPENAI: primary, LLMProvider.GOOGLE: fallback})
+    gateway._request_timeout_seconds = 0.05
+
+    result = await gateway.complete(
+        LLMRequest(messages=[], model="gpt-4o-mini", response_format="json")
+    )
+
+    assert result.provider == LLMProvider.GOOGLE
+    assert fallback.requests

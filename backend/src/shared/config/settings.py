@@ -362,6 +362,10 @@ class Settings(BaseSettings):
     # The gateway only reports an estimate when at least one rate is set.
     llm_input_cost_per_million_usd: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     llm_output_cost_per_million_usd: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    # Hard cap for a single provider call. Some SDKs have no usable timeout and
+    # a hung request would block the autonomous cycle indefinitely. When the
+    # cap fires, the gateway cancels the call and moves to the next provider.
+    llm_request_timeout_seconds: int = Field(default=60, ge=5, le=600)
 
     # Correlation-aware sizing for new long exposure. Spot automation is
     # long-only, so only positive correlation with an existing position is
