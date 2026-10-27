@@ -66,6 +66,13 @@ class FakeAlert:
         self.calls.append((title, message, severity, metadata or {}))
         return True
 
+    async def send(self, alert: Any) -> bool:
+        self.calls.append((alert.title, alert.message, alert.severity, dict(alert.metadata)))
+        return True
+
+    def events(self, event: str) -> list[dict[str, object]]:
+        return [call[3] for call in self.calls if call[3].get("event") == event]
+
 
 class FakeRisk:
     current_daily_loss_pct = 0.0
@@ -696,7 +703,7 @@ async def test_protective_exit_triggers_stop_loss() -> None:
 
     assert len(exits) == 1
     assert service.get_positions() == []
-    assert any(call[2] == AlertSeverity.CRITICAL for call in alerts.calls)
+    assert [e["reason"] for e in alerts.events("trade_closed")] == ["stop_loss"]
 
 
 async def test_protective_exit_triggers_take_profit() -> None:
@@ -855,7 +862,7 @@ async def test_reconcile_removes_position_closed_on_exchange() -> None:
 
     assert removed == ["BTC/USDT"]
     assert service.get_positions() == []
-    assert any("cerrada fuera" in call[0] for call in alerts.calls)
+    assert [e["reason"] for e in alerts.events("trade_closed")] == ["external"]
 
 
 async def test_reconcile_reduces_quantity_to_exchange_balance() -> None:
@@ -985,7 +992,7 @@ async def test_oco_is_created_after_filled_buy() -> None:
     assert service._oco_protections["BTC/USDT"].order_list_id == "777"
     assert service.status().protection_mode == "exchange_oco"
     assert service.status().oco_protected_positions == 1
-    assert any("OCO real colocada" in alert[0] for alert in alerts.calls)
+    assert [e["protection"] for e in alerts.events("trade_opened")] == ["oco"]
 
 
 async def test_oco_not_created_when_disabled() -> None:
@@ -1236,7 +1243,7 @@ async def test_close_position_handles_oco_already_executed() -> None:
     assert adapter.place_calls == 0
     assert service.get_positions() == []
     assert service.get_portfolio().total_realized_pnl == Decimal("500")
-    assert any("OCO real ejecutado" in alert[0] for alert in alerts.calls)
+    assert len(alerts.events("trade_closed")) == 1
 
 
 async def test_sync_oco_executed_updates_ledger() -> None:
@@ -1268,7 +1275,7 @@ async def test_sync_oco_executed_updates_ledger() -> None:
     assert "BTC/USDT" not in service._oco_protections
     assert len(service.get_trades()) == 2
     assert adapter.place_calls == 0
-    assert any("OCO real ejecutado" in alert[0] for alert in alerts.calls)
+    assert len(alerts.events("trade_closed")) == 1
 
 
 async def test_sync_oco_cancelled_resumes_local_guard() -> None:

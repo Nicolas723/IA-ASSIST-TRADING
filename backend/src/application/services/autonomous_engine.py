@@ -612,15 +612,7 @@ class AutonomousEngine:
             level="INFO",
             message=f"Execution mode: {mode.value.upper()}",
         )
-        if mode == ExecutionMode.REAL:
-            await self._notify(
-                "Bot autónomo en modo REAL",
-                f"El daemon operará con fondos reales en {self.config.symbol}.",
-                AlertSeverity.CRITICAL,
-                {"symbol": self.config.symbol, "mode": mode.value},
-            )
-
-        # Launch background loop
+        # Launch background loop (no alert: Telegram reports trades, not starts)
         self._task = asyncio.create_task(self._run_loop())
         return self.get_status()
 
@@ -702,6 +694,7 @@ class AutonomousEngine:
                             mode=mode,
                             confirm=True,
                             exchange=pos.exchange,
+                            reason="emergency",
                         )
                     elif self.trading_service is not None:
                         closed_order = self.trading_service.close_position(
@@ -899,6 +892,7 @@ class AutonomousEngine:
                         mode=mode,
                         confirm=True,
                         exchange=pos.exchange,
+                        reason="take_profit" if reason.startswith("Take") else "stop_loss",
                     )
                 elif self.trading_service is not None:
                     closed_order = self.trading_service.close_position(
@@ -1231,6 +1225,7 @@ class AutonomousEngine:
                         mode=mode,
                         confirm=True,
                         exchange=symbol_position.exchange,
+                        reason="signal",
                     )
                 elif self.trading_service is not None:
                     closed_order = self.trading_service.close_position(

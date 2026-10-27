@@ -1,13 +1,10 @@
-import { useState } from 'react';
-import { Card, Empty, Notice, PageHead, Pill, Segmented, Skeleton, Stat } from '../components/ui';
+import { Card, Empty, Notice, PageHead, Pill, Skeleton, Stat } from '../components/ui';
 import { usePolling } from '../hooks/usePolling';
 import { useI18n } from '../i18n/core';
 import { modeLabel, orderStatusLabel, sideLabel } from '../i18n/labels';
 import { ApiError, apiGet } from '../lib/api';
 import { fmtDateTime, fmtInt, fmtNumber, fmtPrice, fmtSigned, toNumber, toneClass } from '../lib/format';
 import type { OrderData, PositionData, TradeOutcomeData } from '../types';
-
-type ModeFilter = 'all' | 'paper' | 'real';
 
 /** Real positions need exchange keys; without them there are simply none. */
 async function realPositions(): Promise<PositionData[]> {
@@ -21,27 +18,17 @@ async function realPositions(): Promise<PositionData[]> {
 
 export function OperationsView() {
   const { t } = useI18n();
-  const [mode, setMode] = useState<ModeFilter>('all');
-  const modeQuery = mode === 'all' ? '' : `&mode=${mode}`;
+  // Only real activity (Testnet or Mainnet); the simulated mode was retired.
+  const modeQuery = '&mode=real';
 
-  const positions = usePolling<PositionData[]>(
-    `positions|${mode}`,
-    async () => {
-      const [paper, real] = await Promise.all([
-        mode === 'real' ? Promise.resolve([]) : apiGet<PositionData[]>('/api/v1/portfolio/positions?mode=paper'),
-        mode === 'paper' ? Promise.resolve([]) : realPositions(),
-      ]);
-      return [...real, ...paper];
-    },
-    15000,
-  );
+  const positions = usePolling<PositionData[]>('positions', realPositions, 15000);
   const outcomes = usePolling<TradeOutcomeData[]>(
-    `outcomes|${mode}`,
+    'outcomes',
     () => apiGet<TradeOutcomeData[]>(`/api/v1/mlops/outcomes?limit=100${modeQuery}`),
     30000,
   );
   const orders = usePolling<OrderData[]>(
-    `orders|${mode}`,
+    'orders',
     () => apiGet<OrderData[]>(`/api/v1/trading/orders/history?limit=200${modeQuery}`),
     30000,
   );
@@ -55,18 +42,6 @@ export function OperationsView() {
       <PageHead
         title={t('ops.title')}
         description={t('ops.description')}
-        actions={
-          <Segmented
-            label={t('ops.filter')}
-            value={mode}
-            onChange={setMode}
-            options={[
-              { value: 'all', label: t('ops.filter.all') },
-              { value: 'paper', label: t('mode.paper') },
-              { value: 'real', label: t('mode.real') },
-            ]}
-          />
-        }
       />
 
       <div className="stack-lg">

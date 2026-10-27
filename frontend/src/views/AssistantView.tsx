@@ -19,6 +19,7 @@ import {
   type LLMScanModeValue,
   type MarketRegimeData,
   type RuntimeTradingConfigData,
+  type TradingEnvironment,
 } from '../types';
 
 type RiskProfile = 'conservative' | 'moderate' | 'aggressive';
@@ -26,7 +27,6 @@ type RiskProfile = 'conservative' | 'moderate' | 'aggressive';
 const RISK_PCT: Record<RiskProfile, number> = { conservative: 1, moderate: 2, aggressive: 3 };
 
 interface Draft {
-  mode: 'paper' | 'real';
   interval: number;
   minScore: number;
   maxPositions: number;
@@ -212,7 +212,6 @@ function BotControl({
   const running = Boolean(status?.is_running);
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState<Draft>({
-    mode: 'paper',
     interval: 60,
     minScore: 60,
     maxPositions: 1,
@@ -229,7 +228,6 @@ function BotControl({
   const shown: Draft =
     running && config
       ? {
-          mode: config.execution_mode === 'real' ? 'real' : 'paper',
           interval: config.interval_seconds,
           minScore: config.min_confidence_pct,
           maxPositions: config.max_open_positions,
@@ -245,6 +243,34 @@ function BotControl({
   const update = (patch: Partial<Draft>) => setDraft((current) => ({ ...current, ...patch }));
   const environment = runtime.data?.trading_environment ?? 'testnet';
   const mainnet = environment === 'mainnet';
+  const [switching, setSwitching] = useState(false);
+
+  // The main switch: Testnet (test funds) or Mainnet (real money). It changes
+  // the server's active network; the assistant always trades on that network.
+  const switchNetwork = async (target: TradingEnvironment) => {
+    if (target === environment || switching || running) return;
+    if (target === 'mainnet') {
+      if (!runtime.data?.credentials.mainnet) {
+        toast.error(t('bot.toast.needKeysMainnet'));
+        navigate('settings', 'cuenta');
+        return;
+      }
+      if (!window.confirm(t('bot.confirmMainnet', { max: String(runtime.data.real_trading_max_notional) }))) return;
+    }
+    setSwitching(true);
+    try {
+      const body =
+        target === 'mainnet'
+          ? { trading_environment: 'mainnet', allow_mainnet_trading: true, confirm: true }
+          : { trading_environment: 'testnet' };
+      runtime.setData(await apiSend<RuntimeTradingConfigData>('PUT', '/api/v1/trading/runtime-config', body));
+      toast.success(t(target === 'mainnet' ? 'bot.toast.onMainnet' : 'bot.toast.onTestnet'));
+    } catch (error) {
+      toast.error(t('common.saveFailed', { detail: errorMessage(error) }));
+    } finally {
+      setSwitching(false);
+    }
+  };
 
   const changeScanMode = async (mode: LLMScanModeValue) => {
     if (savingScanMode || scanMode.data?.mode === mode) return;
@@ -261,17 +287,18 @@ function BotControl({
   };
 
   const start = async () => {
-    if (draft.mode === 'real') {
-      if (!runtime.data?.credentials[environment]) {
-        toast.error(t(mainnet ? 'bot.toast.needKeysMainnet' : 'bot.toast.needKeysTestnet'));
-        navigate('settings', 'cuenta');
-        return;
-      }
-      if (mainnet && !runtime.data.allow_mainnet_trading) {
-        toast.error(t('bot.toast.needMainnetPermission'));
-        navigate('settings', 'proteccion');
-        return;
-      }
+    if (!runtime.data?.credentials[environment]) {
+      toast.error(t(mainnet ? 'bot.toast.needKeysMainnet' : 'bot.toast.needKeysTestnet'));
+      navigate('settings', 'cuenta');
+      return;
+    }
+    if (mainnet && !runtime.data.allow_mainnet_trading) {
+      toast.error(t('bot.toast.needMainnetPermission'));
+      navigate('settings', 'proteccion');
+      return;
+    }
+    // Real money gets a final confirmation; Testnet uses test funds only.
+    if (mainnet) {
       const confirmed = window.confirm(
         t('bot.confirmReal', {
           venue: t(mainnet ? 'bot.venue.mainnet' : 'bot.venue.testnet'),
@@ -286,7 +313,11 @@ function BotControl({
 
     setBusy(true);
     try {
-      if (draft.mode === 'real') {
+      const ready =
+        runtime.data.execution_mode === 'real' &&
+        runtime.data.enable_real_trading &&
+        runtime.data.enable_autonomous_real_trading;
+      if (!ready) {
         const updated = await apiSend<RuntimeTradingConfigData>('PUT', '/api/v1/trading/runtime-config', {
           execution_mode: 'real',
           enable_real_trading: true,
@@ -300,8 +331,8 @@ function BotControl({
         symbol,
         timeframe,
         interval_seconds: draft.interval,
-        execution_mode: draft.mode,
-        confirm_real_trading: draft.mode === 'real',
+        execution_mode: 'real',
+        confirm_real_trading: true,
         min_confidence_pct: draft.minScore,
         risk_per_trade_pct: RISK_PCT[draft.risk],
         max_open_positions: draft.maxPositions,
@@ -340,7 +371,7 @@ function BotControl({
     }
   };
 
-  const venue = shown.mode === 'real' ? t(mainnet ? 'venue.mainnet' : 'venue.testnet') : t('venue.paper');
+  const venue = t(mainnet ? 'venue.mainnet' : 'venue.testnet');
 
   return (
     <Card>
@@ -370,17 +401,18 @@ function BotControl({
           <Segmented
             label={t('bot.where')}
             block
-            disabled={running}
-            value={shown.mode}
-            onChange={(mode) => update({ mode })}
+            disabled={running || switching || !runtime.data}
+            value={environment}
+            onChange={(target) => void switchNetwork(target)}
             options={[
-              { value: 'paper', label: t('venue.paper') },
-              { value: 'real', label: t(mainnet ? 'venue.mainnet' : 'venue.testnet') },
+              { value: 'testnet', label: t('venue.testnet') },
+              { value: 'mainnet', label: t('venue.mainnet') },
             ]}
           />
           <span className="field-hint">
-            {shown.mode === 'paper' ? t('bot.where.paper') : t(mainnet ? 'bot.where.mainnet' : 'bot.where.testnet')}
+            {running ? t('bot.where.locked') : t(mainnet ? 'bot.where.mainnet' : 'bot.where.testnet')}
           </span>
+          {mainnet && <Notice tone="error">{t('bot.where.mainnetWarning')}</Notice>}
         </div>
 
         <div className="field">
@@ -510,7 +542,7 @@ function GettingStarted({
   navigate: (page: Page, section?: string) => void;
 }) {
   const { t } = useI18n();
-  const hasKeys = Boolean(runtime?.credentials?.testnet || runtime?.credentials?.mainnet);
+  const hasTestnetKeys = Boolean(runtime?.credentials?.testnet);
   return (
     <Card title={t('start.title')}>
       <ol className="steps">
@@ -520,23 +552,23 @@ function GettingStarted({
             <span className="muted">{t('start.market.hint')}</span>
           </span>
         </li>
-        <li>
-          <span>
-            {t('start.paper')}
-            <span className="muted">{t('start.paper.hint')}</span>
-          </span>
-        </li>
-        <li className={hasKeys ? 'done' : ''}>
+        <li className={hasTestnetKeys ? 'done' : ''}>
           <span>
             {t('start.keys')}
             <span className="muted">
-              {hasKeys ? t('start.keys.done') : t('start.keys.hint')}{' '}
-              {!hasKeys && (
+              {hasTestnetKeys ? t('start.keys.done') : t('start.keys.hint')}{' '}
+              {!hasTestnetKeys && (
                 <button type="button" className="btn btn-sm btn-ghost" onClick={() => navigate('settings', 'cuenta')}>
                   {t('start.keys.connect')}
                 </button>
               )}
             </span>
+          </span>
+        </li>
+        <li>
+          <span>
+            {t('start.testnet')}
+            <span className="muted">{t('start.testnet.hint')}</span>
           </span>
         </li>
         <li>

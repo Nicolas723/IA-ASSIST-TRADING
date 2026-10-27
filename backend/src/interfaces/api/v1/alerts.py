@@ -45,5 +45,6 @@ async def send_test_alert(
         title=payload.title,
         message=payload.message,
         severity=payload.severity,
+        metadata={"event": "test"},  # never suppressed as a repeat
     )
     return TestAlertResponse(delivered=delivered, status=service.status())

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import toast from 'react-hot-toast';
 import type { Page } from '../App';
-import { Card, Empty, Notice, PageHead, Pill, Segmented, Skeleton, Stat, SubNav } from '../components/ui';
+import { Card, Empty, Notice, PageHead, Pill, Skeleton, Stat, SubNav } from '../components/ui';
 import { usePolling } from '../hooks/usePolling';
 import { useI18n, type MessageKey } from '../i18n/core';
 import { agentLabel, regimeLabel, signalLabel } from '../i18n/labels';
@@ -150,10 +150,9 @@ function Committee({ symbol, timeframe }: { symbol: string; timeframe: string })
 
 function Learning() {
   const { t } = useI18n();
-  const [mode, setMode] = useState<'all' | 'paper' | 'real'>('all');
   const [symbol, setSymbol] = useState('');
-  const params = new URLSearchParams({ limit: '200' });
-  if (mode !== 'all') params.set('mode', mode);
+  // Real activity only (Testnet or Mainnet); the simulated mode was retired.
+  const params = new URLSearchParams({ limit: '200', mode: 'real' });
   if (symbol) params.set('symbol', symbol);
   const query = params.toString();
 
@@ -175,16 +174,6 @@ function Learning() {
         subtitle={t('learning.subtitle')}
         actions={
           <>
-            <Segmented
-              label={t('ops.filter')}
-              value={mode}
-              onChange={setMode}
-              options={[
-                { value: 'all', label: t('ops.filter.all') },
-                { value: 'paper', label: t('mode.paper') },
-                { value: 'real', label: t('mode.real') },
-              ]}
-            />
             <select
               className="select"
               style={{ width: 'auto' }}

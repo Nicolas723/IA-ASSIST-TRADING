@@ -21,8 +21,9 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
+from src.application.services import trade_alerts
 from src.domain.market.entities import Exchange
-from src.domain.notifications.entities import AlertSeverity
+from src.domain.notifications.entities import Alert, AlertSeverity
 from src.domain.risk.entities import OrderRiskCheckRequest
 from src.domain.trading.entities import (
     ExecutionMode,
@@ -441,17 +442,20 @@ class LiveTradingService:
         if status == "ALL_DONE" and data is not None:
             order = self._oco_exit_order(protection, data)
             if order is not None:
+                position = self._positions.get(protection.symbol)
+                entry = position.entry_price if position is not None else None
                 self._record(order)
-                await self._alert(
-                    "OCO real ejecutado",
-                    f"{protection.symbol}: la OCO {protection.order_list_id} se ejecutó. "
-                    f"Salida registrada @ ${order.average_fill_price:,.2f}.",
-                    AlertSeverity.SUCCESS,
-                    {
-                        "symbol": protection.symbol,
-                        "order_list_id": protection.order_list_id,
-                        "order_id": str(order.id),
-                    },
+                await self._send_alert(
+                    trade_alerts.trade_closed(
+                        symbol=protection.symbol,
+                        quantity=order.filled_quantity,
+                        entry_price=entry,
+                        exit_price=order.average_fill_price,
+                        reason="stop_loss"
+                        if order.order_type == OrderType.STOP_LIMIT
+                        else "take_profit",
+                        testnet=self._on_testnet(),
+                    )
                 )
                 if self._on_execution is not None:
                     await self._on_execution(order)
@@ -598,18 +602,7 @@ class LiveTradingService:
             status=self._oco_status(response) or "EXECUTING",
         )
         self._oco_protections[position.symbol] = protection
-        await self._alert(
-            "OCO real colocada",
-            f"{position.symbol}: OCO {order_list_id} activa. TP ${take_profit:,.2f} / "
-            f"SL ${stop_loss:,.2f} (stop-limit ${stop_limit:,.2f}).",
-            AlertSeverity.SUCCESS,
-            {
-                "symbol": position.symbol,
-                "order_list_id": order_list_id,
-                "quantity": str(position.quantity),
-                "source": source,
-            },
-        )
+        logger.info("oco_placed", symbol=position.symbol, order_list_id=order_list_id)
         return True
 
     async def ensure_oco_protections(self) -> int:
@@ -677,12 +670,7 @@ class LiveTradingService:
             ) from exc
 
         self._remove_oco(protection)
-        await self._alert(
-            "OCO cancelada",
-            f"{symbol}: OCO {protection.order_list_id} cancelada antes de cerrar la posición.",
-            AlertSeverity.INFO,
-            {"symbol": symbol, "order_list_id": protection.order_list_id},
-        )
+        logger.info("oco_cancelled", symbol=symbol, order_list_id=protection.order_list_id)
         return None
 
     async def sync_oco_protections(self) -> list[Order]:
@@ -828,12 +816,7 @@ class LiveTradingService:
                     await adapter.close()
 
         if discovered:
-            await self._alert(
-                "OCO reanudadas",
-                f"Se encontraron {discovered} OCO activas y se reanudó su seguimiento.",
-                AlertSeverity.INFO,
-                {"count": discovered},
-            )
+            logger.info("oco_resumed", count=discovered)
         return discovered
 
     # ------------------------------------------------------------------
@@ -969,18 +952,10 @@ class LiveTradingService:
                 "notes": req.notes or order.notes,
             }
         )
+        # Entry price of what a sell closes, read before the ledger update.
+        prior_position = self._positions.get(order.symbol)
+        prior_entry = prior_position.entry_price if prior_position is not None else None
         self._record(order)
-
-        severity = (
-            AlertSeverity.SUCCESS if order.status == OrderStatus.FILLED else AlertSeverity.INFO
-        )
-        await self._alert(
-            "Orden real ejecutada" if order.status == OrderStatus.FILLED else "Orden real enviada",
-            f"{order.side.value.upper()} {order.quantity} {order.symbol} "
-            f"({order.order_type.value}) en {exchange_id.value} — estado: {order.status.value}.",
-            severity,
-            {"order_id": str(order.id), "symbol": order.symbol, "exchange": exchange_id.value},
-        )
 
         if (
             order.status == OrderStatus.FILLED
@@ -991,6 +966,34 @@ class LiveTradingService:
             and order.take_profit is not None
         ):
             await self._protect_position_with_oco(order)
+
+        # One alert per trade event, sent after the OCO attempt so it can say
+        # how the position is protected.
+        if order.status == OrderStatus.FILLED:
+            price = order.average_fill_price or order.limit_price or Decimal("0")
+            if order.side == OrderSide.BUY:
+                await self._send_alert(
+                    trade_alerts.trade_opened(
+                        symbol=order.symbol,
+                        quantity=order.filled_quantity or order.quantity,
+                        price=price,
+                        stop_loss=order.stop_loss,
+                        take_profit=order.take_profit,
+                        testnet=self._on_testnet(),
+                        protected_by_exchange=order.symbol in self._oco_protections,
+                    )
+                )
+            elif prior_entry is not None:
+                await self._send_alert(
+                    trade_alerts.trade_closed(
+                        symbol=order.symbol,
+                        quantity=order.filled_quantity or order.quantity,
+                        entry_price=prior_entry,
+                        exit_price=price,
+                        reason="manual",
+                        testnet=self._on_testnet(),
+                    )
+                )
         return order
 
     async def close_position(
@@ -1000,6 +1003,7 @@ class LiveTradingService:
         mode: ExecutionMode = ExecutionMode.REAL,
         confirm: bool = True,
         exchange: Exchange | str | None = None,
+        reason: trade_alerts.CloseReason = "manual",
     ) -> Order | None:
         """Close a tracked long position with a market sell."""
         position = next((p for p in self._positions.values() if p.id == position_id), None)
@@ -1013,7 +1017,7 @@ class LiveTradingService:
                 current_market_price=current_market_price,
                 exchange=exchange or position.exchange,
                 confirm=confirm,
-                reason="Cierre de posición",
+                reason=reason,
             )
         finally:
             self._closing.discard(position.id)
@@ -1051,7 +1055,7 @@ class LiveTradingService:
             current_market_price=current_market_price,
             exchange=exchange_id,
             confirm=confirm,
-            reason="Cierre manual por símbolo",
+            reason="manual",
         )
 
     async def _market_sell(
@@ -1061,7 +1065,7 @@ class LiveTradingService:
         current_market_price: float,
         exchange: Exchange | str | None,
         confirm: bool,
-        reason: str,
+        reason: trade_alerts.CloseReason,
     ) -> Order:
         exchange_id = self._exchange(exchange)
         self._assert_can_trade(exchange_id, confirm)
@@ -1089,12 +1093,15 @@ class LiveTradingService:
                 update={"coordinator_decision_id": position.coordinator_decision_id}
             )
         self._record(order)
-        await self._alert(
-            "Posición real cerrada",
-            f"{reason}: SELL {quantity} {symbol} en {exchange_id.value} "
-            f"@ ${current_market_price:,.2f}.",
-            AlertSeverity.WARNING,
-            {"order_id": str(order.id), "symbol": symbol, "exchange": exchange_id.value},
+        await self._send_alert(
+            trade_alerts.trade_closed(
+                symbol=symbol,
+                quantity=order.filled_quantity or Decimal(str(quantity)),
+                entry_price=position.entry_price if position is not None else None,
+                exit_price=order.average_fill_price or Decimal(str(current_market_price)),
+                reason=reason,
+                testnet=self._on_testnet(),
+            )
         )
         return order
 
@@ -1561,24 +1568,26 @@ class LiveTradingService:
                     self._positions.pop(position.symbol, None)
                     removed.append(position.symbol)
                     changed = True
-                    await self._alert(
-                        "Posición real cerrada fuera de la plataforma",
-                        f"{position.symbol} ya no tiene saldo en {exchange_id.value}; "
-                        "se eliminó del ledger local. Revisa el historial del exchange.",
-                        AlertSeverity.WARNING,
-                        {"symbol": position.symbol, "exchange": exchange_id.value},
+                    await self._send_alert(
+                        trade_alerts.trade_closed(
+                            symbol=position.symbol,
+                            quantity=position.quantity,
+                            entry_price=position.entry_price,
+                            exit_price=None,
+                            reason="external",
+                            testnet=self._on_testnet(),
+                        )
                     )
                 elif actual < position.quantity:
                     previous = position.quantity
                     position.quantity = actual
                     position.updated_at = datetime.now(tz=UTC)
                     changed = True
-                    await self._alert(
-                        "Posición real ajustada",
-                        f"{position.symbol}: cantidad local {previous} ajustada a {actual} "
-                        f"según el saldo de {exchange_id.value}.",
-                        AlertSeverity.WARNING,
-                        {"symbol": position.symbol, "exchange": exchange_id.value},
+                    logger.info(
+                        "live_position_adjusted",
+                        symbol=position.symbol,
+                        previous=str(previous),
+                        actual=str(actual),
                     )
         if changed and self._on_reconcile is not None:
             try:
@@ -1606,10 +1615,12 @@ class LiveTradingService:
             if price is None:
                 continue
             triggered_reason: str | None = None
+            close_reason: trade_alerts.CloseReason = "stop_loss"
             if position.stop_loss is not None and price <= float(position.stop_loss):
                 triggered_reason = "Stop-Loss"
             elif position.take_profit is not None and price >= float(position.take_profit):
                 triggered_reason = "Take-Profit"
+                close_reason = "take_profit"
             if triggered_reason is None:
                 continue
 
@@ -1619,6 +1630,7 @@ class LiveTradingService:
                     current_market_price=price,
                     confirm=True,
                     exchange=position.exchange,
+                    reason=close_reason,
                 )
             except Exception as exc:
                 logger.warning(
@@ -1636,14 +1648,8 @@ class LiveTradingService:
                 )
                 continue
             if order is not None:
+                # The close alert (with the result) is sent by _market_sell.
                 exits.append(order)
-                await self._alert(
-                    f"{triggered_reason} real activado",
-                    f"{triggered_reason} de {position.symbol} @ ${price:,.2f}. "
-                    "Posición cerrada con orden de mercado.",
-                    AlertSeverity.CRITICAL,
-                    {"symbol": position.symbol, "order_id": str(order.id)},
-                )
                 if self._on_execution is not None:
                     await self._on_execution(order)
         return exits
@@ -1732,6 +1738,18 @@ class LiveTradingService:
             await self.alert_service.notify(title, message, severity, metadata)
         except Exception as exc:  # pragma: no cover - alerting is best-effort
             logger.warning("live_alert_failed", error=str(exc))
+
+    async def _send_alert(self, alert: Alert) -> None:
+        """Send a pre-built alert (trade open/close). Best-effort."""
+        if self.alert_service is None:
+            return
+        try:
+            await self.alert_service.send(alert)
+        except Exception as exc:  # pragma: no cover - alerting is best-effort
+            logger.warning("live_alert_failed", error=str(exc))
+
+    def _on_testnet(self) -> bool:
+        return self.settings.trading_environment.value == "testnet"
 
     async def ensure_exchange_ready(
         self, exchange: Exchange | str | None = None

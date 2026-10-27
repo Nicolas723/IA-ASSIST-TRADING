@@ -118,8 +118,9 @@ async def test_telegram(
 ) -> TelegramTestResponse:
     delivered = await alert_service.notify(
         title="Prueba de alertas",
-        message="Si recibes este mensaje, Telegram está configurado correctamente.",
+        message="Telegram está conectado. Aquí llegarán las compras y los cierres del asistente.",
         severity=AlertSeverity.INFO,
+        metadata={"event": "test"},  # never suppressed as a repeat
     )
     return TelegramTestResponse(delivered=delivered, status=alert_service.status())
 

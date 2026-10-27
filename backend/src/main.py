@@ -260,23 +260,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
 
     # Safety check: prevent accidental real trading
     if settings.real_trading_enabled:
+        # Logged only. It used to be a Telegram alert too, which resent the same
+        # message on every restart (and the dev server restarts on each save).
         logger.warning(
             "real_trading_enabled",
             message="⚠️  REAL TRADING IS ENABLED. Orders will be executed with real funds.",
         )
-        try:
-            from src.domain.notifications.entities import AlertSeverity
-            from src.interfaces.api.v1.deps import get_alert_service
-
-            await get_alert_service().notify(
-                "Trading real activado",
-                "El backend ha arrancado con trading real habilitado. "
-                "Las órdenes confirmadas se enviarán al exchange.",
-                AlertSeverity.CRITICAL,
-                {"execution_mode": settings.execution_mode.value},
-            )
-        except Exception as e:
-            logger.warning("startup_alert_failed", error=str(e))
     else:
         logger.info(
             "paper_mode_active", message="Paper trading mode — no real orders will be placed."

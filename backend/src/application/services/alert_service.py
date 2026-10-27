@@ -8,11 +8,18 @@ method here swallows transport errors after logging them.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import os
+import sys
+import time
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from src.application.services.trade_alerts import TRADE_EVENTS
 from src.domain.notifications.entities import (
     SEVERITY_RANK,
     Alert,
@@ -30,6 +37,20 @@ if TYPE_CHECKING:
     from src.shared.config.settings import Settings
 
 logger = get_logger(__name__)
+
+# Same warning at most once per 6 hours (persisted across restarts).
+DEFAULT_DEDUPE_WINDOW_SECONDS = 6 * 3600
+_DEFAULT_DEDUPE_FILE = Path(__file__).resolve().parents[3] / "vault" / ".alert_dedupe.json"
+
+
+def _default_dedupe_path() -> Path | None:
+    """File store in production; in-memory under pytest unless a path is set."""
+    configured = os.getenv("ALERT_DEDUPE_PATH", "").strip()
+    if configured:
+        return Path(configured)
+    if "pytest" in sys.modules:
+        return None
+    return _DEFAULT_DEDUPE_FILE
 
 
 def _build_channels(settings: Settings) -> list[NotificationPort]:
@@ -84,6 +105,8 @@ class AlertService:
         channels: Sequence[NotificationPort] | None = None,
         enabled: bool = False,
         min_severity: AlertSeverity = AlertSeverity.INFO,
+        dedupe_window_seconds: float = DEFAULT_DEDUPE_WINDOW_SECONDS,
+        dedupe_path: Path | None = None,
     ) -> None:
         self._channels = list(channels or [])
         self._enabled = enabled
@@ -92,6 +115,9 @@ class AlertService:
         self._failed_count = 0
         self._last_sent_at: datetime | None = None
         self._last_error: str | None = None
+        self._dedupe_window = dedupe_window_seconds
+        self._dedupe_path = dedupe_path or _default_dedupe_path()
+        self._recent: dict[str, float] = self._load_recent()
 
     @classmethod
     def from_settings(cls, settings: Settings) -> AlertService:
@@ -153,9 +179,52 @@ class AlertService:
             )
         )
 
+    # ------------------------------------------------------------------
+    # Repeat suppression
+    # ------------------------------------------------------------------
+    def _load_recent(self) -> dict[str, float]:
+        if self._dedupe_path is None:
+            return {}
+        try:
+            raw = json.loads(self._dedupe_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return {str(k): float(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+    def _save_recent(self) -> None:
+        if self._dedupe_path is None:
+            return
+        try:
+            self._dedupe_path.parent.mkdir(parents=True, exist_ok=True)
+            self._dedupe_path.write_text(json.dumps(self._recent), encoding="utf-8")
+        except Exception as exc:
+            logger.warning("alert_dedupe_save_failed", error=str(exc))
+
+    def _is_repeat(self, alert: Alert) -> bool:
+        """True when the same warning was already sent inside the window.
+
+        Trade events are never suppressed: two identical trades are two trades.
+        The window is persisted, so a backend restart does not resend the same
+        warning (restarts used to resend every startup/restore alert).
+        """
+        event = alert.metadata.get("event")
+        if event in TRADE_EVENTS or event == "test" or self._dedupe_window <= 0:
+            return False
+        now = time.time()
+        self._recent = {k: t for k, t in self._recent.items() if now - t < self._dedupe_window}
+        key = hashlib.sha256(f"{alert.title}\n{alert.message}".encode()).hexdigest()[:16]
+        if key in self._recent:
+            return True
+        self._recent[key] = now
+        self._save_recent()
+        return False
+
     async def send(self, alert: Alert) -> bool:
         """Deliver an alert to all configured channels. Never raises."""
         if SEVERITY_RANK[alert.severity] < SEVERITY_RANK[self._min_severity]:
+            return False
+        if self._is_repeat(alert):
+            logger.info("alert_suppressed_repeat", title=alert.title)
             return False
 
         configured = [channel for channel in self._channels if channel.is_configured]

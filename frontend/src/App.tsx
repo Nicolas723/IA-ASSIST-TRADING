@@ -66,7 +66,6 @@ export default function App() {
     30000,
   );
 
-  const realMode = runtime.data?.execution_mode === 'real';
   const mainnet = runtime.data?.trading_environment === 'mainnet';
   const running = Boolean(bot.data?.is_running);
 
@@ -105,8 +104,8 @@ export default function App() {
             <Pill dot live={running} tone={running ? 'solid' : 'default'} title={t('header.botState')}>
               {running ? t('header.running') : t('header.paused')}
             </Pill>
-            <Pill tone={realMode && mainnet ? 'neg' : 'default'} title={t('header.venue')}>
-              {!realMode ? t('venue.paper') : mainnet ? t('venue.mainnet') : t('venue.testnet')}
+            <Pill tone={mainnet ? 'neg' : 'default'} title={t('header.venue')}>
+              {mainnet ? t('venue.mainnet') : t('venue.testnet')}
             </Pill>
             <label className="sr-only" htmlFor="lang">
               {t('header.language')}

@@ -77,7 +77,8 @@ async def test_telegram_sends_message(monkeypatch: Any) -> None:
     assert client.posted_url is not None and "token" in client.posted_url
     assert client.posted_json is not None
     assert client.posted_json["chat_id"] == "chat"
-    assert client.posted_json["text"].startswith("[WARNING] Título")
+    assert client.posted_json["parse_mode"] == "HTML"
+    assert client.posted_json["text"].startswith("⚠️ <b>Título</b>")
 
 
 async def test_telegram_reports_http_error(monkeypatch: Any) -> None:
