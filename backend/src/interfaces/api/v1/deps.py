@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Annotated
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.application.services.account_snapshot_service import AccountSnapshotService
+from src.application.services.adaptive_weights import build_adaptive_weights_report
 from src.application.services.agent_service import AgentService
 from src.application.services.alert_service import AlertService
 from src.application.services.autonomous_engine import (
@@ -19,6 +21,7 @@ from src.application.services.autonomous_engine import (
 )
 from src.application.services.concentration_service import ConcentrationService
 from src.application.services.indicator_service import IndicatorService
+from src.application.services.integration_settings_service import IntegrationSettingsService
 from src.application.services.journal import (
     persist_live_order_to_database,
     persist_order_to_database,
@@ -57,11 +60,14 @@ from src.infrastructure.persistence.repositories.shadow_scan_repository import (
 from src.infrastructure.persistence.repositories.trading_repository import SqlTradingRepository
 from src.infrastructure.security.credential_vault import CredentialVault
 from src.shared.config.settings import get_settings
+from src.shared.logging.setup import get_logger
 from src.shared.plugins.registry import PluginRegistry
 
 if TYPE_CHECKING:
     from src.domain.agents.entities import CoordinatorDecision
     from src.domain.trading.entities import Order
+
+logger = get_logger(__name__)
 
 # Shared in-memory audit trail. Request handlers and per-cycle background
 # services both append to it so the UI history does not reset every cycle.
@@ -81,7 +87,9 @@ _observability_service: ObservabilityService | None = None
 _autonomous_engine: AutonomousEngine | None = None
 _alert_service: AlertService | None = None
 _live_trading_service: LiveTradingService | None = None
+_account_snapshot_service: AccountSnapshotService | None = None
 _runtime_config_service: RuntimeConfigService | None = None
+_integration_settings_service: IntegrationSettingsService | None = None
 _llm_gateway: LLMGateway | None = None
 _llm_gateway_initialized = False
 
@@ -269,6 +277,41 @@ def get_runtime_config_service() -> RuntimeConfigService:
     return _runtime_config_service
 
 
+def get_integration_settings_service() -> IntegrationSettingsService:
+    """Singleton for UI-managed LLM, Telegram and heartbeat settings."""
+    global _integration_settings_service
+    if _integration_settings_service is None:
+        _integration_settings_service = IntegrationSettingsService(settings=get_settings())
+    return _integration_settings_service
+
+
+def refresh_llm_gateway() -> None:
+    """Rebuild the provider gateway after credentials or routing changed.
+
+    The coordinator is a singleton and keeps its own reference, so it is
+    updated too; otherwise the next analysis would keep using the old gateway.
+    """
+    global _llm_gateway, _llm_gateway_initialized
+    _llm_gateway = create_llm_gateway(get_settings())
+    _llm_gateway_initialized = True
+    if _agent_service is not None:
+        _agent_service.coordinator.set_llm_gateway(_llm_gateway)
+    logger.info(
+        "llm_gateway_refreshed",
+        configured_providers=_llm_gateway.configured_providers if _llm_gateway else [],
+    )
+
+
+def refresh_alert_service() -> AlertService:
+    """Reload notification channels in place, preserving counters."""
+    global _alert_service
+    if _alert_service is None:
+        _alert_service = AlertService.from_settings(get_settings())
+    else:
+        _alert_service.reload_from_settings(get_settings())
+    return _alert_service
+
+
 def get_observability_service() -> ObservabilityService:
     global _observability_service
     if _observability_service is None:
@@ -296,6 +339,37 @@ def get_live_trading_service() -> LiveTradingService:
     return _live_trading_service
 
 
+def get_account_snapshot_service() -> AccountSnapshotService:
+    """Account equity and P&L snapshot priced through the public feed.
+
+    Prices come from the same market-data adapter the rest of the app uses, so
+    a non-USDT balance is valued without touching the exchange's private API.
+    """
+    global _account_snapshot_service
+    if _account_snapshot_service is None:
+        fetcher = get_market_data_fetcher()
+
+        async def _price_lookup(symbol: str) -> float | None:
+            try:
+                price = float(await fetcher.fetch_last_price(symbol))
+            except Exception as exc:
+                logger.warning("account_snapshot_price_unavailable", symbol=symbol, error=str(exc))
+                return None
+            return price if price > 0 else None
+
+        async def _batch_price_lookup(symbols: list[str]) -> dict[str, float]:
+            # One fetch_tickers request for the whole balance list.
+            prices = await fetcher.fetch_last_prices(symbols)
+            return {symbol: float(price) for symbol, price in prices.items()}
+
+        _account_snapshot_service = AccountSnapshotService(
+            live_service=get_live_trading_service(),
+            price_lookup=_price_lookup,
+            batch_price_lookup=_batch_price_lookup,
+        )
+    return _account_snapshot_service
+
+
 @asynccontextmanager
 async def autonomous_cycle_services() -> AsyncIterator[AutonomousCycleServices]:
     """Build services for exactly one background cycle.
@@ -310,10 +384,28 @@ async def autonomous_cycle_services() -> AsyncIterator[AutonomousCycleServices]:
             exchange=get_market_data_fetcher(),
             repository=TimescaleCandleRepository(session),
         )
+        decision_repository = SqlDecisionRepository(session)
+        coordinator = AgentCoordinator(llm_gateway=get_llm_gateway())
+        settings = get_settings()
+        if settings.adaptive_agent_weights_enabled:
+            # Learning loop: weight each specialist by its measured accuracy.
+            # Best-effort; a failure keeps the default weights for this cycle.
+            try:
+                report = await build_adaptive_weights_report(
+                    decision_repository=decision_repository,
+                    trading_repository=SqlTradingRepository(session),
+                    enabled=True,
+                    min_samples=settings.adaptive_weights_min_samples,
+                )
+                if report.applied:
+                    coordinator.set_agent_weights(report.weights)
+                    logger.info("adaptive_agent_weights_applied", weights=report.weights)
+            except Exception as exc:
+                logger.warning("adaptive_agent_weights_failed", error=str(exc))
         agent_service = AgentService(
-            coordinator=AgentCoordinator(llm_gateway=get_llm_gateway()),
+            coordinator=coordinator,
             market_service=market_service,
-            decision_repository=SqlDecisionRepository(session),
+            decision_repository=decision_repository,
             research_repository=SqlResearchRepository(session),
             decision_history=_decision_history,
         )

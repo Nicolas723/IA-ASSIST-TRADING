@@ -133,6 +133,31 @@ class LiveExchangeAdapter:
             "latency_ms": latency_ms,
         }
 
+    async def fetch_api_restrictions(self) -> dict[str, Any] | None:
+        """Read the key's own permissions from Binance (read-only).
+
+        Returns None where the exchange cannot report them: Binance Testnet
+        has no ``/sapi`` endpoints and other exchanges use different APIs.
+        """
+        if self._exchange_id != Exchange.BINANCE or self.is_testnet:
+            return None
+        self._require_credentials()
+        client = self._require_client()
+        method = getattr(client, "sapi_get_account_apirestrictions", None)
+        if method is None:
+            return None
+        # Loading markets also syncs the clock offset (adjustForTimeDifference);
+        # without it Binance rejects the signed call with -1021.
+        await self._ensure_markets(client)
+        try:
+            raw = await method()
+        except Exception as exc:
+            logger.warning(
+                "api_restrictions_unavailable", exchange=self.exchange_id.value, error=str(exc)
+            )
+            raise ExchangeError(f"Could not read API key restrictions: {exc}") from exc
+        return raw if isinstance(raw, dict) else None
+
     async def fetch_balances(self) -> dict[str, float]:
         """Query live balances (only assets with a non-dust amount)."""
         self._require_credentials()
@@ -150,6 +175,35 @@ class LiveExchangeAdapter:
                 "fetch_live_balance_failed", exchange=self.exchange_id.value, error=str(exc)
             )
             raise ExchangeError(f"Failed to fetch live balance: {exc}") from exc
+
+    async def fetch_balance_details(self) -> dict[str, dict[str, float]]:
+        """Return total/free/used per asset in a single exchange request."""
+        self._require_credentials()
+        client = self._require_client()
+        await self._ensure_markets(client)
+        try:
+            raw = await client.fetch_balance()
+        except Exception as exc:
+            logger.error(
+                "fetch_live_balance_failed", exchange=self.exchange_id.value, error=str(exc)
+            )
+            raise ExchangeError(f"Failed to fetch live balance: {exc}") from exc
+
+        totals = raw.get("total", {}) or {}
+        free = raw.get("free", {}) or {}
+        used = raw.get("used", {}) or {}
+        details: dict[str, dict[str, float]] = {}
+        for currency in set(totals) | set(free) | set(used):
+            total = float(totals.get(currency, 0.0) or 0.0)
+            available = float(free.get(currency, 0.0) or 0.0)
+            locked = float(used.get(currency, 0.0) or 0.0)
+            if max(total, available, locked) > 0.00001:
+                details[currency] = {
+                    "total": total,
+                    "free": available,
+                    "used": locked,
+                }
+        return details
 
     async def fetch_free_balance(self, asset: str) -> float:
         """Return the free (available) balance for a single asset."""
@@ -468,6 +522,13 @@ class LiveExchangeAdapter:
         if getattr(client, "markets", None):
             return
         try:
+            # On Binance mainnet load_markets() first calls a *signed*
+            # currencies endpoint and only syncs the clock afterwards, so a
+            # local clock ahead of the server fails with -1021. Sync first.
+            options = getattr(client, "options", None) or {}
+            sync_clock = getattr(client, "load_time_difference", None)
+            if options.get("adjustForTimeDifference") and sync_clock is not None:
+                await sync_clock()
             await client.load_markets()
         except Exception as exc:
             raise ExchangeError(f"Failed to load exchange markets: {exc}") from exc

@@ -85,3 +85,36 @@ class HeartbeatService:
             logger.warning("heartbeat_ping_rejected", status_code=response.status_code)
             return False
         return True
+
+
+class HeartbeatManager:
+    """Own the heartbeat task so the UI can reconfigure it without a restart."""
+
+    def __init__(self) -> None:
+        self._service: HeartbeatService | None = None
+
+    @property
+    def service(self) -> HeartbeatService | None:
+        return self._service
+
+    @property
+    def running(self) -> bool:
+        return self._service is not None and self._service.enabled
+
+    async def restart(self, *, url: str, interval_seconds: int = 60) -> None:
+        """Stop the current loop and start a new one with the given settings."""
+        await self.stop()
+        if not (url or "").strip():
+            logger.info("heartbeat_disabled")
+            return
+        self._service = HeartbeatService(url=url, interval_seconds=interval_seconds)
+        await self._service.start()
+
+    async def stop(self) -> None:
+        service = self._service
+        self._service = None
+        if service is not None:
+            await service.stop()
+
+
+heartbeat_manager = HeartbeatManager()

@@ -8,6 +8,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from src.application.services.adaptive_weights import (
+    AdaptiveWeightsReport,
+    build_adaptive_weights_report,
+    compute_adaptive_weights,
+)
 from src.application.services.drift_monitor_service import DriftMonitorService, DriftReport
 from src.application.services.learning_service import LearningService
 from src.domain.analytics.entities import DecisionOutcome, PerformanceSummary
@@ -19,6 +24,7 @@ from src.infrastructure.persistence.repositories.trading_repository import (
     SqlTradingRepository,
 )
 from src.interfaces.api.v1.deps import get_decision_repository, get_trading_repository
+from src.shared.config.settings import get_settings
 from src.shared.logging.setup import get_logger
 
 logger = get_logger(__name__)
@@ -62,6 +68,37 @@ async def get_performance(
     except Exception as exc:  # pragma: no cover - defensive DB fallback
         logger.warning("mlops_performance_unavailable", error=str(exc))
         return PerformanceSummary(data_available=False)
+
+
+@router.get(
+    "/agent-weights",
+    response_model=AdaptiveWeightsReport,
+    summary="Preview or inspect adaptive committee weights",
+)
+async def get_agent_weights(
+    decision_repository: Annotated[SqlDecisionRepository, Depends(get_decision_repository)],
+    trading_repository: Annotated[SqlTradingRepository, Depends(get_trading_repository)],
+) -> AdaptiveWeightsReport:
+    """Weights the committee would use given each specialist's measured accuracy.
+
+    Read-only. They only reach live decisions when
+    ``ADAPTIVE_AGENT_WEIGHTS_ENABLED=true``; otherwise this is a preview.
+    """
+    settings = get_settings()
+    try:
+        return await build_adaptive_weights_report(
+            decision_repository=decision_repository,
+            trading_repository=trading_repository,
+            enabled=settings.adaptive_agent_weights_enabled,
+            min_samples=settings.adaptive_weights_min_samples,
+        )
+    except Exception as exc:  # pragma: no cover - defensive DB fallback
+        logger.warning("mlops_agent_weights_unavailable", error=str(exc))
+        return compute_adaptive_weights(
+            [],
+            enabled=settings.adaptive_agent_weights_enabled,
+            min_samples=settings.adaptive_weights_min_samples,
+        )
 
 
 @router.get(

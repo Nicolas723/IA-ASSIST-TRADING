@@ -54,6 +54,10 @@ async def test_api_vault_status(async_client: AsyncClient):
     assert response.status_code == 200
     data = response.json()
     assert isinstance(data, list)
+    # Ciphertexts must never be sent to the browser.
+    for item in data:
+        assert "encrypted_api_key" not in item
+        assert "encrypted_secret" not in item
 
 
 @pytest.mark.integration

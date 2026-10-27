@@ -9,7 +9,7 @@
 **AI Trading Assistant** es una plataforma de trading algorítmico y cuantitativo asistida por Inteligencia Artificial y un **Comité Multi-Agente**.
 - **Modo Paper Trading (Virtual)**: Simulación completa con $10,000 USDT virtuales, cálculo de comisiones, slippage, PnL en tiempo real y Stop Loss / Take Profit automáticos.
 - **Modo Real / Testnet**: Conexión con exchanges (Binance / Bybit) mediante CCXT y almacenamiento seguro de claves cifradas con AES-256 en un Credential Vault.
-- **Frontend Moderno e Intuitivo**: Hecho en React + Vite + Vanilla CSS, 100% en español. La vista principal reúne gráfico y asistente autónomo; la interfaz no expone compra/venta manual. Las métricas técnicas se agrupan bajo “Avanzado”.
+- **Frontend minimalista e intuitivo**: React + Vite + CSS propio, 100 % en español, diseño monocromo (blanco y negro, modo oscuro automático; el color solo marca ganancias, pérdidas y dinero real). La vista principal reúne gráfico y asistente autónomo; la interfaz no expone compra/venta manual. Las métricas técnicas se agrupan bajo «Avanzado».
 
 ---
 
@@ -29,11 +29,12 @@
   - *Nota*: El comité usa una cadena de proveedores LLM en este orden: **Claude → ChatGPT → Google → DeepSeek → análisis determinista**. Solo se registran los proveedores con una API key no vacía, así que la cadena sigue funcionando mientras se añaden credenciales. Los proveedores con cuota agotada, saldo insuficiente o credenciales rechazadas quedan en cooldown y no consumen peticiones. Sin proveedores configurados conserva análisis determinista; sus resultados aún no entrenan automáticamente los modelos.
 
 ### **Frontend (TypeScript / React 19 / Vite)**
-- **UI & Diseño**: Vanilla CSS moderno con glassmorphism, modo oscuro con gradientes cuidados, micro-animaciones y diseño adaptable (desktop y móvil).
-- **Organización de la interfaz**:
-  1. `Asistente`: gráfico interactivo de velas y precio vivo, selección de par/temporalidad, señal del comité en lenguaje sencillo y controles para iniciar/pausar el bot autónomo.
-  2. `Configuración`: conexión con Binance y ajustes principales.
-  3. `Avanzado`: comité de analistas, MLOps, estrategia, límites, alertas y diagnóstico. La interfaz de operación manual y la pestaña de cartera se retiraron del recorrido normal.
+- **UI & Diseño**: sistema de diseño monocromo con tokens CSS (`src/index.css`), tipografía Inter con cifras tabulares, iconos SVG propios (`components/Icon.tsx`, sin emojis), foco visible, objetivos táctiles ≥44 px y diseño adaptable. Modo oscuro automático por `prefers-color-scheme`.
+- **Organización de la interfaz** (navegación por hash: `#/asistente`, `#/configuracion/<sección>`, `#/avanzado/<sección>`; el botón Atrás funciona):
+  1. `Asistente`: gráfico de velas monocromo (alcistas huecas, bajistas rellenas) con precio vivo, lectura del comité en lenguaje sencillo, actividad reciente, panel fijo del bot (dónde opera, nivel de riesgo, consumo de IA, ajustes y emergencia) y guía de primeros pasos.
+  2. `Configuración`: Cuenta y exchange (saldo real, claves Binance con verificación de permisos), Inteligencia artificial (proveedores y cadena de respaldo), Alertas (Telegram, heartbeat, canales) y Límites y protección (red activa, máximo por orden, mercados, OCO, estado del trading real).
+  3. `Avanzado`: Comité (consulta puntual y pesos), Aprendizaje (resultados, pesos adaptativos, drift), Riesgo, Mercado (régimen, escaneo, notas), Consumo de IA y Sistema.
+- **Código**: `App.tsx` es solo el shell; vistas en `src/views/`, primitivas en `components/ui.tsx`, hooks `usePolling` (pausa con la pestaña oculta y descarta respuestas obsoletas) y `useMarketStream` (REST + WebSocket), cliente `lib/api.ts` y formateadores `lib/format.ts`.
 
 ### **Infraestructura (Docker Compose)**
 Ubicación: `infra/docker/docker-compose.yml`
@@ -244,16 +245,19 @@ ai-trading-assistant/
 │   │   ├── plugins/                            # strategies/ e indicators/ (auto-descubiertos)
 │   │   └── shared/                             # config, logging, exceptions, observability, plugins, types
 │   └── tests/
-│       ├── unit/                               # 66 tests unitarios (72.7% cobertura), incl. test_persistence.py y test_strategy_plugins.py
+│       ├── unit/                               # Tests unitarios (ver §8 para el recuento vigente)
 │       └── integration/
 ├── frontend/
 │   ├── src/
-│   │   ├── App.tsx                             # Dashboard por pestañas en español
-│   │   ├── App.css                             # Estilos glassmorphism / modo oscuro
-│   │   ├── components/
-│   │   │   ├── MarketChart.tsx                 # Gráfico SVG de velas + línea de precio en vivo
-│   │   │   └── BacktestCharts.tsx              # Curva de equidad
-│   │   └── main.tsx
+│   │   ├── App.tsx                             # Shell: cabecera, navegación por hash y estado compartido
+│   │   ├── index.css                           # Sistema de diseño monocromo (tokens + componentes)
+│   │   ├── types.ts                            # Tipos de la API y constantes (mercados, etiquetas)
+│   │   ├── views/                              # AssistantView, SettingsView, AdvancedView
+│   │   ├── components/                         # ui.tsx, Icon.tsx, MarketChart, AccountBalanceCard, IntegrationsSettings
+│   │   ├── hooks/                              # usePolling, useMarketStream, useIntegrations
+│   │   ├── lib/                                # api.ts (cliente HTTP), format.ts (formateadores)
+│   │   └── main.tsx                            # Arranque + ErrorBoundary
+│   ├── vitest.config.ts                        # Tests de frontend (jsdom + Testing Library)
 │   └── package.json
 ├── infra/
 │   └── docker/
@@ -368,8 +372,37 @@ ai-trading-assistant/
 - **Runbook**: `docs/RUNBOOK_PRODUCCION.md` cubre preflight, backups/restauración, OCO, auth, heartbeat, incidentes y la checklist explícita de Mainnet (aún no ejecutada).
 - **Verificación**: **406 tests aprobados**, cobertura **80,23 %**, Ruff/MyPy/formateo y `npm run build` correctos. Backup real verificado restaurando en base temporal (`orders=15`, `positions=1`, `trades=15`, `portfolio_snapshots=17`, `decision_logs=50`, `shadow_scan_runs=150`) y ensayo de restauración en `trading_db_rehearsal` correcto.
 
+### Integraciones desde la UI, aprendizaje, rediseño y Mainnet (2026-10-26)
+
+**Configuración sin `.env`**
+- `GET /api/v1/settings/integrations` y `PUT /api/v1/settings/{llm,telegram,heartbeat}` (+ `/test`): claves LLM, modelos, cadena de respaldo, Telegram y heartbeat se guardan cifrados en `vault/.secure_settings.json` (`SecureSettingsStore`, Fernet con `API_KEY_ENCRYPTION_KEY`) y se aplican en caliente: el gateway LLM y los canales de alerta se reconstruyen sin reiniciar. Los secretos nunca se devuelven en claro. El primario se elimina de la lista de respaldo para no reintentarlo dos veces.
+- El backend sirve el frontend compilado (`frontend/dist` o `FRONTEND_DIST_PATH`) en el mismo puerto 8000.
+
+**Saldo de cuenta**
+- `GET /api/v1/trading/real/account/snapshot` valora todos los saldos en USDT con **una sola** llamada `fetch_tickers` (`MarketDataPort.fetch_last_prices`), cachea 15 min los activos sin mercado USDT y valora los saldos de Simple Earn (`LDUSDT`, `LDBTC`) por su activo base. `POST /real/account/baseline` fija la referencia de ganancias; un fallo pasajero de precios no se guarda como referencia.
+
+**Aprendizaje continuo (pesos adaptativos)**
+- `application/services/adaptive_weights.py`: el acierto direccional medido de cada analista ajusta su peso de voto, con contracción hacia el 50 % (prior de 20 observaciones), mínimo `ADAPTIVE_WEIGHTS_MIN_SAMPLES=20` decisiones, multiplicador acotado a [0,5; 1,5] y renormalización. El gestor de riesgo conserva su peso. **Desactivado por defecto** (`ADAPTIVE_AGENT_WEIGHTS_ENABLED=false`); `GET /api/v1/mlops/agent-weights` muestra la vista previa. Si se activa, cada ciclo autónomo lo aplica de forma best-effort.
+
+**Durabilidad y seguridad**
+- Contadores diarios de tokens/peticiones y cooldowns de proveedores persistidos en `vault/.llm_usage_state.json` (`usage_store.py`): un reinicio o reconstruir el gateway tras un cambio en la UI ya no reinicia el presupuesto diario.
+- Middleware anti-CSRF: rechaza `POST/PUT/PATCH/DELETE` con `Origin` ajeno (403). Acepta el mismo origen, `APP_CORS_ORIGINS` y cualquier origen loopback (el proxy de Vite conserva `Origin: localhost:5173`).
+- `/api/v1/vault/status` ya no envía al navegador las claves cifradas (`CredentialSummary`).
+- **Permisos de clave verificados de verdad**: «Probar conexión» lee `GET /sapi/v1/account/apiRestrictions` (solo Mainnet) y registra trading, retiradas e IP en el vault (`permissions_verified_at`). Guardar una clave ya no la marca como verificada. Activar Mainnet exige esa verificación y rechaza claves con permiso de retirada.
+- **Reloj vs. Binance Mainnet**: el adaptador sincroniza la hora antes de `load_markets()`; CCXT llamaba antes a un endpoint firmado y fallaba con `-1021` si el reloj local iba adelantado (el contenedor iba ~1,9 s por delante). Sin esto Mainnet no podía firmar ninguna petición.
+- Correcciones de la revisión: test roto de `account_balances`, el store cifrado ya no escribe en disco bajo pytest, el heartbeat se detiene al apagar aunque se activara desde la UI.
+
+**Frontend**
+- Rediseño completo descrito en §2. `App.tsx` pasó de ~3.100 líneas a un shell; se eliminaron `App.css`, `BacktestCharts.tsx` y assets de plantilla. Oxlint: 0 avisos (antes 7).
+- Tests: Vitest + Testing Library (`npm test`, 15 tests), incluidos en CI.
+
+**Mainnet**
+- Checklist de `docs/RUNBOOK_PRODUCCION.md` §11 ejecutada con autorización del operador sobre una cuenta sin fondos spot: clave verificada en Binance (trading sí, retiradas no, IP restringida), backup/restauración, Telegram, heartbeat y kill-switch probados, cambio a Mainnet con 0 posiciones y sesión real sin auto-ejecución (0 órdenes). **Estado: Mainnet activo, asistente detenido, máximo 50 USDT por orden.** Solo hay 3,05 USDT en Simple Earn, no operables en spot.
+
+**Verificación**: 429 tests de backend (cobertura 79,3 %), Ruff/MyPy/formateo sin errores; 15 tests de frontend, Oxlint sin avisos y `npm run build` correcto.
+
 ---
 
 *Fin del resumen de traspaso. Al iniciar el nuevo chat, comparte este archivo o pide continuar a partir de la sección 8.*
 
-*Última actualización: 2026-10-26. Trading real activado explícitamente en Testnet (Mainnet bloqueado) y smoke test real compra/venta validado. Guard de correlación aplicado al sizing autónomo (reduce ≥0,75, bloquea ≥0,95). Detector de régimen de mercado y informe de concentración/correlación solo lectura, con paneles en la interfaz; etiquetas de régimen en el escaneo shadow y recuperación de órdenes cerradas propias dentro de una ventana configurable. El motor autónomo incorpora pre-escaneo multimercado determinista con selección del mejor candidato permitido y seguimiento de SL/TP de todas las posiciones. La interfaz añade tres modos de consumo IA (Ahorro, Normal, Alto) persistidos sin reiniciar, con análisis batch secuencial o paralelo y un único presupuesto de ciclo por lote. Cadena LLM configurada como Claude → ChatGPT → Google → DeepSeek → determinista, con adaptadores que se activan al añadir su API key en `.env`; validada con Google Gemini y presupuestos diario/ciclo, tope duro por llamada y claves cargadas desde `.env`. Se añadió Groq como proveedor gratuito permanente (OpenAI-compatible, `openai/gpt-oss-120b`, 1.000 peticiones y 200.000 tokens/día). CI extendido a `master`. Endurecimiento P0: OCO para posiciones existentes, heartbeat externo, backups verificados, API key opcional, vault con clave explícita y puertos en loopback; runbook en `docs/RUNBOOK_PRODUCCION.md`. Verificación local: 406 tests aprobados (cobertura 80,23 %), Ruff/MyPy/formateo y build TypeScript/Vite correctos. La migración Alembic d5e2b3c4f6a7 está aplicada a la base local.*
+*Última actualización: 2026-10-26 (noche). Mainnet activado tras ejecutar la checklist del runbook (cuenta sin fondos spot, asistente detenido). Configuración de IA, Telegram y heartbeat desde la UI, pesos adaptativos del comité (desactivados por defecto), presupuesto LLM persistente, protección anti-CSRF, verificación real de permisos de la clave y rediseño monocromo del frontend con tests propios. Historial previo: trading real activado explícitamente en Testnet y smoke test real compra/venta validado. Guard de correlación aplicado al sizing autónomo (reduce ≥0,75, bloquea ≥0,95). Detector de régimen de mercado y informe de concentración/correlación solo lectura, con paneles en la interfaz; etiquetas de régimen en el escaneo shadow y recuperación de órdenes cerradas propias dentro de una ventana configurable. El motor autónomo incorpora pre-escaneo multimercado determinista con selección del mejor candidato permitido y seguimiento de SL/TP de todas las posiciones. La interfaz añade tres modos de consumo IA (Ahorro, Normal, Alto) persistidos sin reiniciar, con análisis batch secuencial o paralelo y un único presupuesto de ciclo por lote. Cadena LLM configurada como Claude → ChatGPT → Google → DeepSeek → determinista, con adaptadores que se activan al añadir su API key en `.env`; validada con Google Gemini y presupuestos diario/ciclo, tope duro por llamada y claves cargadas desde `.env`. Se añadió Groq como proveedor gratuito permanente (OpenAI-compatible, `openai/gpt-oss-120b`, 1.000 peticiones y 200.000 tokens/día). CI extendido a `master`. Endurecimiento P0: OCO para posiciones existentes, heartbeat externo, backups verificados, API key opcional, vault con clave explícita y puertos en loopback; runbook en `docs/RUNBOOK_PRODUCCION.md`. Verificación local: 406 tests aprobados (cobertura 80,23 %), Ruff/MyPy/formateo y build TypeScript/Vite correctos. La migración Alembic d5e2b3c4f6a7 está aplicada a la base local.*

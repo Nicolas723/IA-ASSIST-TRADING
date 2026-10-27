@@ -164,6 +164,24 @@ class RetryingMarketDataFetcher(MarketDataPort):
             f"Unable to fetch last price for {symbol}", exchange=self.exchange_id.value
         )
 
+    async def fetch_last_prices(self, symbols: list[str]) -> dict[str, Decimal]:
+        """Batch prices with retry on rate limits and transient errors."""
+        last_error: Exception | None = None
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                return await self._inner.fetch_last_prices(symbols)
+            except ExchangeRateLimitError as exc:
+                last_error = exc
+                await asyncio.sleep(self._base_delay * (self._backoff_factor**attempt) * 2)
+            except ExchangeError as exc:
+                last_error = exc
+                if attempt < self._max_retries:
+                    await asyncio.sleep(self._base_delay * self._backoff_factor ** (attempt - 1))
+        raise ExchangeError(
+            f"Batch price request failed after {self._max_retries} attempts: {last_error}",
+            exchange=self.exchange_id.value,
+        )
+
     async def fetch_order_book(self, symbol: str, limit: int = 5) -> OrderBook:
         """Retry transient failures fetching the small public order-book snapshot."""
         last_error: Exception | None = None

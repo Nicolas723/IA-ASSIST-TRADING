@@ -851,6 +851,20 @@ class LiveTradingService:
         self._usdt_balance = Decimal(str(balances.get("USDT", 0.0)))
         return balances
 
+    async def account_details(
+        self, exchange: Exchange | str | None = None
+    ) -> dict[str, dict[str, float]]:
+        """Return total/free/used balances for the active credential."""
+        exchange_id = self._exchange(exchange)
+        self._credentials(exchange_id)
+        adapter = self._adapter(exchange_id)
+        try:
+            details = await adapter.fetch_balance_details()
+        finally:
+            await adapter.close()
+        self._usdt_balance = Decimal(str(details.get("USDT", {}).get("total", 0.0)))
+        return details
+
     # ------------------------------------------------------------------
     # Orders
     # ------------------------------------------------------------------

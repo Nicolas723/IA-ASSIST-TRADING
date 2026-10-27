@@ -14,15 +14,19 @@ Architecture:
 from __future__ import annotations
 
 import hmac
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 import sentry_sdk
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import make_asgi_app
 
 from src.infrastructure.cache.redis_client import create_redis_client
@@ -44,6 +48,9 @@ from src.interfaces.api.v1 import (
     strategy,
     trading,
     vault,
+)
+from src.interfaces.api.v1 import (
+    settings as settings_api,
 )
 from src.interfaces.websocket import market_stream
 from src.shared.config.settings import get_settings
@@ -130,6 +137,15 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     - Flush pending metrics
     """
     global _heartbeat_service, _redis_client, _shadow_scan_collector
+
+    # Apply UI-managed integration settings (LLM keys, Telegram, heartbeat)
+    # before any service reads the cached Settings instance. Values stored from
+    # the frontend override .env, so no file edit or restart is needed.
+    from src.application.services.integration_settings_service import (
+        apply_persisted_integration_settings,
+    )
+
+    apply_persisted_integration_settings(settings)
 
     logger.info(
         "application_starting",
@@ -302,21 +318,21 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
             logger.exception("shadow_scan_collector_start_failed", error=str(e))
 
     # Outbound heartbeat: a dead process cannot send its own alert, so an
-    # external monitor watches these pings instead.
-    if settings.heartbeat_ping_url.strip():
-        try:
-            from src.application.services.heartbeat_service import HeartbeatService
+    # external monitor watches these pings instead. The manager owns the task so
+    # the settings API can reconfigure it without restarting the backend.
+    try:
+        from src.application.services.heartbeat_service import heartbeat_manager
 
-            _heartbeat_service = HeartbeatService(
-                url=settings.heartbeat_ping_url,
-                interval_seconds=settings.heartbeat_interval_seconds,
-            )
-            await _heartbeat_service.start()
-        except Exception as e:
-            logger.warning("heartbeat_start_failed", error=str(e))
-            _heartbeat_service = None
-    else:
-        logger.info("heartbeat_disabled")
+        await heartbeat_manager.restart(
+            url=settings.heartbeat_ping_url,
+            interval_seconds=settings.heartbeat_interval_seconds,
+        )
+        _heartbeat_service = heartbeat_manager.service
+        if _heartbeat_service is None:
+            logger.info("heartbeat_disabled")
+    except Exception as e:
+        logger.warning("heartbeat_start_failed", error=str(e))
+        _heartbeat_service = None
 
     logger.info("application_ready", host=settings.server_host, port=settings.server_port)
 
@@ -325,9 +341,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     # --------------- Shutdown ---------------
     logger.info("application_shutting_down")
 
-    if _heartbeat_service is not None:
-        await _heartbeat_service.stop()
-        _heartbeat_service = None
+    # Always stop through the manager: the heartbeat may have been enabled from
+    # the settings API after startup, when _heartbeat_service was still None.
+    from src.application.services.heartbeat_service import heartbeat_manager
+
+    await heartbeat_manager.stop()
+    _heartbeat_service = None
 
     if _shadow_scan_collector is not None:
         await _shadow_scan_collector.stop()
@@ -389,6 +408,47 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Cross-site request guard. CORS only stops a foreign page from *reading*
+    # responses; a "simple" POST (no preflight) still executes. Any website open
+    # in the operator's browser could otherwise trigger trading or settings
+    # endpoints on localhost. Browsers always send Origin on state-changing
+    # requests, so reject those from origins other than the app itself. Requests
+    # without Origin (curl, scripts, the smoke test) are not browser-driven.
+    trusted_origins = {origin.rstrip("/") for origin in settings.app_cors_origins}
+    unsafe_methods = {"POST", "PUT", "PATCH", "DELETE"}
+
+    def _is_loopback_origin(origin: str) -> bool:
+        # The Vite dev proxy keeps the browser's Origin (localhost:5173) while
+        # rewriting Host, so loopback origins on any port are the app itself. A
+        # foreign website cannot be served from the operator's loopback.
+        host = urlsplit(origin).hostname or ""
+        return host in {"localhost", "127.0.0.1", "::1"}
+
+    @app.middleware("http")
+    async def cross_site_guard(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        origin = request.headers.get("origin", "").rstrip("/")
+        if request.method in unsafe_methods and origin:
+            same_origin = f"{request.url.scheme}://{request.headers.get('host', '')}"
+            if (
+                origin != same_origin
+                and origin not in trusted_origins
+                and not _is_loopback_origin(origin)
+            ):
+                logger.warning(
+                    "cross_site_request_blocked",
+                    origin=origin,
+                    path=request.url.path,
+                    method=request.method,
+                )
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Cross-site request blocked"},
+                )
+        return await call_next(request)
 
     # Optional API key. Disabled by default; enable it when the API is reachable
     # beyond localhost (LAN, VPS or reverse proxy). The frontend sends it as
@@ -599,6 +659,9 @@ def create_app() -> FastAPI:
     app.include_router(risk.router, prefix="/api/v1/risk", tags=["Risk"])
     app.include_router(research.router, prefix="/api/v1/research", tags=["Research Memory"])
     app.include_router(vault.router, prefix="/api/v1/vault", tags=["Credential Vault"])
+    app.include_router(
+        settings_api.router, prefix="/api/v1/settings", tags=["Integration Settings"]
+    )
     app.include_router(alerts.router, prefix="/api/v1/alerts", tags=["Alerts"])
     app.include_router(
         observability.router, prefix="/api/v1/observability", tags=["Observability & MLOps"]
@@ -616,6 +679,36 @@ def create_app() -> FastAPI:
     if settings.metrics_enabled:
         metrics_app = make_asgi_app()
         app.mount("/metrics", metrics_app)
+
+    # Serve the built frontend when present. This is what the Windows installer
+    # uses: one port (8000) for both the API and the UI, so the user only opens
+    # a shortcut. During development Vite keeps serving on 5173.
+    configured_dist = os.getenv("FRONTEND_DIST_PATH", "").strip()
+    frontend_dist = (
+        Path(configured_dist)
+        if configured_dist
+        else (Path(__file__).resolve().parents[2] / "frontend" / "dist")
+    )
+    if frontend_dist.is_dir() and (frontend_dist / "index.html").is_file():
+        assets_dir = frontend_dist / "assets"
+        if assets_dir.is_dir():
+            app.mount(
+                "/assets",
+                StaticFiles(directory=str(assets_dir)),
+                name="frontend-assets",
+            )
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def serve_frontend(full_path: str) -> FileResponse:
+            reserved = ("api/", "metrics", "health", "live", "docs", "redoc", "openapi.json")
+            if full_path.startswith(reserved):
+                raise HTTPException(status_code=404, detail="Not Found")
+            candidate = (frontend_dist / full_path).resolve()
+            if frontend_dist.resolve() in candidate.parents and candidate.is_file():
+                return FileResponse(candidate)
+            return FileResponse(frontend_dist / "index.html")
+
+        logger.info("frontend_static_served", path=str(frontend_dist))
 
     return app
 

@@ -456,7 +456,7 @@ restaura el backup del vault y la clave correspondiente.
 
 ---
 
-## 11. Checklist para Mainnet (no ejecutada)
+## 11. Checklist para Mainnet (ejecutada el 2026-10-26 · Mainnet activo)
 
 Mainnet sigue **desactivado**. Esta checklist prepara la decisión, pero no la
 toma. El cambio de Testnet a Mainnet se hace **solo desde la interfaz**; no
@@ -466,21 +466,21 @@ requiere editar `.env`, reiniciar por un flag nuevo ni modificar código.
 
 El orden importa:
 
-1. **Guardar claves Mainnet** en Configuración → Conexión con Binance:
-   desmarca «Usar Binance Testnet», pega las claves Mainnet y pulsa
-   «Guardar Claves Seguras». Guardar claves no cambia el entorno activo.
-2. **Probar la conexión** con el mismo checkbox desmarcado. Es una prueba de
-   lectura (ping + saldo); no envía órdenes ni activa Mainnet.
-3. **Activar el segundo opt-in** en Configuración → Entorno, límites y
-   protecciones: «Segundo opt-in: permitir Mainnet». Acepta la confirmación.
-4. **Seleccionar Mainnet** en «Red del exchange». La interfaz pide confirmación
-   y cambia el entorno activo del vault. Si hay posiciones reales abiertas, el
-   cambio se bloquea.
-5. **Revisar límites y protecciones** para capital real: máximo por orden,
-   allowlist, OCO y ejecución autónoma. Pulsa «Guardar límites y protecciones».
-6. **Iniciar la sesión** en el Asistente con «Real · usar el entorno
-   configurado». La confirmación final debe mostrar
-   `BINANCE MAINNET (dinero real)`.
+1. **Guardar claves Mainnet** en Configuración → Cuenta y exchange: elige
+   «Mainnet · dinero real» en *Red*, pega las claves y pulsa «Guardar claves».
+   Guardar claves no cambia el entorno activo ni las da por verificadas.
+2. **Probar la conexión** con Mainnet seleccionado. Es una prueba de lectura:
+   ping, saldo y permisos de la clave leídos de Binance. Debe mostrar
+   «retiradas no»; si avisa de retiradas, desactívalas en Binance y repite.
+3. **Activar el segundo permiso** en Configuración → Límites y protección:
+   «Permitir dinero real (Mainnet)». Acepta la confirmación.
+4. **Seleccionar Mainnet** en *Red activa*. La interfaz pide confirmación. El
+   backend lo rechaza si la clave no está verificada, si permite retiradas o
+   si hay posiciones reales abiertas.
+5. **Revisar límites** para capital real: máximo por orden, mercados
+   permitidos, OCO y permiso del asistente. Pulsa «Guardar límites».
+6. **Iniciar la sesión** en el Asistente con *Dónde opera* = «Dinero real».
+   La confirmación final debe decir `Binance con DINERO REAL`.
 
 Para volver a Testnet: pausa el bot, cierra o deja constancia de las posiciones,
 selecciona Testnet en «Red del exchange» y desmarca el segundo opt-in. No cambies
@@ -488,23 +488,66 @@ de entorno con posiciones abiertas.
 
 ### 11.2 Condiciones previas
 
+Resultado de la ejecución del 2026-10-26 (cuenta Mainnet vacía, autorizada por
+el operador). `[x]` = verificado con evidencia, `[ ]` = pendiente.
+
 - [ ] Testnet ha operado sin incidentes críticos durante un periodo acordado.
-- [ ] OCO validada en Testnet con apertura, reinicio, ejecución de TP/SL y
-      cierre manual.
-- [ ] Backup + restauración ensayados y verificados al menos una vez.
-- [ ] `API_KEY_ENCRYPTION_KEY` fijada y respaldada fuera del servidor.
-- [ ] Si la API se queda en loopback, `API_AUTH_TOKEN` puede estar vacío; si se
-      expone fuera de la máquina, activarlo con TLS/reverse proxy.
-- [ ] Heartbeat externo probado (incluida una parada controlada).
-- [ ] Alertas Telegram probadas de extremo a extremo.
-- [ ] Claves Mainnet nuevas, **sin permiso de retirada**, con IP allowlist.
-- [ ] Conexión Mainnet verificada en modo lectura (ping + saldo).
-- [ ] Cuenta Mainnet con saldo y permiso de trading; sin permisos de retirada.
-- [ ] `REAL_TRADING_MAX_NOTIONAL` y allowlist revisados para capital real.
-- [ ] Kill-switch probado y procedimiento de cierre manual documentado.
-- [ ] Cambio a Mainnet hecho desde la interfaz, con confirmación y sin
-      posiciones abiertas. No editar `.env` ni código para este paso.
+      *Decisión del operador: el periodo no está definido.*
+- [x] OCO validada en Testnet con apertura, reinicio, ejecución de TP/SL y
+      cierre manual. *Validada el 2026-10-23 (ver PROJECT_OVERVIEW §8).*
+- [x] Backup + restauración ensayados y verificados al menos una vez.
+      *`backup-daily.ps1` restauró en base temporal: orders=16, trades=16,
+      decision_logs=53, shadow_scan_runs=168.*
+- [x] `API_KEY_ENCRYPTION_KEY` fijada (44 caracteres). *Respaldarla fuera del
+      servidor sigue siendo responsabilidad del operador.*
+- [x] API solo en loopback: todos los puertos publicados en `127.0.0.1`, por lo
+      que `API_AUTH_TOKEN` vacío es aceptable. Las peticiones de escritura desde
+      otros orígenes se rechazan (403).
+- [x] Heartbeat externo probado: activo cada 60 s y `ping` manual aceptado.
+      *La parada controlada no se ensayó para no disparar la alerta externa.*
+- [x] Alertas Telegram probadas de extremo a extremo (`delivered=true`).
+- [x] Claves Mainnet **sin permiso de retirada** y con IP allowlist,
+      confirmado por Binance (`apiRestrictions`): trading sí, retiradas no,
+      IP restringida. *El primer intento falló con `-2015` hasta que el
+      operador añadió la IP `181.32.182.70` a la clave.*
+- [x] Conexión Mainnet verificada en modo lectura: ping ≈285 ms, saldo y
+      permisos leídos, sincronización con el exchange correcta.
+- [ ] Cuenta Mainnet con saldo spot. *Solo hay 3,05 USDT en Simple Earn
+      (`LDUSDT`), no disponibles para spot; Binance exige ~5 USDT por orden.
+      El bot no puede ejecutar nada hasta que se depositen fondos en spot.*
+- [x] `REAL_TRADING_MAX_NOTIONAL` (50 USDT) y allowlist (BTC, ETH, BNB, SOL,
+      XRP) revisados. Ajustar antes de depositar capital.
+- [x] Kill-switch probado: sesión simulada iniciada y detenida con
+      `emergency-kill`, 0 posiciones abiertas antes y después.
+- [x] Cambio a Mainnet con confirmación y 0 posiciones abiertas, por los
+      mismos endpoints que usa la interfaz. Antes de verificar la clave, la
+      salvaguarda lo rechazó (403) sin cambiar nada, como debe.
+- [x] Sesión real en Mainnet iniciada con ejecución automática desactivada:
+      escaneó 5 mercados con datos reales, 0 órdenes, detenida sin incidencias.
+      Guardián activo y descubrimiento OCO correcto.
 - [ ] Revisión fiscal/legal y tolerancia a pérdida definidas por el operador.
+
+**Fallos encontrados y corregidos durante la ejecución**
+
+- *Mainnet no podía firmar ninguna petición*: el reloj del contenedor iba
+  ~1,9 s adelantado y CCXT, en Binance Mainnet, llama a un endpoint firmado
+  dentro de `load_markets()` antes de sincronizar la hora. El adaptador ahora
+  sincroniza el reloj antes de cargar mercados. Testnet no lo mostraba porque
+  allí ese endpoint no se usa.
+- *Permisos de la clave nunca verificados*: guardar una clave marcaba
+  «verificada», «puede operar» y «sin retiradas» sin preguntar a Binance.
+  «Probar conexión» lee ahora `GET /sapi/v1/account/apiRestrictions` y
+  registra trading, retiradas e IP. Activar Mainnet exige esa verificación y
+  rechaza claves con retiradas.
+
+- *Saldo de Simple Earn sin valorar*: `LDUSDT`/`LDBTC` aparecían «sin precio»
+  y el patrimonio salía en 0. Ahora se valoran por su activo base.
+
+**Estado tras la ejecución:** Mainnet activo, permiso de dinero real activo,
+asistente detenido, 0 posiciones, máximo 50 USDT por orden. Antes de depositar
+capital en spot: decide el periodo de prueba, la tolerancia a pérdida y la
+revisión fiscal, y ajusta el máximo por orden. Para volver a Testnet:
+Configuración → Límites y protección → *Red activa* = Testnet.
 
 El bot nunca cambia a Mainnet por sí solo y no se debe asumir rentabilidad.
 

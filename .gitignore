@@ -90,3 +90,6 @@ infra/grafana_data/
 # Runtime backups (database dumps + encrypted vault; never commit)
 backups/
 backend/backups/
+
+# Claude Code local settings (personal permissions)
+.claude/settings.local.json

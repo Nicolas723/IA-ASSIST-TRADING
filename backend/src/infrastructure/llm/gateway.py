@@ -24,6 +24,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from src.infrastructure.llm.usage_store import LLMUsageStore, default_usage_store
 from src.shared.config.settings import LLMProvider, get_settings
 from src.shared.exceptions.domain import (
     LLMError,
@@ -147,6 +148,29 @@ class _ProviderCooldown:
     until_utc: datetime
 
 
+def _bucket_to_dict(bucket: _UsageBucket) -> dict[str, Any]:
+    return {
+        "requests": bucket.requests,
+        "failures": bucket.failures,
+        "prompt_tokens": bucket.prompt_tokens,
+        "completion_tokens": bucket.completion_tokens,
+        "latency_ms": bucket.latency_ms,
+        "models": sorted(bucket.models),
+    }
+
+
+def _bucket_from_dict(raw: Any) -> _UsageBucket:
+    data = dict(raw or {})
+    return _UsageBucket(
+        requests=int(data.get("requests") or 0),
+        failures=int(data.get("failures") or 0),
+        prompt_tokens=int(data.get("prompt_tokens") or 0),
+        completion_tokens=int(data.get("completion_tokens") or 0),
+        latency_ms=float(data.get("latency_ms") or 0.0),
+        models={str(model) for model in data.get("models") or []},
+    )
+
+
 def _estimate_cost(
     prompt_tokens: int,
     completion_tokens: int,
@@ -215,8 +239,13 @@ class LLMGateway:
     Handles provider selection, fallback, metrics, and audit logging.
     """
 
-    def __init__(self, adapters: dict[LLMProvider, BaseLLMAdapter]) -> None:
+    def __init__(
+        self,
+        adapters: dict[LLMProvider, BaseLLMAdapter],
+        usage_store: LLMUsageStore | None = None,
+    ) -> None:
         self._adapters = adapters
+        self._usage_store = usage_store or default_usage_store()
         self._settings = get_settings()
         # A provider SDK without its own timeout can hang the whole cycle.
         # Bound every call here so the gateway can cancel it and try the next
@@ -237,6 +266,74 @@ class LLMGateway:
         # time-based and deliberately survive begin_cycle(): starting a new
         # analysis does not fix an exhausted account.
         self._cooldowns: dict[str, _ProviderCooldown] = {}
+        # Restore today's counters and live cooldowns so a restart or a gateway
+        # rebuilt after a settings change cannot bypass the daily budget.
+        self._restore_state()
+
+    # ------------------------------------------------------------------
+    # Durable state
+    # ------------------------------------------------------------------
+    def _state_snapshot(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "usage_date": self._usage_date.isoformat(),
+            "tokens_used_today": self._tokens_used_today,
+            "requests_today": self._requests_today,
+            "request_attempts_today": self._request_attempts_today,
+            "prompt_tokens_today": self._prompt_tokens_today,
+            "completion_tokens_today": self._completion_tokens_today,
+            "fallbacks_today": self._fallbacks_today,
+            "by_agent": {key: _bucket_to_dict(value) for key, value in self._by_agent.items()},
+            "by_provider": {
+                key: _bucket_to_dict(value) for key, value in self._by_provider.items()
+            },
+            "cooldowns": {
+                provider: {"until_utc": cooldown.until_utc.isoformat(), "reason": cooldown.reason}
+                for provider, cooldown in self._cooldowns.items()
+            },
+        }
+
+    def _persist_state(self) -> None:
+        self._usage_store.save(self._state_snapshot())
+
+    def _restore_state(self) -> None:
+        try:
+            state = self._usage_store.load()
+        except Exception as exc:
+            logger.warning("llm_usage_state_restore_failed", error=str(exc))
+            return
+        if not state:
+            return
+        now_utc = datetime.now(tz=UTC)
+        try:
+            for provider, raw in dict(state.get("cooldowns") or {}).items():
+                until_utc = datetime.fromisoformat(str(raw["until_utc"]))
+                remaining = (until_utc - now_utc).total_seconds()
+                if remaining > 0:
+                    self._cooldowns[str(provider)] = _ProviderCooldown(
+                        until=time.monotonic() + remaining,
+                        reason=str(raw.get("reason") or "restored"),
+                        until_utc=until_utc,
+                    )
+            # Daily counters only apply to the UTC day they were recorded on.
+            if date.fromisoformat(str(state.get("usage_date"))) != self._usage_date:
+                return
+            self._tokens_used_today = int(state.get("tokens_used_today") or 0)
+            self._requests_today = int(state.get("requests_today") or 0)
+            self._request_attempts_today = int(state.get("request_attempts_today") or 0)
+            self._prompt_tokens_today = int(state.get("prompt_tokens_today") or 0)
+            self._completion_tokens_today = int(state.get("completion_tokens_today") or 0)
+            self._fallbacks_today = int(state.get("fallbacks_today") or 0)
+            self._by_agent = {
+                str(key): _bucket_from_dict(value)
+                for key, value in dict(state.get("by_agent") or {}).items()
+            }
+            self._by_provider = {
+                str(key): _bucket_from_dict(value)
+                for key, value in dict(state.get("by_provider") or {}).items()
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning("llm_usage_state_invalid", error=str(exc))
 
     def begin_cycle(self) -> None:
         """Reset the per-cycle counters before a new analysis cycle.
@@ -387,7 +484,7 @@ class LLMGateway:
                 "Estimated from configured per-million-token rates. "
                 "None means no rate is configured, not that the call was free."
             ),
-            "durability": "in_memory_process_only",
+            "durability": "persisted_daily_counters",
         }
 
     def _enforce_budget(self) -> None:
@@ -515,6 +612,18 @@ class LLMGateway:
         Returns:
             LLMResponse from the first successful provider
         """
+        try:
+            return await self._complete(request, provider, fallback_providers)
+        finally:
+            # Every attempt, token and cooldown is persisted, success or not.
+            self._persist_state()
+
+    async def _complete(
+        self,
+        request: LLMRequest,
+        provider: LLMProvider | None,
+        fallback_providers: list[LLMProvider] | None,
+    ) -> LLMResponse:
         primary = provider or self._settings.llm_primary_provider
         fallbacks = fallback_providers
         if fallbacks is None and self._settings.llm_fallback_enabled:

@@ -506,6 +506,14 @@ class Settings(BaseSettings):
     correlation_min_samples: int = Field(default=30, ge=10)
     correlation_lookback: int = Field(default=200, ge=30)
 
+    # Adaptive committee weights. When enabled, each directional specialist's
+    # vote weight is scaled by its measured hit rate on closed decisions,
+    # shrunk toward the default weight while samples are few. Off by default:
+    # it changes trading decisions, so preview it at /api/v1/mlops/agent-weights
+    # before turning it on.
+    adaptive_agent_weights_enabled: bool = Field(default=False)
+    adaptive_weights_min_samples: int = Field(default=20, ge=5)
+
     # -------------------------------------------------------------------------
     # Trading
     # -------------------------------------------------------------------------

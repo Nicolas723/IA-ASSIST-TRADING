@@ -37,6 +37,10 @@ class EncryptedCredential(BaseModel):
     can_trade: bool = False
     has_withdrawal_permission: bool = False
     last_verified_at: datetime | None = None
+    # Set only after the exchange itself reported the key's restrictions
+    # (Binance GET /sapi/v1/account/apiRestrictions). None means unverified.
+    permissions_verified_at: datetime | None = None
+    ip_restricted: bool | None = None
     status: str = "configured"
 
 
@@ -121,7 +125,9 @@ class CredentialVault:
             is_testnet=is_testnet,
             can_trade=True,
             has_withdrawal_permission=False,
-            last_verified_at=datetime.now(tz=UTC),
+            # Saving is not verifying: these are only confirmed by a live
+            # connection test (record_verification).
+            last_verified_at=None,
             status="active",
         )
 
@@ -133,6 +139,33 @@ class CredentialVault:
             environment=environment,
             masked=masked,
         )
+        return cred
+
+    def record_verification(
+        self,
+        exchange: str,
+        environment: str,
+        *,
+        can_trade: bool | None = None,
+        has_withdrawal_permission: bool | None = None,
+        ip_restricted: bool | None = None,
+        permissions_checked: bool = False,
+    ) -> EncryptedCredential | None:
+        """Store what a live connection test confirmed about a key."""
+        key = self._credential_key(exchange, self._normalize_environment(environment))
+        cred = self._credentials.get(key)
+        if cred is None:
+            return None
+        now = datetime.now(tz=UTC)
+        cred.last_verified_at = now
+        if permissions_checked:
+            cred.permissions_verified_at = now
+            if can_trade is not None:
+                cred.can_trade = can_trade
+            if has_withdrawal_permission is not None:
+                cred.has_withdrawal_permission = has_withdrawal_permission
+            cred.ip_restricted = ip_restricted
+        self._save()
         return cred
 
     def get_decrypted_credential(

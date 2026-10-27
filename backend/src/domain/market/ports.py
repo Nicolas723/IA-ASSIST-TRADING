@@ -50,6 +50,20 @@ class MarketDataPort(abc.ABC):
         """
         ...
 
+    async def fetch_last_prices(self, symbols: list[SymbolStr]) -> dict[SymbolStr, Decimal]:
+        """Fetch several last prices; symbols without a price are omitted.
+
+        The default issues one request per symbol. Adapters that support a
+        batch ticker endpoint override it with a single request.
+        """
+        prices: dict[SymbolStr, Decimal] = {}
+        for symbol in symbols:
+            try:
+                prices[symbol] = await self.fetch_last_price(symbol)
+            except Exception:
+                continue
+        return prices
+
     @abc.abstractmethod
     async def fetch_order_book(self, symbol: SymbolStr, limit: int = 5) -> OrderBook:
         """Fetch a bounded, read-only order-book snapshot for spread observation."""

@@ -1,22 +1,18 @@
-import { StrictMode, Component, type ErrorInfo, type ReactNode } from 'react'
-import { createRoot } from 'react-dom/client'
-import './index.css'
-import './apiKey'
-import App from './App.tsx'
+import { StrictMode, Component, type ErrorInfo, type ReactNode } from 'react';
+import { createRoot } from 'react-dom/client';
+import './index.css';
+import './apiKey';
+import App from './App.tsx';
 
 interface ErrorBoundaryState {
-  hasError: boolean;
   error: Error | null;
 }
 
 class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryState> {
-  constructor(props: { children: ReactNode }) {
-    super(props);
-    this.state = { hasError: false, error: null };
-  }
+  state: ErrorBoundaryState = { error: null };
 
-  static getDerivedStateFromError(error: Error) {
-    return { hasError: true, error };
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { error };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
@@ -24,54 +20,29 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
   }
 
   render() {
-    if (this.state.hasError) {
-      return (
-        <div style={{
-          minHeight: '100vh',
-          background: '#0f172a',
-          color: '#f8fafc',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          fontFamily: 'monospace',
-          padding: '40px',
-          gap: '20px'
-        }}>
-          <h1 style={{ color: '#ef4444', fontSize: '28px' }}>⚠️ Application Error</h1>
-          <pre style={{
-            background: '#1e293b',
-            padding: '24px',
-            borderRadius: '8px',
-            maxWidth: '800px',
-            width: '100%',
-            overflow: 'auto',
-            color: '#fca5a5',
-            fontSize: '13px',
-            lineHeight: '1.6'
-          }}>
-            {this.state.error?.toString()}
-            {'\n\n'}
-            {this.state.error?.stack}
+    if (!this.state.error) return this.props.children;
+    return (
+      <main className="main" style={{ maxWidth: 720 }}>
+        <div className="card stack">
+          <h1 style={{ fontSize: 22 }}>Algo ha fallado en la interfaz</h1>
+          <p className="muted">
+            El asistente sigue funcionando en el servidor: esto solo afecta a la pantalla. Recarga la página; si se
+            repite, comparte el detalle de abajo.
+          </p>
+          <pre className="mono xsmall" style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
+            {this.state.error.toString()}
           </pre>
-          <button
-            onClick={() => this.setState({ hasError: false, error: null })}
-            style={{
-              background: '#3b82f6',
-              color: 'white',
-              border: 'none',
-              padding: '12px 28px',
-              borderRadius: '8px',
-              cursor: 'pointer',
-              fontSize: '16px'
-            }}
-          >
-            🔄 Try Again
-          </button>
+          <div className="row">
+            <button type="button" className="btn btn-primary" onClick={() => window.location.reload()}>
+              Recargar
+            </button>
+            <button type="button" className="btn" onClick={() => this.setState({ error: null })}>
+              Intentar de nuevo
+            </button>
+          </div>
         </div>
-      );
-    }
-    return this.props.children;
+      </main>
+    );
   }
 }
 
@@ -81,4 +52,4 @@ createRoot(document.getElementById('root')!).render(
       <App />
     </ErrorBoundary>
   </StrictMode>,
-)
+);

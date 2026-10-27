@@ -29,6 +29,14 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Default committee vote weights. Adaptive weighting rescales these from
+# measured accuracy; see application/services/adaptive_weights.py.
+DEFAULT_AGENT_WEIGHTS: dict[str, float] = {
+    AgentType.TECHNICAL_ANALYST.value: 0.40,
+    AgentType.PRICE_ACTION_ANALYST.value: 0.35,
+    AgentType.RISK_MANAGER.value: 0.25,
+}
+
 
 class AgentCoordinator:
     """
@@ -39,13 +47,27 @@ class AgentCoordinator:
         self,
         llm_gateway: LLMGateway | None = None,
         specialists: list[BaseAgent] | None = None,
+        agent_weights: dict[str, float] | None = None,
     ) -> None:
         self.llm = llm_gateway
+        self.agent_weights = dict(agent_weights or DEFAULT_AGENT_WEIGHTS)
         self.specialists = specialists or [
             TechnicalAnalystAgent(llm_gateway=llm_gateway),
             PriceActionAnalystAgent(llm_gateway=llm_gateway),
             RiskManagerAgent(llm_gateway=llm_gateway),
         ]
+
+    def set_llm_gateway(self, llm_gateway: LLMGateway | None) -> None:
+        """Swap the provider gateway in place after a UI configuration change."""
+        self.llm = llm_gateway
+        for specialist in self.specialists:
+            # Injected specialists may not use an LLM at all.
+            if hasattr(specialist, "llm"):
+                specialist.llm = llm_gateway
+
+    def set_agent_weights(self, weights: dict[str, float]) -> None:
+        """Replace the vote weights; missing agents keep their default."""
+        self.agent_weights = {**DEFAULT_AGENT_WEIGHTS, **weights}
 
     async def coordinate(self, task: AgentTask) -> CoordinatorDecision:
         start_time = time.monotonic()
@@ -57,13 +79,8 @@ class AgentCoordinator:
         agent_tasks = [agent.run(task) for agent in self.specialists]
         outputs: list[AgentOutput] = await asyncio.gather(*agent_tasks)
 
-        # 2. Weighted synthesis
-        # Weights: Technical: 0.4, PriceAction: 0.35, Risk: 0.25
-        weight_map = {
-            AgentType.TECHNICAL_ANALYST.value: 0.40,
-            AgentType.PRICE_ACTION_ANALYST.value: 0.35,
-            AgentType.RISK_MANAGER.value: 0.25,
-        }
+        # 2. Weighted synthesis (defaults: technical 0.40, price action 0.35, risk 0.25)
+        weight_map = dict(self.agent_weights)
 
         score = 0.0
         total_weight = 0.0

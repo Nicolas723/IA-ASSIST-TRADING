@@ -109,6 +109,37 @@ class CcxtBaseAdapter(MarketDataPort):
             )
         return Decimal(str(last))
 
+    async def fetch_last_prices(self, symbols: list[SymbolStr]) -> dict[SymbolStr, Decimal]:
+        """One ``fetch_tickers`` call for every symbol the exchange lists.
+
+        Symbols the exchange does not list are dropped before the request, so
+        an account holding assets without a USDT market costs no extra calls.
+        """
+        if not symbols:
+            return {}
+        try:
+            markets = await self._client.load_markets()
+            listed = [symbol for symbol in symbols if symbol in markets]
+            if not listed:
+                return {}
+            tickers = await self._client.fetch_tickers(listed)
+        except ccxt.RateLimitExceeded as e:
+            raise ExchangeRateLimitError(str(e), exchange=self.exchange_id.value) from e
+        except ccxt.NetworkError as e:
+            raise ExchangeError(f"Network error: {e}", exchange=self.exchange_id.value) from e
+        except Exception as e:
+            raise ExchangeError(
+                f"Error fetching tickers: {e}", exchange=self.exchange_id.value
+            ) from e
+
+        prices: dict[SymbolStr, Decimal] = {}
+        for symbol in listed:
+            ticker = tickers.get(symbol) if isinstance(tickers, dict) else None
+            last = ticker.get("last") if isinstance(ticker, dict) else None
+            if last is not None and float(last) > 0:
+                prices[symbol] = Decimal(str(last))
+        return prices
+
     async def fetch_order_book(self, symbol: SymbolStr, limit: int = 5) -> OrderBook:
         """Fetch only a shallow public order-book snapshot; never places an order."""
         try:

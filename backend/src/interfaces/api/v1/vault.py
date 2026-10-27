@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -25,29 +27,63 @@ class TestConnectionBody(BaseModel):
     is_testnet: bool | None = None
 
 
+class CredentialSummary(BaseModel):
+    """Public view of a stored credential.
+
+    The ciphertexts never leave the server: anyone holding the vault key could
+    decrypt them, and the UI only needs the masked key and status.
+    """
+
+    exchange: str
+    masked_key: str
+    is_testnet: bool
+    can_trade: bool
+    has_withdrawal_permission: bool
+    last_verified_at: datetime | None
+    permissions_verified_at: datetime | None
+    ip_restricted: bool | None
+    status: str
+
+    @classmethod
+    def from_credential(cls, credential: EncryptedCredential) -> CredentialSummary:
+        return cls(
+            exchange=credential.exchange,
+            masked_key=credential.masked_key,
+            is_testnet=credential.is_testnet,
+            can_trade=credential.can_trade,
+            has_withdrawal_permission=credential.has_withdrawal_permission,
+            last_verified_at=credential.last_verified_at,
+            permissions_verified_at=credential.permissions_verified_at,
+            ip_restricted=credential.ip_restricted,
+            status=credential.status,
+        )
+
+
 @router.get(
-    "/status", response_model=list[EncryptedCredential], summary="List configured credential status"
+    "/status", response_model=list[CredentialSummary], summary="List configured credential status"
 )
 async def get_vault_status(
     vault_service: VaultService = Depends(get_vault_service),
-) -> list[EncryptedCredential]:
+) -> list[CredentialSummary]:
     """Retrieve masked credential summaries and verification dates."""
-    return vault_service.list_credentials()
+    return [CredentialSummary.from_credential(item) for item in vault_service.list_credentials()]
 
 
-@router.post("/keys", response_model=EncryptedCredential, summary="Save encrypted API credentials")
+@router.post("/keys", response_model=CredentialSummary, summary="Save encrypted API credentials")
 async def store_keys(
     body: StoreKeyBody,
     vault_service: VaultService = Depends(get_vault_service),
-) -> EncryptedCredential:
+) -> CredentialSummary:
     """Encrypt and store exchange API keys with AES-256."""
     try:
-        return vault_service.store_credentials(
-            exchange=body.exchange,
-            api_key=body.api_key,
-            api_secret=body.api_secret,
-            passphrase=body.passphrase,
-            is_testnet=body.is_testnet,
+        return CredentialSummary.from_credential(
+            vault_service.store_credentials(
+                exchange=body.exchange,
+                api_key=body.api_key,
+                api_secret=body.api_secret,
+                passphrase=body.passphrase,
+                is_testnet=body.is_testnet,
+            )
         )
     except Exception as exc:
         raise HTTPException(

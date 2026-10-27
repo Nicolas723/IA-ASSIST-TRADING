@@ -7,6 +7,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from src.application.services.account_snapshot_service import (
+    AccountSnapshot,
+    AccountSnapshotService,
+)
 from src.application.services.journal import (
     persist_live_positions_to_database,
     record_execution,
@@ -26,6 +30,7 @@ from src.infrastructure.persistence.repositories.trading_repository import (
     SqlTradingRepository,
 )
 from src.interfaces.api.v1.deps import (
+    get_account_snapshot_service,
     get_live_trading_service,
     get_market_data_service,
     get_runtime_config_service,
@@ -348,6 +353,54 @@ async def get_real_account(
         testnet=service.status(exchange).testnet,
         balances=balances,
     )
+
+
+class AccountBaselineBody(BaseModel):
+    equity: float | None = Field(
+        default=None,
+        gt=0,
+        description="Reference equity in USDT. Omit to use the current equity.",
+    )
+
+
+@router.get(
+    "/real/account/snapshot",
+    response_model=AccountSnapshot,
+    summary="Get account equity, balances and P&L against the stored reference",
+)
+async def get_real_account_snapshot(
+    exchange: Exchange = Query(Exchange.BINANCE),
+    service: AccountSnapshotService = Depends(get_account_snapshot_service),
+) -> AccountSnapshot:
+    """Value every balance in USDT and compare it with the saved reference.
+
+    Read-only: it queries balances and public prices, never places orders.
+    """
+    try:
+        return await service.snapshot(exchange)
+    except Exception as exc:
+        raise HTTPException(status_code=_real_error_status(exc), detail=str(exc)) from exc
+
+
+@router.post(
+    "/real/account/baseline",
+    response_model=AccountSnapshot,
+    summary="Reset the P&L reference to the current account equity",
+)
+async def reset_real_account_baseline(
+    body: AccountBaselineBody | None = None,
+    exchange: Exchange = Query(Exchange.BINANCE),
+    service: AccountSnapshotService = Depends(get_account_snapshot_service),
+) -> AccountSnapshot:
+    """Mark today's equity as the zero point for gains and losses.
+
+    This is a local reference, not a tax basis; deposits and withdrawals will
+    show up as changes unless the reference is reset afterwards.
+    """
+    try:
+        return await service.reset_baseline(exchange, equity=(body.equity if body else None))
+    except Exception as exc:
+        raise HTTPException(status_code=_real_error_status(exc), detail=str(exc)) from exc
 
 
 @router.get(

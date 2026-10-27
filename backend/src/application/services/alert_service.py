@@ -32,6 +32,35 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _build_channels(settings: Settings) -> list[NotificationPort]:
+    """Build every notification channel from the current settings."""
+    timeout = settings.alert_timeout_seconds
+    return [
+        TelegramChannel(
+            bot_token=settings.telegram_bot_token,
+            chat_id=settings.telegram_chat_id,
+            timeout=timeout,
+        ),
+        WebhookChannel(url=settings.alert_webhook_url, timeout=timeout),
+        EmailChannel(
+            host=settings.email_smtp_host,
+            port=settings.email_smtp_port,
+            username=settings.email_username,
+            password=settings.email_password,
+            from_addr=settings.email_from,
+            to_addr=settings.email_to,
+            timeout=timeout,
+        ),
+    ]
+
+
+def _min_severity(settings: Settings) -> AlertSeverity:
+    try:
+        return AlertSeverity(settings.alert_min_severity.lower())
+    except ValueError:
+        return AlertSeverity.INFO
+
+
 class ChannelStatus(BaseModel):
     name: str
     configured: bool
@@ -67,32 +96,26 @@ class AlertService:
     @classmethod
     def from_settings(cls, settings: Settings) -> AlertService:
         """Build the service from environment configuration."""
-        timeout = settings.alert_timeout_seconds
-        channels: list[NotificationPort] = [
-            TelegramChannel(
-                bot_token=settings.telegram_bot_token,
-                chat_id=settings.telegram_chat_id,
-                timeout=timeout,
-            ),
-            WebhookChannel(url=settings.alert_webhook_url, timeout=timeout),
-            EmailChannel(
-                host=settings.email_smtp_host,
-                port=settings.email_smtp_port,
-                username=settings.email_username,
-                password=settings.email_password,
-                from_addr=settings.email_from,
-                to_addr=settings.email_to,
-                timeout=timeout,
-            ),
-        ]
-        try:
-            min_severity = AlertSeverity(settings.alert_min_severity.lower())
-        except ValueError:
-            min_severity = AlertSeverity.INFO
         return cls(
-            channels=channels,
+            channels=_build_channels(settings),
             enabled=settings.alerts_enabled,
-            min_severity=min_severity,
+            min_severity=_min_severity(settings),
+        )
+
+    def reload_from_settings(self, settings: Settings) -> None:
+        """Rebuild channels in place so existing references stay valid.
+
+        ``LiveTradingService`` keeps a reference to this object; replacing the
+        singleton would leave it sending through the old (unconfigured)
+        channels.
+        """
+        self._channels = _build_channels(settings)
+        self._enabled = settings.alerts_enabled
+        self._min_severity = _min_severity(settings)
+        logger.info(
+            "alert_channels_reloaded",
+            channels=[channel.name for channel in self._channels],
+            enabled=self._enabled,
         )
 
     @property

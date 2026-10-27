@@ -1,332 +1,208 @@
-import React, { useState, useMemo } from 'react';
+import { useMemo, useState, type PointerEvent } from 'react';
+import { fmtNumber, fmtPrice, fmtSigned, toneClass } from '../lib/format';
+import type { CandleItem } from '../types';
 
-export interface CandleItem {
-  timestamp: string;
-  time: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-  is_closed: boolean;
-}
+export type { CandleItem };
 
 interface MarketChartProps {
   candles: CandleItem[];
   livePrice?: number | null;
-  symbol: string;
-  timeframe: string;
+  mode?: 'candles' | 'line';
 }
 
-export const MarketChart: React.FC<MarketChartProps> = ({
-  candles,
-  livePrice,
-  symbol,
-  timeframe,
-}) => {
-  const [chartMode, setChartMode] = useState<'candles' | 'line'>('candles');
-  const [hoveredCandle, setHoveredCandle] = useState<CandleItem | null>(null);
+const WIDTH = 860;
+const HEIGHT = 340;
+const PAD = { top: 16, right: 72, bottom: 28, left: 8 };
+const VISIBLE = 48;
 
-  const displayCandles = useMemo(() => {
-    if (!candles || candles.length === 0) return [];
-    const list = [...candles.slice(-40)];
+/**
+ * Monochrome price chart. Rising candles are hollow and falling candles are
+ * filled, so direction reads without relying on colour.
+ */
+export function MarketChart({ candles, livePrice, mode = 'candles' }: MarketChartProps) {
+  const [hover, setHover] = useState<number | null>(null);
+
+  const data = useMemo(() => {
+    const list = candles.slice(-VISIBLE);
     if (livePrice && list.length > 0) {
-      const last = { ...list[list.length - 1] };
-      last.close = livePrice;
-      last.high = Math.max(last.high, livePrice);
-      last.low = Math.min(last.low, livePrice);
-      list[list.length - 1] = last;
+      const last = list[list.length - 1];
+      list[list.length - 1] = {
+        ...last,
+        close: livePrice,
+        high: Math.max(last.high, livePrice),
+        low: Math.min(last.low, livePrice),
+      };
     }
     return list;
   }, [candles, livePrice]);
 
-  if (displayCandles.length === 0) {
-    return (
-      <div style={{ textAlign: 'center', padding: '40px', color: '#94a3b8' }}>
-        <p style={{ fontSize: '15px' }}>📊 Sin datos de mercado para graficar.</p>
-        <p style={{ fontSize: '13px', marginTop: '6px' }}>
-          Haz clic en <strong>"Actualizar Historial"</strong> para cargar las velas en vivo.
-        </p>
-      </div>
-    );
+  if (data.length === 0) {
+    return <div className="empty">Sin datos de mercado todavía. Se cargarán en cuanto el exchange responda.</div>;
   }
 
-  const width = 850;
-  const height = 320;
-  const padding = { top: 20, right: 65, bottom: 35, left: 15 };
-  const chartWidth = width - padding.left - padding.right;
-  const chartHeight = height - padding.top - padding.bottom;
+  const plotW = WIDTH - PAD.left - PAD.right;
+  const plotH = HEIGHT - PAD.top - PAD.bottom;
+  const low = Math.min(...data.map((c) => c.low));
+  const high = Math.max(...data.map((c) => c.high));
+  const span = high - low || 1;
+  const y = (value: number) => PAD.top + plotH - ((value - low) / span) * plotH;
+  const step = plotW / data.length;
+  const bodyW = Math.max(step * 0.62, 2);
+  const x = (index: number) => PAD.left + index * step + step / 2;
 
-  const minPrice = Math.min(...displayCandles.map((c) => c.low));
-  const maxPrice = Math.max(...displayCandles.map((c) => c.high));
-  const priceRange = maxPrice - minPrice || 1;
+  const grid = Array.from({ length: 5 }, (_, i) => low + (span * i) / 4);
+  const linePath = data.map((c, i) => `${i === 0 ? 'M' : 'L'} ${x(i)} ${y(c.close)}`).join(' ');
+  const areaPath = `${linePath} L ${x(data.length - 1)} ${PAD.top + plotH} L ${x(0)} ${PAD.top + plotH} Z`;
 
-  const getY = (val: number) =>
-    padding.top + chartHeight - ((val - minPrice) / priceRange) * chartHeight;
+  const active = data[hover ?? data.length - 1];
+  const change = active.open > 0 ? ((active.close - active.open) / active.open) * 100 : 0;
+  const labelEvery = Math.ceil(data.length / 6);
 
-  const candleWidth = Math.max(chartWidth / displayCandles.length - 4, 4);
-
-  // Price grid lines
-  const gridTicks = 5;
-  const priceGrid = Array.from({ length: gridTicks }, (_, i) => {
-    const price = minPrice + (priceRange * i) / (gridTicks - 1);
-    return { price, y: getY(price) };
-  });
-
-  // Current active candle for stats
-  const activeCandle = hoveredCandle || displayCandles[displayCandles.length - 1];
-  const isUp = activeCandle.close >= activeCandle.open;
-  const pctChange =
-    activeCandle.open > 0
-      ? (((activeCandle.close - activeCandle.open) / activeCandle.open) * 100).toFixed(2)
-      : '0.00';
-
-  // Path for smooth line mode
-  const linePoints = displayCandles.map((c, i) => {
-    const x = padding.left + i * (chartWidth / (displayCandles.length - 1 || 1));
-    const y = getY(c.close);
-    return { x, y };
-  });
-  const linePath = linePoints.reduce(
-    (acc, pt, i) => (i === 0 ? `M ${pt.x} ${pt.y}` : `${acc} L ${pt.x} ${pt.y}`),
-    ''
-  );
-  const areaPath = `${linePath} L ${padding.left + chartWidth} ${padding.top + chartHeight} L ${padding.left} ${padding.top + chartHeight} Z`;
+  const onPointer = (event: PointerEvent<SVGSVGElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const relative = ((event.clientX - rect.left) / rect.width) * WIDTH - PAD.left;
+    const index = Math.floor(relative / step);
+    setHover(index >= 0 && index < data.length ? index : null);
+  };
 
   return (
-    <div style={{ width: '100%' }}>
-      {/* Header del gráfico */}
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          flexWrap: 'wrap',
-          gap: '12px',
-          marginBottom: '14px',
-          paddingBottom: '12px',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
-        }}
+    <div>
+      <svg
+        className="chart-svg"
+        viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+        role="img"
+        aria-label={`Gráfico de precio, último ${fmtPrice(data[data.length - 1].close)}`}
+        onPointerMove={onPointer}
+        onPointerLeave={() => setHover(null)}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <div style={{ fontSize: '18px', fontWeight: 800, color: '#f8fafc' }}>
-            {symbol}{' '}
-            <span style={{ fontSize: '12px', color: '#94a3b8', fontWeight: 500 }}>
-              ({timeframe})
-            </span>
-          </div>
-          <div
-            style={{
-              padding: '4px 10px',
-              borderRadius: '6px',
-              fontSize: '12px',
-              fontWeight: 700,
-              backgroundColor: isUp ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
-              color: isUp ? '#10b981' : '#ef4444',
-            }}
-          >
-            ${activeCandle.close.toLocaleString(undefined, { minimumFractionDigits: 2 })} (
-            {Number(pctChange) >= 0 ? '+' : ''}
-            {pctChange}%)
-          </div>
-        </div>
+        <defs>
+          <linearGradient id="chart-area" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--text)" stopOpacity="0.12" />
+            <stop offset="100%" stopColor="var(--text)" stopOpacity="0" />
+          </linearGradient>
+        </defs>
 
-        {/* Info detallada de la vela inspeccionada */}
-        <div
-          style={{
-            display: 'flex',
-            gap: '16px',
-            fontSize: '12px',
-            color: '#94a3b8',
-            flexWrap: 'wrap',
-          }}
-        >
-          <span>
-            Apertura: <strong style={{ color: '#f8fafc' }}>${activeCandle.open.toFixed(2)}</strong>
-          </span>
-          <span>
-            Máx: <strong style={{ color: '#10b981' }}>${activeCandle.high.toFixed(2)}</strong>
-          </span>
-          <span>
-            Mín: <strong style={{ color: '#ef4444' }}>${activeCandle.low.toFixed(2)}</strong>
-          </span>
-          <span>
-            Cierre: <strong style={{ color: '#38bdf8' }}>${activeCandle.close.toFixed(2)}</strong>
-          </span>
-          <span>
-            Vol: <strong style={{ color: '#f8fafc' }}>{activeCandle.volume.toFixed(2)}</strong>
-          </span>
-        </div>
+        {grid.map((value) => (
+          <g key={value}>
+            <line
+              x1={PAD.left}
+              x2={PAD.left + plotW}
+              y1={y(value)}
+              y2={y(value)}
+              stroke="var(--border)"
+              strokeWidth="1"
+            />
+            <text
+              x={PAD.left + plotW + 10}
+              y={y(value) + 4}
+              fill="var(--muted)"
+              fontSize="11"
+              fontFamily="var(--font-mono)"
+            >
+              {fmtNumber(value, value >= 1000 ? 0 : 2)}
+            </text>
+          </g>
+        ))}
 
-        {/* Selector de modo de gráfico */}
-        <div style={{ display: 'flex', gap: '6px' }}>
-          <button
-            type="button"
-            className={`btn ${chartMode === 'candles' ? 'btn-primary' : 'btn-secondary'}`}
-            style={{ padding: '4px 10px', fontSize: '12px' }}
-            onClick={() => setChartMode('candles')}
-          >
-            🕯️ Velas
-          </button>
-          <button
-            type="button"
-            className={`btn ${chartMode === 'line' ? 'btn-primary' : 'btn-secondary'}`}
-            style={{ padding: '4px 10px', fontSize: '12px' }}
-            onClick={() => setChartMode('line')}
-          >
-            📈 Línea
-          </button>
-        </div>
-      </div>
+        {hover !== null && (
+          <line
+            x1={x(hover)}
+            x2={x(hover)}
+            y1={PAD.top}
+            y2={PAD.top + plotH}
+            stroke="var(--border-strong)"
+            strokeDasharray="3 3"
+          />
+        )}
 
-      {/* SVG Canvas */}
-      <div style={{ width: '100%', overflowX: 'auto', position: 'relative' }}>
-        <svg
-          viewBox={`0 0 ${width} ${height}`}
-          style={{ width: '100%', height: 'auto', display: 'block', maxHeight: '350px' }}
-        >
-          <defs>
-            <linearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.3" />
-              <stop offset="100%" stopColor="#38bdf8" stopOpacity="0.0" />
-            </linearGradient>
-          </defs>
+        {mode === 'line' ? (
+          <>
+            <path d={areaPath} fill="url(#chart-area)" />
+            <path d={linePath} fill="none" stroke="var(--text)" strokeWidth="1.75" strokeLinejoin="round" />
+          </>
+        ) : (
+          data.map((c, i) => {
+            const up = c.close >= c.open;
+            const top = y(Math.max(c.open, c.close));
+            const bodyH = Math.max(Math.abs(y(c.open) - y(c.close)), 1.5);
+            const dim = hover !== null && hover !== i;
+            return (
+              <g key={c.timestamp || i} opacity={dim ? 0.45 : 1}>
+                <line x1={x(i)} x2={x(i)} y1={y(c.high)} y2={y(c.low)} stroke="var(--text)" strokeWidth="1" />
+                <rect
+                  x={x(i) - bodyW / 2}
+                  y={top}
+                  width={bodyW}
+                  height={bodyH}
+                  rx="1"
+                  fill={up ? 'var(--surface)' : 'var(--text)'}
+                  stroke="var(--text)"
+                  strokeWidth="1"
+                />
+              </g>
+            );
+          })
+        )}
 
-          {/* Líneas de Guía de Precios */}
-          {priceGrid.map((item, idx) => (
-            <g key={idx}>
-              <line
-                x1={padding.left}
-                y1={item.y}
-                x2={padding.left + chartWidth}
-                y2={item.y}
-                stroke="rgba(255, 255, 255, 0.06)"
-                strokeDasharray="4 4"
-              />
-              <text
-                x={padding.left + chartWidth + 8}
-                y={item.y + 4}
-                fill="#64748b"
-                fontSize="10"
-                fontFamily="monospace"
-              >
-                ${item.price.toLocaleString(undefined, { maximumFractionDigits: 1 })}
-              </text>
-            </g>
-          ))}
+        {livePrice ? (
+          <g>
+            <line
+              x1={PAD.left}
+              x2={PAD.left + plotW}
+              y1={y(livePrice)}
+              y2={y(livePrice)}
+              stroke="var(--text)"
+              strokeWidth="1"
+              strokeDasharray="2 4"
+            />
+            <rect x={PAD.left + plotW + 4} y={y(livePrice) - 10} width={66} height={20} rx="4" fill="var(--accent)" />
+            <text
+              x={PAD.left + plotW + 10}
+              y={y(livePrice) + 4}
+              fill="var(--accent-contrast)"
+              fontSize="11"
+              fontWeight="600"
+              fontFamily="var(--font-mono)"
+            >
+              {fmtNumber(livePrice, livePrice >= 1000 ? 0 : 2)}
+            </text>
+          </g>
+        ) : null}
 
-          {/* Modo Línea de Área */}
-          {chartMode === 'line' && (
-            <>
-              <path d={areaPath} fill="url(#areaGradient)" />
-              <path d={linePath} fill="none" stroke="#38bdf8" strokeWidth="2.5" />
-            </>
-          )}
+        {data.map((c, i) =>
+          i % labelEvery === 0 ? (
+            <text
+              key={`t-${c.timestamp || i}`}
+              x={x(i)}
+              y={HEIGHT - 8}
+              fill="var(--muted)"
+              fontSize="11"
+              textAnchor="middle"
+            >
+              {new Date(c.timestamp).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}
+            </text>
+          ) : null,
+        )}
+      </svg>
 
-          {/* Modo Velas Japonesas */}
-          {chartMode === 'candles' &&
-            displayCandles.map((c, i) => {
-              const xCenter =
-                padding.left + i * (chartWidth / displayCandles.length) + candleWidth / 2 + 2;
-              const yHigh = getY(c.high);
-              const yLow = getY(c.low);
-              const yOpen = getY(c.open);
-              const yClose = getY(c.close);
-              const candleColor = c.close >= c.open ? '#10b981' : '#ef4444';
-              const bodyTop = Math.min(yOpen, yClose);
-              const bodyHeight = Math.max(Math.abs(yClose - yOpen), 2);
-
-              return (
-                <g
-                  key={c.timestamp || i}
-                  onMouseEnter={() => setHoveredCandle(c)}
-                  onMouseLeave={() => setHoveredCandle(null)}
-                  style={{ cursor: 'pointer' }}
-                >
-                  {/* Mecha superior e inferior */}
-                  <line
-                    x1={xCenter}
-                    y1={yHigh}
-                    x2={xCenter}
-                    y2={yLow}
-                    stroke={candleColor}
-                    strokeWidth="1.2"
-                  />
-                  {/* Cuerpo de la vela */}
-                  <rect
-                    x={xCenter - candleWidth / 2}
-                    y={bodyTop}
-                    width={candleWidth}
-                    height={bodyHeight}
-                    fill={candleColor}
-                    rx="1.5"
-                    opacity={hoveredCandle === c ? 1 : 0.9}
-                  />
-                </g>
-              );
-            })}
-
-          {/* Línea horizontal del precio en vivo */}
-          {livePrice && (
-            <g>
-              <line
-                x1={padding.left}
-                y1={getY(livePrice)}
-                x2={padding.left + chartWidth}
-                y2={getY(livePrice)}
-                stroke="#38bdf8"
-                strokeWidth="1.5"
-                strokeDasharray="3 3"
-              />
-              <rect
-                x={padding.left + chartWidth + 2}
-                y={getY(livePrice) - 9}
-                width="60"
-                height="18"
-                fill="#0284c7"
-                rx="3"
-              />
-              <text
-                x={padding.left + chartWidth + 6}
-                y={getY(livePrice) + 4}
-                fill="#ffffff"
-                fontSize="9.5"
-                fontWeight="700"
-                fontFamily="monospace"
-              >
-                ${livePrice.toLocaleString(undefined, { maximumFractionDigits: 1 })}
-              </text>
-            </g>
-          )}
-
-          {/* Eje de Tiempo (Etiquetas) */}
-          {displayCandles
-            .filter((_, i) => i % Math.ceil(displayCandles.length / 5) === 0)
-            .map((c, i) => {
-              const originalIndex = displayCandles.indexOf(c);
-              const xPos =
-                padding.left +
-                originalIndex * (chartWidth / displayCandles.length) +
-                candleWidth / 2;
-              return (
-                <text
-                  key={i}
-                  x={xPos}
-                  y={padding.top + chartHeight + 18}
-                  fill="#64748b"
-                  fontSize="10"
-                  textAnchor="middle"
-                  fontFamily="sans-serif"
-                >
-                  {new Date(c.timestamp).toLocaleTimeString([], {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })}
-                </text>
-              );
-            })}
-        </svg>
+      <div className="chart-meta" aria-live="polite">
+        <span>
+          {hover === null ? 'Vela actual' : new Date(active.timestamp).toLocaleString('es-ES')}
+        </span>
+        <span>
+          Apertura <strong>{fmtPrice(active.open)}</strong>
+        </span>
+        <span>
+          Máx <strong>{fmtPrice(active.high)}</strong>
+        </span>
+        <span>
+          Mín <strong>{fmtPrice(active.low)}</strong>
+        </span>
+        <span>
+          Cierre <strong>{fmtPrice(active.close)}</strong>
+        </span>
+        <span className={toneClass(change)}>{fmtSigned(change, 2, ' %')}</span>
       </div>
     </div>
   );
-};
+}

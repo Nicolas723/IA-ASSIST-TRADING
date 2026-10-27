@@ -196,6 +196,34 @@ class RuntimeConfigService:
             return False
         return summary is not None
 
+    def _require_safe_mainnet_key(self) -> None:
+        """Refuse real money with a key Binance has not cleared.
+
+        The permissions must have been read from the exchange by "Probar
+        conexión" (never assumed at save time), and the key must not be able
+        to withdraw funds.
+        """
+        if self.vault_service is None:
+            return
+        try:
+            summary = self.vault_service.vault.get_credential_summary(
+                self.settings.real_trading_exchange, environment="mainnet"
+            )
+        except Exception:
+            summary = None
+        if summary is None:
+            return  # The credential check above reports the missing key.
+        if getattr(summary, "permissions_verified_at", None) is None:
+            raise SecurityError(
+                "Verifica primero la clave de Mainnet con «Probar conexión»: hay que confirmar "
+                "en Binance que no permite retiradas."
+            )
+        if getattr(summary, "has_withdrawal_permission", False):
+            raise SecurityError(
+                "La clave de Mainnet permite retiradas. Desactiva ese permiso en Binance y "
+                "vuelve a probar la conexión."
+            )
+
     def _validate(
         self,
         *,
@@ -231,6 +259,9 @@ class RuntimeConfigService:
 
         if activating_mainnet_real and not confirm:
             raise SecurityError("Debes confirmar explícitamente el uso de MAINNET con dinero real.")
+
+        if activating_mainnet_real:
+            self._require_safe_mainnet_key()
 
         enabled_mainnet_permission = (
             candidate.allow_mainnet_trading and not before.allow_mainnet_trading
