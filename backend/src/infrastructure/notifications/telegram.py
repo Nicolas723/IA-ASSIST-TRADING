@@ -90,6 +90,9 @@ def render(alert: Alert) -> str:
         return _render_opened(alert.metadata)
     if event == "trade_closed":
         return _render_closed(alert.metadata)
+    prerendered = alert.metadata.get("html")
+    if isinstance(prerendered, str) and prerendered:
+        return prerendered
     icon = _SEVERITY_ICON.get(alert.severity.value, "🔔")
     return f"{icon} <b>{escape(alert.title)}</b>\n{escape(alert.message)}"
 

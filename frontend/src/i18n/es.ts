@@ -251,6 +251,7 @@ export const es = {
     '{verdict} · Entrada suspendida: no se pudo sincronizar con el exchange ({detail}). No se abre riesgo nuevo.',
   'log.order.executed': 'Orden ejecutada: {side} {quantity} {symbol} a {price} · stop {sl} · objetivo {tp}',
   'log.order.risk_blocked': 'Orden bloqueada por el control de riesgo: {detail}',
+  'log.risk.daily_limit': 'Límite de pérdida diaria alcanzado ({loss} % ≥ {limit} %): sin compras nuevas hasta mañana.',
   'log.order.error': 'Error al ejecutar la orden: {detail}',
 
   // Operations

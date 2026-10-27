@@ -379,6 +379,8 @@ async def test_real_order_quantity_is_capped_to_max_notional(monkeypatch) -> Non
         ),
     )
     risk = MagicMock()
+    risk.current_daily_loss_pct = 0.0
+    risk.guard.profile.max_daily_loss_pct = 2.0
     risk.calculate_position_size.return_value = PositionSizeResult(
         symbol="BTC/USDT",
         account_balance=10000.0,
@@ -477,6 +479,8 @@ async def test_real_entry_is_suspended_when_reconciliation_fails(monkeypatch) ->
     live.preflight_reconciliation = AsyncMock(return_value=(False, "exchange unreachable"))
     live.place_order = AsyncMock()
     risk = MagicMock()
+    risk.current_daily_loss_pct = 0.0
+    risk.guard.profile.max_daily_loss_pct = 2.0
     risk.calculate_position_size.return_value = PositionSizeResult(
         symbol="BTC/USDT",
         account_balance=10000.0,
@@ -694,6 +698,8 @@ def _paper_guard_fixture(
         ),
     )
     risk = MagicMock()
+    risk.current_daily_loss_pct = 0.0
+    risk.guard.profile.max_daily_loss_pct = 2.0
     risk.calculate_position_size.return_value = PositionSizeResult(
         symbol="BTC/USDT",
         account_balance=10000.0,

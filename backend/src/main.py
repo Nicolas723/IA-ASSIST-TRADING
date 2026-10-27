@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import hmac
 import os
+import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 import sentry_sdk
@@ -78,6 +79,7 @@ from src.shared.observability.metrics import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
+    from datetime import datetime
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -86,6 +88,8 @@ if TYPE_CHECKING:
 settings = get_settings()
 _shadow_scan_collector = None
 _heartbeat_service = None
+_assistant_monitor = None
+_telegram_commands = None
 
 # ---------------------------------------------------------------------------
 # Initialize logging (must happen before any logger is used)
@@ -120,6 +124,68 @@ if settings.sentry_dsn:
 # ---------------------------------------------------------------------------
 
 
+def _start_assistant_monitor() -> tuple[Any, Any]:
+    """Wire the watchdog/summary monitor and the Telegram command listener."""
+    from src.application.services.assistant_monitor import AssistantMonitor, resolve_timezone
+    from src.application.services.journal import persist_live_order_to_database
+    from src.application.services.learning_service import LearningService
+    from src.domain.trading.entities import ExecutionMode
+    from src.infrastructure.notifications.telegram_commands import TelegramCommandListener
+    from src.infrastructure.persistence.database import get_db_session
+    from src.infrastructure.persistence.repositories.decision_repository import (
+        SqlDecisionRepository,
+    )
+    from src.infrastructure.persistence.repositories.trading_repository import (
+        SqlTradingRepository,
+    )
+    from src.interfaces.api.v1 import deps
+
+    async def _outcomes(since: datetime) -> list[Any]:
+        async with get_db_session() as session:
+            decisions = await SqlDecisionRepository(session).list_decisions(limit=500, since=since)
+            orders = await SqlTradingRepository(session).list_orders_for_attribution(
+                mode=ExecutionMode.REAL, since=since, limit=5000
+            )
+        return LearningService().build_outcomes(decisions, orders)
+
+    async def _journal(order: Order) -> None:
+        await persist_live_order_to_database(order, deps.get_live_trading_service())
+
+    def _llm_usage() -> dict[str, object] | None:
+        gateway = deps.get_llm_gateway()
+        return gateway.usage_status() if gateway is not None else None
+
+    monitor = AssistantMonitor(
+        alert_service=deps.get_alert_service(),
+        engine=lambda: deps._autonomous_engine,
+        live=deps.get_live_trading_service,
+        outcomes=_outcomes,
+        journal=_journal,
+        llm_usage=_llm_usage,
+        testnet=lambda: get_settings().trading_environment.value == "testnet",
+        summary_hour=settings.daily_summary_hour,
+        timezone=resolve_timezone(settings.alert_timezone),
+    )
+    monitor.start()
+
+    def _credentials() -> tuple[str, str, bool]:
+        current = get_settings()
+        return (
+            current.telegram_bot_token,
+            current.telegram_chat_id,
+            current.telegram_commands_enabled,
+        )
+
+    listener = TelegramCommandListener(credentials=_credentials, handler=monitor.handle_command)
+    listener.start()
+    logger.info(
+        "assistant_monitor_started",
+        summary_hour=settings.daily_summary_hour,
+        telegram_commands=settings.telegram_commands_enabled,
+    )
+    return monitor, listener
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     """
@@ -137,6 +203,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     - Flush pending metrics
     """
     global _heartbeat_service, _redis_client, _shadow_scan_collector
+    global _assistant_monitor, _telegram_commands
 
     # Apply UI-managed integration settings (LLM keys, Telegram, heartbeat)
     # before any service reads the cached Settings instance. Values stored from
@@ -323,12 +390,29 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         logger.warning("heartbeat_start_failed", error=str(e))
         _heartbeat_service = None
 
+    # Watchdog + daily summary + Telegram commands (/estado, /pausar, ...).
+    # Never under pytest: it would poll and message the real Telegram chat.
+    if "pytest" not in sys.modules:
+        try:
+            _assistant_monitor, _telegram_commands = _start_assistant_monitor()
+        except Exception as e:
+            logger.warning("assistant_monitor_start_failed", error=str(e))
+
     logger.info("application_ready", host=settings.server_host, port=settings.server_port)
 
     yield  # Application runs here
 
     # --------------- Shutdown ---------------
     logger.info("application_shutting_down")
+
+    # Before the engine stops: the monitor must remember it was running, so the
+    # next start can warn that the restart left the assistant paused.
+    if _telegram_commands is not None:
+        await _telegram_commands.stop()
+        _telegram_commands = None
+    if _assistant_monitor is not None:
+        await _assistant_monitor.stop()
+        _assistant_monitor = None
 
     # Always stop through the manager: the heartbeat may have been enabled from
     # the settings API after startup, when _heartbeat_service was still None.

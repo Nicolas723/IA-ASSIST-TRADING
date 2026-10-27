@@ -433,6 +433,8 @@ Programa el backup a diario con el Programador de tareas de Windows o `cron`. Re
 - Rota `APP_SECRET_KEY` solo si entiendes el impacto en el vault. Para producción, fija `API_KEY_ENCRYPTION_KEY` explícitamente.
 - Configura alertas (`ALERTS_ENABLED`, Telegram, email o webhook) y un heartbeat externo (`HEARTBEAT_PING_URL`) para detectar caídas.
 - Revisa los logs y las órdenes del exchange periódicamente. Un proceso caído no puede avisar por sí mismo.
+- Con Telegram configurado, el backend avisa si el asistente deja de completar ciclos, falla varias veces seguidas o quedó en pausa tras un reinicio. Envía un resumen diario a las `DAILY_SUMMARY_HOUR` (22 h por defecto; `ALERT_TIMEZONE` fija la zona) y responde, solo en tu chat, a `/estado`, `/resumen`, `/pausar` y `/emergencia` (cierra todo; pide `/emergencia confirmar`).
+- Al llegar al límite de pérdida diaria (`MAX_DAILY_LOSS_PCT`, 2 % por defecto) el asistente deja de comprar hasta el día siguiente y avisa una vez. Las ventas y los stops siguen funcionando.
 
 ---
 

@@ -8,7 +8,7 @@ import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -203,6 +203,9 @@ class AutonomousEngine:
         self.last_confidence: float | None = None
         self.last_error: str | None = None
         self._last_analysis_at: datetime | None = None
+        # Read by the watchdog: a loop that keeps failing is as bad as a dead one.
+        self.consecutive_errors = 0
+        self._daily_limit_day: date | None = None
         self._logs: list[AutonomousLogEntry] = []
         self._task: asyncio.Task[None] | None = None
 
@@ -463,6 +466,44 @@ class AutonomousEngine:
             await self.alert_service.notify(title, message, severity, metadata or {})
         except Exception as exc:  # pragma: no cover - alerting is best-effort
             logger.warning("autonomous_alert_failed", error=str(exc))
+
+    async def _daily_loss_limit_reached(
+        self,
+        service: TradingService | LiveTradingService,
+        mode: ExecutionMode,
+    ) -> bool:
+        """True once today's loss hits the risk limit; logs and alerts once per day."""
+        if self.risk_service is None:
+            return False
+        try:
+            service.get_portfolio(mode)  # refreshes risk_service.current_daily_loss_pct
+        except Exception as exc:
+            logger.warning("daily_loss_refresh_failed", error=str(exc))
+        loss = self.risk_service.current_daily_loss_pct
+        limit = self.risk_service.guard.profile.max_daily_loss_pct
+        if loss < limit:
+            return False
+        today = datetime.now(tz=UTC).date()
+        if self._daily_limit_day != today:
+            self._daily_limit_day = today
+            params = {"loss": f"{loss:.2f}", "limit": f"{limit:.1f}"}
+            self.add_log(
+                key="risk.daily_limit",
+                params=params,
+                level="WARNING",
+                message=(
+                    f"Límite de pérdida diaria alcanzado ({params['loss']} % ≥ "
+                    f"{params['limit']} %): sin compras nuevas hasta mañana."
+                ),
+            )
+            await self._notify(
+                "Límite diario alcanzado",
+                f"Pérdida de hoy: -{params['loss']} % (límite {params['limit']} %). "
+                "No habrá compras nuevas hasta mañana; las posiciones abiertas siguen protegidas.",
+                AlertSeverity.WARNING,
+                {"event": "daily_limit", "loss_pct": loss, "limit_pct": limit},
+            )
+        return True
 
     def add_log(
         self,
@@ -732,9 +773,11 @@ class AutonomousEngine:
         while self.is_running:
             try:
                 await self._execute_cycle()
+                self.consecutive_errors = 0
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                self.consecutive_errors += 1
                 self.last_error = str(e)
                 logger.error("autonomous_cycle_error", error=str(e), exc_info=True)
                 self.add_log(
@@ -948,6 +991,14 @@ class AutonomousEngine:
         ]
         if not entry_symbols:
             return
+
+        # 4b. Daily loss limit: no new buys today, so only markets with an open
+        #     position still need the committee (it may decide to exit them).
+        if service is not None and await self._daily_loss_limit_reached(service, mode):
+            held = {position.symbol for position in service.get_positions(mode)}
+            entry_symbols = [symbol for symbol in entry_symbols if symbol in held]
+            if not entry_symbols:
+                return
 
         # 5. Multi-Agent Committee Consensus Evaluation
         if not agent_service:

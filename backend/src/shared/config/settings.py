@@ -581,6 +581,12 @@ class Settings(BaseSettings):
     alert_timeout_seconds: float = Field(default=5.0, gt=0)
     telegram_bot_token: str = Field(default="")
     telegram_chat_id: str = Field(default="")
+    # /estado, /pausar... from the configured chat only (long polling, no webhook).
+    telegram_commands_enabled: bool = Field(default=True)
+    # Local hour for the end-of-day Telegram summary; -1 disables it.
+    daily_summary_hour: int = Field(default=22, ge=-1, le=23)
+    # IANA zone for the summary day (e.g. "America/Bogota"); empty = server time.
+    alert_timezone: str = Field(default="")
     alert_webhook_url: str = Field(default="")
     email_smtp_host: str = Field(default="")
     email_smtp_port: int = Field(default=587, ge=1, le=65535)

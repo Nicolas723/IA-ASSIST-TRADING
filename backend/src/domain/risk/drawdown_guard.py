@@ -77,8 +77,12 @@ class DrawdownGuard:
                 recommended_quantity=0.0,
             )
 
-        # 3. Daily Loss Limit Check (Level 2 Breaker)
-        if req.current_daily_loss_pct >= self.profile.max_daily_loss_pct:
+        # 3. Daily Loss Limit Check (Level 2 Breaker). Only new risk is blocked:
+        # a sell reduces exposure, so it must stay possible on a bad day.
+        if (
+            req.side.upper() == "BUY"
+            and req.current_daily_loss_pct >= self.profile.max_daily_loss_pct
+        ):
             violations.append(
                 f"Daily loss limit reached ({req.current_daily_loss_pct}% >= {self.profile.max_daily_loss_pct}%). Trading suspended for today."
             )

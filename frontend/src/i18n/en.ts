@@ -240,6 +240,7 @@ export const en: Record<MessageKey, string> = {
     '{verdict} · Entry suspended: could not sync with the exchange ({detail}). No new risk is opened.',
   'log.order.executed': 'Order filled: {side} {quantity} {symbol} at {price} · stop {sl} · target {tp}',
   'log.order.risk_blocked': 'Order blocked by the risk guard: {detail}',
+  'log.risk.daily_limit': 'Daily loss limit reached ({loss} % ≥ {limit} %): no new buys until tomorrow.',
   'log.order.error': 'Order failed: {detail}',
 
   'ops.title': 'Trades',
