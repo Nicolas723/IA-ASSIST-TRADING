@@ -229,6 +229,15 @@ a {
   gap: var(--space-2);
 }
 
+.lang-select {
+  width: auto;
+  min-height: 30px;
+  padding: 0 28px 0 10px;
+  font-size: 12px;
+  border-radius: 999px;
+  background-position: right 9px center;
+}
+
 .main {
   width: 100%;
   max-width: 1280px;

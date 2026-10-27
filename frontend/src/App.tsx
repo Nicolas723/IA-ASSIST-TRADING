@@ -3,18 +3,21 @@ import { Toaster } from 'react-hot-toast';
 import { Icon, type IconName } from './components/Icon';
 import { Pill } from './components/ui';
 import { usePolling } from './hooks/usePolling';
+import { LANG_LABEL, useI18n, type Lang, type MessageKey } from './i18n/core';
 import { apiGet } from './lib/api';
 import type { AutonomousBotStatus, RuntimeTradingConfigData } from './types';
 import { AdvancedView } from './views/AdvancedView';
 import { AssistantView } from './views/AssistantView';
+import { OperationsView } from './views/OperationsView';
 import { SettingsView } from './views/SettingsView';
 
-export type Page = 'assistant' | 'settings' | 'advanced';
+export type Page = 'assistant' | 'operations' | 'settings' | 'advanced';
 
-const PAGES: ReadonlyArray<{ id: Page; hash: string; label: string; icon: IconName }> = [
-  { id: 'assistant', hash: '#/asistente', label: 'Asistente', icon: 'activity' },
-  { id: 'settings', hash: '#/configuracion', label: 'Configuración', icon: 'settings' },
-  { id: 'advanced', hash: '#/avanzado', label: 'Avanzado', icon: 'layers' },
+const PAGES: ReadonlyArray<{ id: Page; hash: string; label: MessageKey; icon: IconName }> = [
+  { id: 'assistant', hash: '#/asistente', label: 'nav.assistant', icon: 'activity' },
+  { id: 'operations', hash: '#/operaciones', label: 'nav.operations', icon: 'list' },
+  { id: 'settings', hash: '#/configuracion', label: 'nav.settings', icon: 'settings' },
+  { id: 'advanced', hash: '#/avanzado', label: 'nav.advanced', icon: 'layers' },
 ];
 
 function pageFromHash(hash: string): Page {
@@ -28,6 +31,7 @@ function sectionFromHash(hash: string): string | null {
 }
 
 export default function App() {
+  const { t, lang, setLang } = useI18n();
   const [hash, setHash] = useState(() => window.location.hash);
   const page = pageFromHash(hash);
   const section = sectionFromHash(hash);
@@ -37,6 +41,10 @@ export default function App() {
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
+
+  useEffect(() => {
+    document.title = `${t(PAGES.find((item) => item.id === page)?.label ?? 'nav.assistant')} · Trading Assistant`;
+  }, [page, t]);
 
   const navigate = useCallback((target: Page, sub?: string) => {
     const base = PAGES.find((item) => item.id === target)?.hash ?? '#/asistente';
@@ -75,34 +83,46 @@ export default function App() {
             <span className="brand-name">Trading Assistant</span>
           </div>
 
-          <nav className="nav" aria-label="Secciones">
+          <nav className="nav" aria-label={t('nav.label')}>
             {PAGES.map((item) => (
               <button
                 key={item.id}
                 type="button"
                 className="nav-item"
                 aria-current={page === item.id ? 'page' : undefined}
-                aria-label={item.label}
+                aria-label={t(item.label)}
                 onClick={() => navigate(item.id)}
               >
                 <Icon name={item.icon} size={16} />
                 <span className="nav-label-long" aria-hidden="true">
-                  {item.label}
+                  {t(item.label)}
                 </span>
               </button>
             ))}
           </nav>
 
           <div className="header-status">
-            <Pill dot live={running} tone={running ? 'solid' : 'default'} title="Estado del asistente">
-              {running ? 'Activo' : 'En pausa'}
+            <Pill dot live={running} tone={running ? 'solid' : 'default'} title={t('header.botState')}>
+              {running ? t('header.running') : t('header.paused')}
             </Pill>
-            <Pill
-              tone={realMode && mainnet ? 'neg' : 'default'}
-              title="Dónde opera el asistente"
+            <Pill tone={realMode && mainnet ? 'neg' : 'default'} title={t('header.venue')}>
+              {!realMode ? t('venue.paper') : mainnet ? t('venue.mainnet') : t('venue.testnet')}
+            </Pill>
+            <label className="sr-only" htmlFor="lang">
+              {t('header.language')}
+            </label>
+            <select
+              id="lang"
+              className="select lang-select"
+              value={lang}
+              onChange={(event) => setLang(event.target.value as Lang)}
             >
-              {!realMode ? 'Simulado' : mainnet ? 'Dinero real' : 'Testnet'}
-            </Pill>
+              {(Object.keys(LANG_LABEL) as Lang[]).map((code) => (
+                <option key={code} value={code}>
+                  {code.toUpperCase()}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
       </header>
@@ -119,6 +139,7 @@ export default function App() {
             navigate={navigate}
           />
         )}
+        {page === 'operations' && <OperationsView />}
         {page === 'settings' && <SettingsView section={section} navigate={navigate} runtime={runtime} />}
         {page === 'advanced' && (
           <AdvancedView section={section} navigate={navigate} symbol={symbol} timeframe={timeframe} />

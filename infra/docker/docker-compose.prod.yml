@@ -1,0 +1,111 @@
+# =============================================================================
+# AI Trading Assistant — production stack for a small VPS
+#
+#   cd infra/docker
+#   cp .env.prod.example .env.prod   # fill in DOMAIN, password hash, DB password
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#
+# Only Caddy is reachable from the internet (80/443). It terminates HTTPS with
+# an automatic Let's Encrypt certificate and asks for a username/password
+# before anything reaches the app. PostgreSQL, Redis and the app stay on the
+# private Docker network. See docs/DESPLIEGUE_VPS.md.
+# =============================================================================
+
+name: ai-trading-assistant
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: ata-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: trading_db
+      POSTGRES_USER: trading_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.prod}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading_user -d trading_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  redis:
+    image: redis:7-alpine
+    container_name: ata-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  app:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ai-trading-assistant:latest
+    container_name: ata-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # API keys, LLM providers and risk limits live in backend/.env, mounted as
+    # a file (not env_file: Compose does not strip inline "# comments"). The
+    # variables below take precedence over it.
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      LOG_FORMAT: json
+      METRICS_ENABLED: "false"
+      DATABASE_URL: postgresql+asyncpg://trading_user:${POSTGRES_PASSWORD}@postgres:5432/trading_db
+      REDIS_URL: redis://redis:6379/0
+      APP_CORS_ORIGINS: '["https://${DOMAIN}"]'
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ../../backend/.env:/app/.env:ro
+      # Encrypted vault + runtime overrides (LLM keys, Telegram, heartbeat,
+      # P&L reference, usage counters). Back it up together with the DB.
+      - ../../backend/vault:/app/vault
+    # Loopback only: reachable from the server itself (backups, SSH tunnel),
+    # never from the internet. Public traffic goes through Caddy.
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks: [internal]
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: ata-caddy
+    restart: unless-stopped
+    depends_on: [app]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env.prod}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:?set BASIC_AUTH_USER in .env.prod}
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:?set BASIC_AUTH_HASH in .env.prod}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [internal]
+
+volumes:
+  postgres-data:
+  redis-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  internal:
+    driver: bridge

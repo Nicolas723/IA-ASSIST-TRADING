@@ -34,6 +34,9 @@ x-backend-base: &backend-base
     - ../../backend/.env:/app/.env:ro
     - ../../backend/tests:/app/tests:ro
     - ../../backend/vault:/app/vault          # Persist encrypted credentials
+    # Built UI (npm --prefix frontend run build): served at localhost:8000,
+    # no separate Vite process needed. Vite on :5173 keeps working for dev.
+    - ../../frontend/dist:/app/frontend_dist:ro
   environment:
     - PYTHONPATH=/app
     - PYTHONDONTWRITEBYTECODE=1
@@ -126,6 +129,7 @@ services:
       - LOG_FORMAT=console
       - METRICS_ENABLED=true
       - VAULT_STORAGE_PATH=/app/vault/.vault_store.json
+      - FRONTEND_DIST_PATH=/app/frontend_dist
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s

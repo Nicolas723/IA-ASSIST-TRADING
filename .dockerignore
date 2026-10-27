@@ -1,0 +1,25 @@
+# Secrets and runtime data: mounted at runtime, never baked into an image.
+**/.env
+**/.env.*
+!**/.env.example
+backend/vault/
+backend/.vault_store.json
+backups/
+infra/docker/.env.prod
+
+# Build artefacts and local tooling
+**/node_modules/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/coverage.xml
+**/htmlcov/
+frontend/dist/
+.git/
+.github/
+.claude/
+graphify-out/
+docs/

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import toast from 'react-hot-toast';
 import { usePolling } from '../hooks/usePolling';
+import { useI18n } from '../i18n/core';
 import { apiGet, apiSend, errorMessage } from '../lib/api';
 import { fmtDateTime, fmtNumber, fmtSigned, fmtUsd, toneClass } from '../lib/format';
 import { Card, Notice, Pill, Skeleton, Stat } from './ui';
@@ -28,6 +29,7 @@ export interface AccountSnapshotData {
 const REFRESH_MS = 20_000;
 
 export default function AccountBalanceCard({ onConnect }: { onConnect?: () => void }) {
+  const { t } = useI18n();
   const snapshot = usePolling<AccountSnapshotData>(
     'account-snapshot',
     () => apiGet<AccountSnapshotData>('/api/v1/trading/real/account/snapshot'),
@@ -39,9 +41,9 @@ export default function AccountBalanceCard({ onConnect }: { onConnect?: () => vo
     setResetting(true);
     try {
       snapshot.setData(await apiSend<AccountSnapshotData>('POST', '/api/v1/trading/real/account/baseline', {}));
-      toast.success('Referencia fijada en el saldo actual.');
+      toast.success(t('account.toast.baseline'));
     } catch (error) {
-      toast.error(`No se pudo fijar: ${errorMessage(error)}`);
+      toast.error(t('common.saveFailed', { detail: errorMessage(error) }));
     } finally {
       setResetting(false);
     }
@@ -51,7 +53,7 @@ export default function AccountBalanceCard({ onConnect }: { onConnect?: () => vo
 
   if (snapshot.loading) {
     return (
-      <Card title="Saldo de la cuenta" icon="wallet">
+      <Card title={t('account.title')} icon="wallet">
         <Skeleton height={88} />
       </Card>
     );
@@ -60,17 +62,17 @@ export default function AccountBalanceCard({ onConnect }: { onConnect?: () => vo
   if (!data) {
     return (
       <Card
-        title="Saldo de la cuenta"
+        title={t('account.title')}
         icon="wallet"
-        subtitle="Conecta tus claves de Binance para ver aquí tu saldo real o de Testnet."
+        subtitle={t('account.connectHint')}
         actions={
           <>
             <button type="button" className="btn btn-sm" onClick={() => void snapshot.refresh()}>
-              Reintentar
+              {t('common.retry')}
             </button>
             {onConnect && (
               <button type="button" className="btn btn-sm btn-primary" onClick={onConnect}>
-                Conectar Binance
+                {t('account.connect')}
               </button>
             )}
           </>
@@ -83,43 +85,46 @@ export default function AccountBalanceCard({ onConnect }: { onConnect?: () => vo
 
   return (
     <Card
-      title="Saldo de la cuenta"
+      title={t('account.title')}
       icon="wallet"
-      subtitle={`${data.exchange} · actualizado ${fmtDateTime(data.as_of)}`}
+      subtitle={t('account.updated', { exchange: data.exchange, time: fmtDateTime(data.as_of) })}
       actions={
         <>
-          <Pill tone={data.testnet ? 'default' : 'neg'}>{data.testnet ? 'Testnet' : 'Dinero real'}</Pill>
+          <Pill tone={data.testnet ? 'default' : 'neg'}>{data.testnet ? 'Testnet' : t('venue.mainnet')}</Pill>
           <button
             type="button"
             className="btn btn-sm"
             disabled={resetting}
-            title="Usa el saldo actual como punto de partida para medir ganancias"
+            title={t('account.baseline.hint')}
             onClick={() => void resetBaseline()}
           >
-            {resetting ? 'Guardando…' : 'Fijar referencia'}
+            {resetting ? t('common.saving') : t('account.baseline')}
           </button>
         </>
       }
     >
       <div className="stack">
         <div className="stats">
-          <Stat label="Patrimonio total" value={fmtUsd(data.equity_usdt)} />
+          <Stat label={t('account.equity')} value={fmtUsd(data.equity_usdt)} />
           <Stat
-            label="Efectivo USDT"
+            label={t('account.cash')}
             value={fmtUsd(data.cash_usdt)}
-            sub={`Libre ${fmtUsd(data.free_usdt)} · en órdenes ${fmtUsd(data.locked_usdt)}`}
+            sub={t('account.cash.sub', { free: fmtUsd(data.free_usdt), locked: fmtUsd(data.locked_usdt) })}
           />
           <Stat
-            label="Desde la referencia"
+            label={t('account.change')}
             value={fmtSigned(data.change_usdt, 2, ' $')}
             tone={toneClass(data.change_usdt)}
-            sub={data.change_pct === null ? 'Sin referencia' : fmtSigned(data.change_pct, 2, ' %')}
+            sub={data.change_pct === null ? t('account.noBaseline') : fmtSigned(data.change_pct, 2, ' %')}
           />
           <Stat
-            label="Resultado del asistente"
+            label={t('account.botResult')}
             value={fmtSigned(data.total_pnl, 2, ' $')}
             tone={toneClass(data.total_pnl)}
-            sub={`Cerrado ${fmtSigned(data.realized_pnl)} · abierto ${fmtSigned(data.unrealized_pnl)}`}
+            sub={t('account.botResult.sub', {
+              realized: fmtSigned(data.realized_pnl),
+              unrealized: fmtSigned(data.unrealized_pnl),
+            })}
           />
         </div>
 
@@ -129,7 +134,7 @@ export default function AccountBalanceCard({ onConnect }: { onConnect?: () => vo
               <Pill key={asset.asset}>
                 <span className="num">
                   {asset.asset} {fmtNumber(asset.total, asset.total >= 1 ? 2 : 6)}
-                  {asset.value_usdt === null ? ' · sin precio' : ` · ${fmtUsd(asset.value_usdt)}`}
+                  {asset.value_usdt === null ? ` · ${t('account.noPrice')}` : ` · ${fmtUsd(asset.value_usdt)}`}
                 </span>
               </Pill>
             ))}
@@ -137,12 +142,11 @@ export default function AccountBalanceCard({ onConnect }: { onConnect?: () => vo
         )}
 
         <p className="muted xsmall">
-          Referencia: {fmtUsd(data.baseline_equity)} desde {fmtDateTime(data.baseline_at)}. Los depósitos y retiros
-          también cambian esta cifra; fija una nueva referencia después de moverlos.
-          {data.unpriced_assets.length > 0 && ` Sin precio público: ${data.unpriced_assets.join(', ')}.`}
+          {t('account.baselineNote', { value: fmtUsd(data.baseline_equity), time: fmtDateTime(data.baseline_at) })}
+          {data.unpriced_assets.length > 0 && ` ${t('account.unpriced', { list: data.unpriced_assets.join(', ') })}`}
         </p>
 
-        {snapshot.error && <Notice tone="warn">La última actualización falló: {snapshot.error}</Notice>}
+        {snapshot.error && <Notice tone="warn">{t('account.lastFailed', { detail: snapshot.error })}</Notice>}
       </div>
     </Card>
   );

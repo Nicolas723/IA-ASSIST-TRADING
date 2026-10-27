@@ -3,12 +3,13 @@ import toast from 'react-hot-toast';
 import type { Page } from '../App';
 import { Card, Empty, Notice, PageHead, Pill, Segmented, Skeleton, Stat, SubNav } from '../components/ui';
 import { usePolling } from '../hooks/usePolling';
+import { useI18n, type MessageKey } from '../i18n/core';
+import { agentLabel, regimeLabel, signalLabel } from '../i18n/labels';
 import { apiGet, apiSend, errorMessage } from '../lib/api';
 import { fmtInt, fmtNumber, fmtPct, fmtSigned, fmtUsd, toNumber, toneClass } from '../lib/format';
 import {
-  AGENT_LABELS,
+  AGENT_TYPES,
   AVAILABLE_SYMBOLS,
-  SIGNAL_LABELS,
   type AdaptiveWeightsReport,
   type ConcentrationReportData,
   type CoordinatorDecisionData,
@@ -24,13 +25,13 @@ import {
 
 type Section = 'comite' | 'aprendizaje' | 'riesgo' | 'mercado' | 'consumo' | 'sistema';
 
-const SECTIONS: ReadonlyArray<{ id: Section; label: string }> = [
-  { id: 'comite', label: 'Comité' },
-  { id: 'aprendizaje', label: 'Aprendizaje' },
-  { id: 'riesgo', label: 'Riesgo' },
-  { id: 'mercado', label: 'Mercado' },
-  { id: 'consumo', label: 'Consumo de IA' },
-  { id: 'sistema', label: 'Sistema' },
+const SECTIONS: ReadonlyArray<{ id: Section; label: MessageKey }> = [
+  { id: 'comite', label: 'adv.nav.committee' },
+  { id: 'aprendizaje', label: 'adv.nav.learning' },
+  { id: 'riesgo', label: 'adv.nav.risk' },
+  { id: 'mercado', label: 'adv.nav.market' },
+  { id: 'consumo', label: 'adv.nav.usage' },
+  { id: 'sistema', label: 'adv.nav.system' },
 ];
 
 interface Props {
@@ -41,14 +42,17 @@ interface Props {
 }
 
 export function AdvancedView({ section, navigate, symbol, timeframe }: Props) {
+  const { t } = useI18n();
   const active: Section = SECTIONS.some((item) => item.id === section) ? (section as Section) : 'comite';
   return (
     <>
-      <PageHead
-        title="Avanzado"
-        description="Detalle técnico del comité, los resultados y los controles de riesgo. Nada de esta sección envía órdenes."
+      <PageHead title={t('adv.title')} description={t('adv.description')} />
+      <SubNav
+        label={t('adv.nav.label')}
+        items={SECTIONS.map((item) => ({ id: item.id, label: t(item.label) }))}
+        value={active}
+        onChange={(id) => navigate('advanced', id)}
       />
-      <SubNav label="Secciones avanzadas" items={SECTIONS} value={active} onChange={(id) => navigate('advanced', id)} />
       {active === 'comite' && <Committee symbol={symbol} timeframe={timeframe} />}
       {active === 'aprendizaje' && <Learning />}
       {active === 'riesgo' && <Risk />}
@@ -61,22 +65,8 @@ export function AdvancedView({ section, navigate, symbol, timeframe }: Props) {
 
 /* ------------------------------------------------------------ Committee */
 
-const SPECIALISTS = [
-  {
-    id: 'technical_analyst',
-    description: 'Lee indicadores: RSI, MACD y medias móviles (9, 21, 50, 200) para medir tendencia e impulso.',
-  },
-  {
-    id: 'price_action_analyst',
-    description: 'Estudia soportes, resistencias y patrones de velas para evitar falsas rupturas.',
-  },
-  {
-    id: 'risk_manager',
-    description: 'Mide la volatilidad (ATR) y coloca stop y objetivo con una relación mínima de 2 a 1.',
-  },
-];
-
 function Committee({ symbol, timeframe }: { symbol: string; timeframe: string }) {
+  const { t } = useI18n();
   const [decision, setDecision] = useState<CoordinatorDecisionData | null>(null);
   const [busy, setBusy] = useState(false);
   const weights = usePolling<AdaptiveWeightsReport>('agent-weights', () =>
@@ -94,7 +84,7 @@ function Committee({ symbol, timeframe }: { symbol: string; timeframe: string })
         }),
       );
     } catch (error) {
-      toast.error(`No se pudo analizar: ${errorMessage(error)}`);
+      toast.error(t('committee.failed', { detail: errorMessage(error) }));
     } finally {
       setBusy(false);
     }
@@ -105,24 +95,25 @@ function Committee({ symbol, timeframe }: { symbol: string; timeframe: string })
   return (
     <div className="stack-lg">
       <Card
-        title="Consultar al comité"
-        subtitle={`Tres especialistas analizan ${symbol} (${timeframe}) por separado y un coordinador combina sus votos. Consulta puntual: no abre operaciones.`}
+        title={t('committee.title')}
+        subtitle={t('committee.subtitle', { symbol, timeframe })}
         actions={
           <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void analyze()}>
-            {busy ? 'Analizando…' : `Analizar ${symbol}`}
+            {busy ? t('committee.analyzing') : t('committee.analyze', { symbol })}
           </button>
         }
       >
         {decision ? (
           <div className="stack">
             <div className="row">
-              <Pill tone="solid">{SIGNAL_LABELS[decision.final_signal] ?? decision.final_signal}</Pill>
-              <Pill>Fuerza {Math.round(decision.aggregate_confidence * 100)} %</Pill>
-              <Pill>Consenso {Math.round(decision.consensus_level * 100)} %</Pill>
-              {decision.recommended_stop && <Pill>Stop {fmtUsd(decision.recommended_stop)}</Pill>}
-              {decision.recommended_target && <Pill>Objetivo {fmtUsd(decision.recommended_target)}</Pill>}
+              <Pill tone="solid">{signalLabel(t, decision.final_signal)}</Pill>
+              <Pill>{t('committee.strength', { value: Math.round(decision.aggregate_confidence * 100) })}</Pill>
+              <Pill>{t('committee.consensus', { value: Math.round(decision.consensus_level * 100) })}</Pill>
+              {decision.recommended_stop && <Pill>{t('committee.stop', { value: fmtUsd(decision.recommended_stop) })}</Pill>}
+              {decision.recommended_target && (
+                <Pill>{t('committee.target', { value: fmtUsd(decision.recommended_target) })}</Pill>
+              )}
             </div>
-            <p className="small">{decision.action_recommendation}</p>
             <div className="stack" style={{ gap: 6 }}>
               {decision.reasoning_summary.split(' | ').map((line) => (
                 <p key={line} className="muted small">
@@ -130,22 +121,23 @@ function Committee({ symbol, timeframe }: { symbol: string; timeframe: string })
                 </p>
               ))}
             </div>
+            <p className="muted xsmall">{t('committee.reasoningNote')}</p>
           </div>
         ) : (
-          <Empty>Pulsa «Analizar» para ver la opinión actual del comité.</Empty>
+          <Empty>{t('committee.empty')}</Empty>
         )}
       </Card>
 
       <div className="cols">
-        {SPECIALISTS.map((specialist) => {
-          const weight = liveWeights?.[specialist.id];
+        {AGENT_TYPES.map((agent) => {
+          const weight = liveWeights?.[agent];
           return (
             <Card
-              key={specialist.id}
-              title={AGENT_LABELS[specialist.id]}
-              actions={weight !== undefined ? <Pill>Peso {Math.round(weight * 100)} %</Pill> : null}
+              key={agent}
+              title={agentLabel(t, agent)}
+              actions={weight !== undefined ? <Pill>{t('committee.weight', { value: Math.round(weight * 100) })}</Pill> : null}
             >
-              <p className="muted small">{specialist.description}</p>
+              <p className="muted small">{t(`agent.${agent}.description`)}</p>
             </Card>
           );
         })}
@@ -157,6 +149,7 @@ function Committee({ symbol, timeframe }: { symbol: string; timeframe: string })
 /* ------------------------------------------------------------- Learning */
 
 function Learning() {
+  const { t } = useI18n();
   const [mode, setMode] = useState<'all' | 'paper' | 'real'>('all');
   const [symbol, setSymbol] = useState('');
   const params = new URLSearchParams({ limit: '200' });
@@ -178,28 +171,28 @@ function Learning() {
   return (
     <div className="stack-lg">
       <Card
-        title="Resultados del comité"
-        subtitle="Cada decisión se cruza con las órdenes reales que provocó. Solo cuentan operaciones con entrada y salida completas."
+        title={t('learning.title')}
+        subtitle={t('learning.subtitle')}
         actions={
           <>
             <Segmented
-              label="Modo"
+              label={t('ops.filter')}
               value={mode}
               onChange={setMode}
               options={[
-                { value: 'all', label: 'Todo' },
-                { value: 'paper', label: 'Simulado' },
-                { value: 'real', label: 'Real' },
+                { value: 'all', label: t('ops.filter.all') },
+                { value: 'paper', label: t('mode.paper') },
+                { value: 'real', label: t('mode.real') },
               ]}
             />
             <select
               className="select"
               style={{ width: 'auto' }}
-              aria-label="Mercado"
+              aria-label={t('assistant.market')}
               value={symbol}
               onChange={(event) => setSymbol(event.target.value)}
             >
-              <option value="">Todos los mercados</option>
+              <option value="">{t('learning.allMarkets')}</option>
               {AVAILABLE_SYMBOLS.map((item) => (
                 <option key={item.id} value={item.id}>
                   {item.id}
@@ -212,15 +205,22 @@ function Learning() {
         {!data ? (
           performance.error ? <Notice tone="error">{performance.error}</Notice> : <Skeleton height={90} />
         ) : !data.data_available ? (
-          <Notice tone="warn">La base de datos no responde ahora mismo. Las métricas volverán cuando se recupere.</Notice>
+          <Notice tone="warn">{t('learning.dbDown')}</Notice>
         ) : (
           <div className="stats">
-            <Stat label="Decisiones" value={fmtInt(data.total_decisions)} sub={`${fmtInt(data.executed)} ejecutadas`} />
-            <Stat label="Cerradas" value={fmtInt(data.resolved)} />
-            <Stat label="Acierto" value={fmtPct(data.win_rate_pct)} />
-            <Stat label="Resultado neto" value={fmtSigned(data.net_pnl, 2, ' $')} tone={toneClass(data.net_pnl)} />
-            <Stat label="Factor de beneficio" value={data.profit_factor === null ? '—' : fmtNumber(data.profit_factor)} />
-            <Stat label="Órdenes sin atribuir" value={fmtInt(data.unattributed_orders)} />
+            <Stat
+              label={t('learning.decisions')}
+              value={fmtInt(data.total_decisions)}
+              sub={t('learning.executed', { count: fmtInt(data.executed) })}
+            />
+            <Stat label={t('learning.closed')} value={fmtInt(data.resolved)} />
+            <Stat label={t('learning.hitRate')} value={fmtPct(data.win_rate_pct)} />
+            <Stat label={t('learning.net')} value={fmtSigned(data.net_pnl, 2, ' $')} tone={toneClass(data.net_pnl)} />
+            <Stat
+              label={t('learning.profitFactor')}
+              value={data.profit_factor === null ? '—' : fmtNumber(data.profit_factor)}
+            />
+            <Stat label={t('learning.unattributed')} value={fmtInt(data.unattributed_orders)} />
           </div>
         )}
       </Card>
@@ -228,22 +228,22 @@ function Learning() {
       <AdaptiveWeights report={weights.data} />
 
       {data?.data_available && data.by_agent.length > 0 && (
-        <Card title="Acierto por analista" subtitle="Dirección del precio frente a la señal de cada analista. El gestor de riesgo no se puntúa.">
+        <Card title={t('learning.byAgent')} subtitle={t('learning.byAgent.subtitle')}>
           <div className="table-wrap">
             <table className="table">
               <thead>
                 <tr>
-                  <th>Analista</th>
-                  <th>Acierto</th>
-                  <th>Aciertos / evaluadas</th>
-                  <th>Abstenciones</th>
-                  <th>Latencia media</th>
+                  <th>{t('learning.col.agent')}</th>
+                  <th>{t('learning.col.hitRate')}</th>
+                  <th>{t('learning.col.hits')}</th>
+                  <th>{t('learning.col.abstained')}</th>
+                  <th>{t('learning.col.latency')}</th>
                 </tr>
               </thead>
               <tbody>
                 {data.by_agent.map((agent) => (
                   <tr key={agent.agent_type}>
-                    <td>{AGENT_LABELS[agent.agent_type] ?? agent.agent_type}</td>
+                    <td>{agentLabel(t, agent.agent_type)}</td>
                     <td>{fmtPct(agent.hit_rate_pct)}</td>
                     <td>
                       {agent.correct} / {agent.decisions_scored}
@@ -260,23 +260,23 @@ function Learning() {
 
       {data?.data_available && (
         <div className="cols">
-          <Card title="Por señal">
+          <Card title={t('learning.bySignal')}>
             {data.by_signal.length === 0 ? (
-              <Empty>Sin datos todavía.</Empty>
+              <Empty>{t('common.noData')}</Empty>
             ) : (
               <div className="table-wrap">
                 <table className="table">
                   <thead>
                     <tr>
-                      <th>Señal</th>
-                      <th>Acierto</th>
-                      <th>Neto</th>
+                      <th>{t('learning.col.signal')}</th>
+                      <th>{t('learning.col.hitRate')}</th>
+                      <th>{t('learning.col.net')}</th>
                     </tr>
                   </thead>
                   <tbody>
                     {data.by_signal.map((item) => (
                       <tr key={item.signal}>
-                        <td>{SIGNAL_LABELS[item.signal] ?? item.signal}</td>
+                        <td>{signalLabel(t, item.signal)}</td>
                         <td>
                           {fmtPct(item.hit_rate_pct)} <span className="muted">({item.correct}/{item.resolved})</span>
                         </td>
@@ -288,17 +288,17 @@ function Learning() {
               </div>
             )}
           </Card>
-          <Card title="Por mercado">
+          <Card title={t('learning.bySymbol')}>
             {data.by_symbol.length === 0 ? (
-              <Empty>Sin datos todavía.</Empty>
+              <Empty>{t('common.noData')}</Empty>
             ) : (
               <div className="table-wrap">
                 <table className="table">
                   <thead>
                     <tr>
-                      <th>Mercado</th>
-                      <th>Acierto</th>
-                      <th>Neto</th>
+                      <th>{t('ops.col.market')}</th>
+                      <th>{t('learning.col.hitRate')}</th>
+                      <th>{t('learning.col.net')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -320,18 +320,15 @@ function Learning() {
       )}
 
       {data?.data_available && (
-        <Card
-          title="Acierto según la fuerza de la señal"
-          subtitle="Descriptivo: con pocas muestras no indica una probabilidad real."
-        >
+        <Card title={t('learning.byStrength')} subtitle={t('learning.byStrength.subtitle')}>
           <div className="table-wrap">
             <table className="table">
               <thead>
                 <tr>
-                  <th>Fuerza</th>
-                  <th>Cerradas</th>
-                  <th>Acierto</th>
-                  <th>Muestra</th>
+                  <th>{t('learning.col.strength')}</th>
+                  <th>{t('learning.closed')}</th>
+                  <th>{t('learning.col.hitRate')}</th>
+                  <th>{t('learning.col.sample')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -343,7 +340,9 @@ function Learning() {
                     <td>{bucket.decisions}</td>
                     <td>{fmtPct(bucket.hit_rate_pct)}</td>
                     <td className="muted">
-                      {bucket.sample_sufficient ? 'Suficiente' : `Insuficiente (${bucket.decisions}/${bucket.minimum_sample_size})`}
+                      {bucket.sample_sufficient
+                        ? t('learning.sample.enough')
+                        : t('learning.sample.short', { n: bucket.decisions, min: bucket.minimum_sample_size })}
                     </td>
                   </tr>
                 ))}
@@ -359,14 +358,20 @@ function Learning() {
 }
 
 function AdaptiveWeights({ report }: { report: AdaptiveWeightsReport | null }) {
+  const { t } = useI18n();
   if (!report) return null;
+  const reason = (agent: AdaptiveWeightsReport['agents'][number]) => {
+    if (agent.agent_type === 'risk_manager') return t('weights.reason.risk');
+    if (!agent.adjusted) return t('weights.reason.samples', { n: agent.decisions_scored, min: report.min_samples });
+    return t('weights.reason.adjusted', { rate: fmtPct(agent.hit_rate_pct) });
+  };
   return (
     <Card
-      title="Pesos adaptativos"
-      subtitle="El comité puede dar más peso al analista que más acierta. Con pocas operaciones el ajuste es mínimo y siempre está acotado entre la mitad y 1,5 veces el peso inicial."
+      title={t('weights.title')}
+      subtitle={t('weights.subtitle')}
       actions={
         <Pill tone={report.applied ? 'solid' : 'default'}>
-          {report.applied ? 'Aplicándose' : report.enabled ? 'Activo · esperando datos' : 'Vista previa'}
+          {report.applied ? t('weights.applied') : report.enabled ? t('weights.waiting') : t('weights.preview')}
         </Pill>
       }
     >
@@ -375,21 +380,21 @@ function AdaptiveWeights({ report }: { report: AdaptiveWeightsReport | null }) {
           <table className="table">
             <thead>
               <tr>
-                <th>Analista</th>
-                <th>Peso inicial</th>
-                <th>Peso propuesto</th>
-                <th>Evaluadas</th>
-                <th>Motivo</th>
+                <th>{t('learning.col.agent')}</th>
+                <th>{t('weights.col.default')}</th>
+                <th>{t('weights.col.proposed')}</th>
+                <th>{t('weights.col.scored')}</th>
+                <th>{t('weights.col.reason')}</th>
               </tr>
             </thead>
             <tbody>
               {report.agents.map((agent) => (
                 <tr key={agent.agent_type}>
-                  <td>{AGENT_LABELS[agent.agent_type] ?? agent.agent_type}</td>
+                  <td>{agentLabel(t, agent.agent_type)}</td>
                   <td>{Math.round(agent.default_weight * 100)} %</td>
                   <td className="strong">{fmtNumber(agent.weight * 100, 1)} %</td>
                   <td>{agent.decisions_scored}</td>
-                  <td className="muted">{agent.reason}</td>
+                  <td className="muted">{reason(agent)}</td>
                 </tr>
               ))}
             </tbody>
@@ -397,35 +402,41 @@ function AdaptiveWeights({ report }: { report: AdaptiveWeightsReport | null }) {
         </div>
         {!report.enabled && (
           <p className="muted xsmall">
-            Para aplicarlos, activa <code>ADAPTIVE_AGENT_WEIGHTS_ENABLED=true</code> en el servidor. Cada analista
-            necesita al menos {report.min_samples} decisiones cerradas antes de moverse. {report.note}
+            {t('weights.enableHint', { min: report.min_samples })} <code>ADAPTIVE_AGENT_WEIGHTS_ENABLED=true</code>
           </p>
         )}
+        <p className="muted xsmall">{t('weights.note')}</p>
       </div>
     </Card>
   );
 }
 
-const DRIFT_LABEL: Record<DriftReportData['status'], { text: string; tone: 'default' | 'pos' | 'neg' | 'warn' }> = {
-  stable: { text: 'Estable', tone: 'default' },
-  watch: { text: 'Vigilar', tone: 'warn' },
-  degraded: { text: 'Empeorando', tone: 'neg' },
-  insufficient_data: { text: 'Datos insuficientes', tone: 'default' },
+const DRIFT_TONE: Record<DriftReportData['status'], 'default' | 'warn' | 'neg'> = {
+  stable: 'default',
+  watch: 'warn',
+  degraded: 'neg',
+  insufficient_data: 'default',
 };
 
 function Drift({ report }: { report: DriftReportData }) {
-  const label = DRIFT_LABEL[report.status];
+  const { t } = useI18n();
   return (
     <Card
-      title="¿Está empeorando?"
-      subtitle="Compara las operaciones recientes con las anteriores. Solo informa: no detiene el asistente."
-      actions={<Pill tone={label.tone}>{label.text}</Pill>}
+      title={t('drift.title')}
+      subtitle={t('drift.subtitle')}
+      actions={<Pill tone={DRIFT_TONE[report.status]}>{t(`drift.status.${report.status}`)}</Pill>}
     >
       <div className="stack">
         <div className="stats">
-          <Stat label="Muestra reciente / anterior" value={`${report.recent.sample_size} / ${report.baseline.sample_size}`} />
-          <Stat label="Acierto reciente / anterior" value={`${fmtNumber(report.recent.win_rate_pct, 1)} / ${fmtNumber(report.baseline.win_rate_pct, 1)} %`} />
-          <Stat label="Factor de beneficio" value={`${fmtNumber(report.recent.profit_factor)} / ${fmtNumber(report.baseline.profit_factor)}`} />
+          <Stat label={t('drift.sample')} value={`${report.recent.sample_size} / ${report.baseline.sample_size}`} />
+          <Stat
+            label={t('drift.hitRate')}
+            value={`${fmtNumber(report.recent.win_rate_pct, 1)} / ${fmtNumber(report.baseline.win_rate_pct, 1)} %`}
+          />
+          <Stat
+            label={t('learning.profitFactor')}
+            value={`${fmtNumber(report.recent.profit_factor)} / ${fmtNumber(report.baseline.profit_factor)}`}
+          />
         </div>
         {report.reasons.length > 0 && <p className="muted small">{report.reasons.join(' · ')}</p>}
       </div>
@@ -436,6 +447,7 @@ function Drift({ report }: { report: DriftReportData }) {
 /* ----------------------------------------------------------------- Risk */
 
 function Risk() {
+  const { t } = useI18n();
   const risk = usePolling<RiskStatusSummary>('risk', () => apiGet<RiskStatusSummary>('/api/v1/risk/status'), 15000);
   const concentration = usePolling<ConcentrationReportData>('concentration', () =>
     apiGet<ConcentrationReportData>('/api/v1/risk/concentration?timeframe=1h&lookback=200'),
@@ -445,13 +457,13 @@ function Risk() {
   return (
     <div className="stack-lg">
       <Card
-        title="Cortafuegos de riesgo"
+        title={t('risk.title')}
         icon="shield"
-        subtitle="Si se supera un límite, el asistente deja de abrir operaciones nuevas automáticamente."
+        subtitle={t('risk.subtitle')}
         actions={
           data && (
             <Pill tone={data.circuit_breaker_state === 'armed' ? 'default' : 'neg'} dot>
-              {data.circuit_breaker_state === 'armed' ? 'Protegiendo' : 'Disparado · operaciones bloqueadas'}
+              {data.circuit_breaker_state === 'armed' ? t('risk.armed') : t('risk.tripped')}
             </Pill>
           )
         }
@@ -460,13 +472,21 @@ function Risk() {
           risk.error ? <Notice tone="error">{risk.error}</Notice> : <Skeleton height={80} />
         ) : (
           <div className="stats">
-            <Stat label="Pérdida de hoy" value={fmtPct(data.daily_loss_pct, 2)} sub={`Límite ${fmtPct(data.max_daily_loss_pct, 1)}`} />
-            <Stat label="Caída desde el máximo" value={fmtPct(data.current_drawdown_pct, 2)} sub={`Límite ${fmtPct(data.max_drawdown_pct, 1)}`} />
-            <Stat label="Posiciones" value={`${data.open_positions_count} / ${data.max_open_positions}`} />
             <Stat
-              label="Exposición"
+              label={t('risk.dailyLoss')}
+              value={fmtPct(data.daily_loss_pct, 2)}
+              sub={t('risk.limit', { value: fmtPct(data.max_daily_loss_pct, 1) })}
+            />
+            <Stat
+              label={t('risk.drawdown')}
+              value={fmtPct(data.current_drawdown_pct, 2)}
+              sub={t('risk.limit', { value: fmtPct(data.max_drawdown_pct, 1) })}
+            />
+            <Stat label={t('bot.positions')} value={`${data.open_positions_count} / ${data.max_open_positions}`} />
+            <Stat
+              label={t('risk.exposure')}
               value={fmtUsd(data.gross_exposure_usd)}
-              sub={`Límite ${fmtPct(data.max_portfolio_exposure_pct, 0)} del capital`}
+              sub={t('risk.exposureLimit', { value: fmtPct(data.max_portfolio_exposure_pct, 0) })}
             />
           </div>
         )}
@@ -474,35 +494,35 @@ function Risk() {
 
       {concentration.data && (
         <Card
-          title="Concentración y correlación"
-          subtitle="Cuánto pesa cada activo y cuánto se mueven juntos. Solo informativo."
+          title={t('concentration.title')}
+          subtitle={t('concentration.subtitle')}
           actions={
             <button type="button" className="btn btn-sm" onClick={() => void concentration.refresh()}>
-              Actualizar
+              {t('common.refresh')}
             </button>
           }
         >
           <div className="stack">
             <div className="stats">
-              <Stat label="Capital" value={fmtUsd(concentration.data.equity_usd)} />
+              <Stat label={t('concentration.equity')} value={fmtUsd(concentration.data.equity_usd)} />
               <Stat
-                label="Exposición"
+                label={t('risk.exposure')}
                 value={fmtUsd(concentration.data.gross_exposure_usd)}
                 sub={concentration.data.gross_exposure_pct == null ? undefined : fmtPct(concentration.data.gross_exposure_pct)}
               />
-              <Stat label="Límite por activo" value={fmtPct(concentration.data.max_position_size_pct, 0)} />
+              <Stat label={t('concentration.perAsset')} value={fmtPct(concentration.data.max_position_size_pct, 0)} />
             </div>
             {concentration.data.positions.length === 0 ? (
-              <p className="muted small">Sin posiciones abiertas.</p>
+              <p className="muted small">{t('ops.positions.empty')}</p>
             ) : (
               <div className="table-wrap">
                 <table className="table">
                   <thead>
                     <tr>
-                      <th>Activo</th>
-                      <th>Exposición</th>
-                      <th>% del capital</th>
-                      <th>Límite</th>
+                      <th>{t('concentration.col.asset')}</th>
+                      <th>{t('risk.exposure')}</th>
+                      <th>{t('concentration.col.share')}</th>
+                      <th>{t('concentration.col.limit')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -542,6 +562,7 @@ function Risk() {
 /* --------------------------------------------------------------- Market */
 
 function Market({ symbol, timeframe }: { symbol: string; timeframe: string }) {
+  const { t } = useI18n();
   const regime = usePolling<MarketRegimeData>(`regime|${symbol}|${timeframe}`, () =>
     apiGet<MarketRegimeData>(`/api/v1/market/${encodeURIComponent(symbol)}/regime?timeframe=${timeframe}&limit=200`),
   );
@@ -564,53 +585,67 @@ function Market({ symbol, timeframe }: { symbol: string; timeframe: string }) {
     ),
   );
   const r = regime.data;
+  const regimeText = (trend: string | null | undefined, volatility: string | null | undefined) =>
+    `${regimeLabel(t, 'trend', trend)} / ${regimeLabel(t, 'volatility', volatility)}`;
 
   return (
     <div className="stack-lg">
-      <Card title={`Régimen de ${symbol} · ${timeframe}`} subtitle="Clasificación de las velas cerradas. Describe el mercado; no es una señal.">
+      <Card title={t('market.regime.title', { symbol, timeframe })} subtitle={t('market.regime.subtitle')}>
         {!r ? (
           <Skeleton height={80} />
         ) : r.status === 'insufficient_data' ? (
-          <Notice tone="warn">Datos insuficientes: {r.reasons.join(' ')}</Notice>
+          <Notice tone="warn">{t('market.regime.insufficient', { detail: r.reasons.join(' ') })}</Notice>
         ) : (
           <div className="stack">
+            <div className="row">
+              {r.trend && <Pill tone="solid">{t(`regime.trend.${r.trend}`)}</Pill>}
+              {r.volatility && <Pill>{t(`regime.volatility.${r.volatility}`)}</Pill>}
+            </div>
             <div className="stats">
-              <Stat label="Separación EMA20/50" value={fmtPct(r.metrics.ema_separation_pct, 2)} />
-              <Stat label="Pendiente EMA20" value={fmtPct(r.metrics.ema_slope_pct, 2)} />
-              <Stat label="Volatilidad (ATR)" value={fmtPct(r.metrics.atr_pct, 2)} sub={`Percentil ${fmtInt(r.metrics.atr_percentile)}`} />
-              <Stat label="Fuerza de tendencia" value={`${fmtInt(r.metrics.trend_strength)} / 100`} />
+              <Stat label={t('market.regime.emaGap')} value={fmtPct(r.metrics.ema_separation_pct, 2)} />
+              <Stat label={t('market.regime.emaSlope')} value={fmtPct(r.metrics.ema_slope_pct, 2)} />
+              <Stat
+                label={t('market.regime.atr')}
+                value={fmtPct(r.metrics.atr_pct, 2)}
+                sub={t('market.regime.percentile', { value: fmtInt(r.metrics.atr_percentile) })}
+              />
+              <Stat label={t('market.regime.strength')} value={`${fmtInt(r.metrics.trend_strength)} / 100`} />
             </div>
             <p className="muted small">{r.reasons.join(' · ')}</p>
           </div>
         )}
       </Card>
 
-      <Card
-        title="Escaneo de oportunidades"
-        subtitle="Compara varios mercados sin operar ni gastar IA. El sistema se abstiene hasta que haya evidencia suficiente."
-      >
+      <Card title={t('market.scan.title')} subtitle={t('market.scan.subtitle')}>
         {!scan.data?.scan ? (
-          <Empty>Todavía no hay escaneos guardados.</Empty>
+          <Empty>{t('market.scan.empty')}</Empty>
         ) : (
           <div className="stack">
             <div className="stats">
               <Stat
-                label="Decisión"
-                value={scan.data.assessment?.decision === 'eligible_for_manual_review' ? 'Revisar' : 'Abstenerse'}
+                label={t('market.scan.decision')}
+                value={
+                  scan.data.assessment?.decision === 'eligible_for_manual_review'
+                    ? t('market.scan.review')
+                    : t('market.scan.abstain')
+                }
               />
-              <Stat label="Candidato" value={scan.data.assessment?.selected_symbol || 'Ninguno'} />
-              <Stat label="Evaluaciones maduras" value={fmtInt(scan.data.assessment?.evidence?.matured_evaluations ?? 0)} />
+              <Stat label={t('market.scan.candidate')} value={scan.data.assessment?.selected_symbol || t('common.none')} />
+              <Stat
+                label={t('market.scan.matured')}
+                value={fmtInt(scan.data.assessment?.evidence?.matured_evaluations ?? 0)}
+              />
             </div>
             <div className="table-wrap">
               <table className="table">
                 <thead>
                   <tr>
                     <th>#</th>
-                    <th>Mercado</th>
-                    <th>Movimiento neto</th>
-                    <th>Spread</th>
-                    <th>Régimen</th>
-                    <th>Elegible</th>
+                    <th>{t('ops.col.market')}</th>
+                    <th>{t('market.scan.col.move')}</th>
+                    <th>{t('market.scan.col.spread')}</th>
+                    <th>{t('market.scan.col.regime')}</th>
+                    <th>{t('market.scan.col.eligible')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -626,24 +661,23 @@ function Market({ symbol, timeframe }: { symbol: string; timeframe: string }) {
                         <td>{fmtPct(candidate.quoted_spread_pct, 3)}</td>
                         <td className="muted">
                           {candidate.regime_status === 'classified'
-                            ? `${candidate.trend_regime ?? '—'} / ${candidate.volatility_regime ?? '—'}`
-                            : 'Sin clasificar'}
+                            ? regimeText(candidate.trend_regime, candidate.volatility_regime)
+                            : t('market.scan.unclassified')}
                         </td>
-                        <td>{assessed ? (assessed.eligible ? 'Sí' : 'No') : '—'}</td>
+                        <td>{assessed ? (assessed.eligible ? t('common.yes') : t('common.no')) : '—'}</td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
             </div>
-            <p className="muted xsmall">{scan.data.assessment?.selection_reason}</p>
           </div>
         )}
       </Card>
 
-      <Card title="Notas de investigación" subtitle={`Contexto guardado para ${symbol}. No altera señales ni riesgo.`}>
+      <Card title={t('market.notes.title')} subtitle={t('market.notes.subtitle', { symbol })}>
         {!research.data || research.data.notes.length === 0 ? (
-          <Empty>Sin notas vigentes para este mercado.</Empty>
+          <Empty>{t('market.notes.empty')}</Empty>
         ) : (
           <div className="stack">
             {research.data.notes.map((note) => (
@@ -667,6 +701,7 @@ function Market({ symbol, timeframe }: { symbol: string; timeframe: string }) {
 /* ------------------------------------------------------------- AI usage */
 
 function AiUsage() {
+  const { t } = useI18n();
   const status = usePolling<LLMStatusData>('llm-status', () => apiGet<LLMStatusData>('/api/v1/agents/llm/status'), 15000);
   const usage = status.data?.usage;
   if (!status.data) return status.error ? <Notice tone="error">{status.error}</Notice> : <Skeleton height={120} />;
@@ -678,55 +713,63 @@ function AiUsage() {
 
   const ofBudget = (used: unknown, budget: unknown) => {
     const b = toNumber(budget) ?? 0;
-    return b > 0 ? `${fmtInt(used)} / ${fmtInt(b)}` : `${fmtInt(used)} · sin tope`;
+    return b > 0 ? `${fmtInt(used)} / ${fmtInt(b)}` : t('usage.noCap', { used: fmtInt(used) });
   };
 
   return (
     <div className="stack-lg">
       <Card
-        title="Consumo de IA hoy"
+        title={t('usage.title')}
         icon="cpu"
         subtitle={
           status.data.mode === 'llm_with_fallback'
-            ? `Principal: ${status.data.primary_provider ?? '—'} · respaldo: ${(status.data.fallback_providers ?? []).join(', ') || 'ninguno'}`
-            : 'Sin proveedores configurados: el comité usa el análisis determinista.'
+            ? t('usage.chain', {
+                primary: status.data.primary_provider ?? '—',
+                fallback: (status.data.fallback_providers ?? []).join(', ') || t('common.none'),
+              })
+            : t('usage.deterministic')
         }
-        actions={<Pill tone={exhausted ? 'neg' : 'default'}>{exhausted ? 'Presupuesto agotado' : 'Presupuesto disponible'}</Pill>}
+        actions={<Pill tone={exhausted ? 'neg' : 'default'}>{exhausted ? t('usage.exhausted') : t('usage.available')}</Pill>}
       >
         <div className="stats">
-          <Stat label="Tokens hoy" value={ofBudget(usage?.tokens_used, usage?.daily_token_budget)} />
-          <Stat label="Peticiones hoy" value={ofBudget(usage?.request_attempts, usage?.daily_request_budget)} />
-          <Stat label="Tokens del ciclo" value={ofBudget(usage?.cycle_tokens_used, usage?.cycle_token_budget)} />
-          <Stat label="Peticiones del ciclo" value={ofBudget(usage?.cycle_requests_used, usage?.cycle_request_budget)} />
-          <Stat label="Respaldos usados" value={fmtInt(usage?.fallbacks ?? 0)} />
+          <Stat label={t('usage.tokensToday')} value={ofBudget(usage?.tokens_used, usage?.daily_token_budget)} />
+          <Stat label={t('usage.requestsToday')} value={ofBudget(usage?.request_attempts, usage?.daily_request_budget)} />
+          <Stat label={t('usage.tokensCycle')} value={ofBudget(usage?.cycle_tokens_used, usage?.cycle_token_budget)} />
           <Stat
-            label="Coste estimado"
+            label={t('usage.requestsCycle')}
+            value={ofBudget(usage?.cycle_requests_used, usage?.cycle_request_budget)}
+          />
+          <Stat label={t('usage.fallbacks')} value={fmtInt(usage?.fallbacks ?? 0)} />
+          <Stat
+            label={t('usage.cost')}
             value={usage?.pricing?.configured ? fmtUsd(usage.estimated_cost_usd, 4) : '—'}
-            sub={usage?.pricing?.configured ? undefined : 'Tarifas sin configurar'}
+            sub={usage?.pricing?.configured ? undefined : t('usage.noRates')}
           />
         </div>
       </Card>
 
       {(usage?.provider_cooldowns?.length ?? 0) > 0 && (
         <Notice tone="warn">
-          En espera tras un fallo:{' '}
-          {usage?.provider_cooldowns
-            ?.map((item) => `${item.provider} (${item.reason}, ${Math.ceil(item.seconds_remaining / 60)} min)`)
-            .join(', ')}
+          {t('usage.cooldowns', {
+            list:
+              usage?.provider_cooldowns
+                ?.map((item) => `${item.provider} (${item.reason}, ${Math.ceil(item.seconds_remaining / 60)} min)`)
+                .join(', ') ?? '',
+          })}
         </Notice>
       )}
 
       {Object.keys(usage?.by_provider ?? {}).length > 0 && (
-        <Card title="Por proveedor">
+        <Card title={t('usage.byProvider')}>
           <div className="table-wrap">
             <table className="table">
               <thead>
                 <tr>
-                  <th>Proveedor</th>
-                  <th>Llamadas</th>
-                  <th>Fallos</th>
-                  <th>Tokens</th>
-                  <th>Coste</th>
+                  <th>{t('usage.col.provider')}</th>
+                  <th>{t('usage.col.calls')}</th>
+                  <th>{t('usage.col.failures')}</th>
+                  <th>{t('usage.col.tokens')}</th>
+                  <th>{t('usage.col.cost')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -750,26 +793,28 @@ function AiUsage() {
 
 /* --------------------------------------------------------------- System */
 
-const SERVICE_LABEL: Record<string, string> = {
-  database: 'Base de datos',
-  redis: 'Caché',
-  market_data: 'Datos de mercado',
-  trading_engine: 'Motor de órdenes',
+const SERVICE_LABEL: Record<string, MessageKey> = {
+  database: 'system.database',
+  redis: 'system.cache',
+  market_data: 'system.marketData',
+  trading_engine: 'system.engine',
 };
 
 function SystemStatus() {
+  const { t } = useI18n();
   const status = usePolling<Record<string, string>>('system', () => apiGet<Record<string, string>>('/api/v1/status'), 15000);
   if (!status.data) return status.error ? <Notice tone="error">{status.error}</Notice> : <Skeleton height={80} />;
   return (
-    <Card title="Componentes" subtitle="Estado de los servicios internos.">
+    <Card title={t('system.title')} subtitle={t('system.subtitle')}>
       <div className="stats">
         {Object.entries(status.data).map(([service, state]) => {
           const ok = state === 'healthy' || state === 'ok' || state === 'connected';
+          const labelKey = SERVICE_LABEL[service];
           return (
             <Stat
               key={service}
-              label={SERVICE_LABEL[service] ?? service}
-              value={ok ? 'En línea' : String(state)}
+              label={labelKey ? t(labelKey) : service}
+              value={ok ? t('system.online') : String(state)}
               tone={ok ? '' : 'neg'}
             />
           );

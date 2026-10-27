@@ -9,7 +9,7 @@ import contextlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -134,6 +134,10 @@ class AutonomousLogEntry(BaseModel):
     cycle: int
     symbol: str
     message: str
+    # Stable message id + values, so the UI can render the entry in the
+    # viewer's language. ``message`` stays as the fallback text.
+    key: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
     signal: str | None = None
     confidence_pct: float | None = None
     price: float | None = None
@@ -297,6 +301,8 @@ class AutonomousEngine:
         except Exception as exc:
             logger.warning("autonomous_prescan_failed", error=str(exc))
             self.add_log(
+                key="scan.failed",
+                params={"detail": str(exc)},
                 level="WARNING",
                 message=f"No se pudo completar el escaneo multimercado: {exc}",
             )
@@ -305,6 +311,8 @@ class AutonomousEngine:
         observed = [candidate for candidate in result.candidates if candidate.rank is not None]
         if not observed:
             self.add_log(
+                key="scan.no_data",
+                params={"count": len(result.candidates)},
                 level="WARNING",
                 message=(
                     f"Escaneo de {len(result.candidates)} mercados sin datos "
@@ -321,6 +329,12 @@ class AutonomousEngine:
             if candidate.lookback_return_pct is not None
         )
         self.add_log(
+            key="scan.summary",
+            params={
+                "count": len(result.candidates),
+                "timeframe": result.timeframe,
+                "summary": summary,
+            },
             level="INFO",
             message=(
                 f"🔎 Escaneo {len(result.candidates)} mercados ({result.timeframe}): {summary}."
@@ -459,12 +473,16 @@ class AutonomousEngine:
         price: float | None = None,
         order_id: str | None = None,
         symbol: str | None = None,
+        key: str | None = None,
+        params: dict[str, Any] | None = None,
     ) -> None:
         entry = AutonomousLogEntry(
             cycle=self.total_cycles,
             symbol=symbol or self.last_symbol or self.config.symbol,
             level=level,
             message=message,
+            key=key,
+            params=params or {},
             signal=signal,
             confidence_pct=confidence_pct,
             price=price,
@@ -539,10 +557,21 @@ class AutonomousEngine:
         self.last_symbol = None
         self._last_analysis_at = None
         self.add_log(
+            key="bot.started",
+            params={
+                "symbol": self.config.symbol,
+                "timeframe": self.config.timeframe,
+                "seconds": self.config.interval_seconds,
+            },
             level="INFO",
             message=f"🚀 Autonomous Trading Daemon started for {self.config.symbol} ({self.config.timeframe}) every {self.config.interval_seconds}s.",
         )
         self.add_log(
+            key="bot.scan_universe",
+            params={
+                "count": len(self.config.scan_symbols),
+                "symbols": ", ".join(self.config.scan_symbols),
+            },
             level="INFO",
             message=(
                 f"🔎 Multi-market scan universe ({len(self.config.scan_symbols)}): "
@@ -553,6 +582,11 @@ class AutonomousEngine:
         if mode == ExecutionMode.REAL:
             allowed = sorted(self._allowed_symbols())
             self.add_log(
+                key="bot.allowlist",
+                params={
+                    "allowed": ", ".join(allowed),
+                    "analyzable": ", ".join(s for s in self.config.scan_symbols if s in allowed),
+                },
                 level="INFO",
                 message=(
                     f"Allowlist REAL activa: {', '.join(allowed) or 'ninguna'}. "
@@ -562,6 +596,8 @@ class AutonomousEngine:
             )
         if self.config.llm_analysis_interval_seconds > 0:
             self.add_log(
+                key="bot.llm_throttle",
+                params={"seconds": self.config.llm_analysis_interval_seconds},
                 level="INFO",
                 message=(
                     "LLM committee analysis throttled to every "
@@ -571,6 +607,8 @@ class AutonomousEngine:
             )
 
         self.add_log(
+            key="bot.mode",
+            params={"mode": mode.value},
             level="INFO",
             message=f"Execution mode: {mode.value.upper()}",
         )
@@ -597,7 +635,12 @@ class AutonomousEngine:
                 await self._task
             self._task = None
 
-        self.add_log(level="WARNING", message="🛑 Autonomous Trading Daemon stopped.")
+        self.add_log(
+            key="bot.stopped",
+            params={},
+            level="WARNING",
+            message="🛑 Autonomous Trading Daemon stopped.",
+        )
         return self.get_status()
 
     async def _persist_execution(
@@ -682,6 +725,8 @@ class AutonomousEngine:
         )
 
         self.add_log(
+            key="bot.emergency",
+            params={"closed": closed_count},
             level="ERROR",
             message=f"🚨 EMERGENCY KILL-SWITCH ACTIVATED: Daemon halted and {closed_count} open positions closed.",
         )
@@ -699,7 +744,12 @@ class AutonomousEngine:
             except Exception as e:
                 self.last_error = str(e)
                 logger.error("autonomous_cycle_error", error=str(e), exc_info=True)
-                self.add_log(level="ERROR", message=f"Cycle evaluation error: {e!s}")
+                self.add_log(
+                    key="cycle.error",
+                    params={"detail": str(e)},
+                    level="ERROR",
+                    message=f"Cycle evaluation error: {e!s}",
+                )
 
             try:
                 await asyncio.sleep(self.config.interval_seconds)
@@ -732,7 +782,12 @@ class AutonomousEngine:
         universe = self.config.scan_symbols or [primary_symbol]
 
         if not market_service:
-            self.add_log(level="ERROR", message="MarketDataService not bound to AutonomousEngine")
+            self.add_log(
+                key="internal.unbound",
+                params={"service": "MarketDataService"},
+                level="ERROR",
+                message="MarketDataService not bound to AutonomousEngine",
+            )
             return
 
         allowed = self._allowed_symbols()
@@ -758,6 +813,8 @@ class AutonomousEngine:
             price = await self._latest_price(symbol, market_service)
             if price is None:
                 self.add_log(
+                    key="market.no_candles",
+                    params={"symbol": symbol},
                     level="WARNING",
                     message=f"No candles returned for {symbol}",
                     symbol=symbol,
@@ -771,6 +828,8 @@ class AutonomousEngine:
             self.last_symbol = first_symbol
         else:
             self.add_log(
+                key="market.no_prices",
+                params={},
                 level="WARNING",
                 message=(
                     "No se pudo obtener precio de ningún mercado seleccionado; "
@@ -859,6 +918,8 @@ class AutonomousEngine:
                             {"symbol": pos.symbol, "reason": reason},
                         )
                 self.add_log(
+                    key="position.auto_exit",
+                    params={"detail": reason},
                     level="WARNING",
                     message=f"🛡️ Auto-Exit: {reason}",
                     price=pos_price,
@@ -878,6 +939,8 @@ class AutonomousEngine:
         excluded = [symbol for symbol in selected if symbol not in allowed]
         for symbol in excluded:
             self.add_log(
+                key="entry.not_allowlisted",
+                params={"symbol": symbol},
                 level="WARNING",
                 message=(
                     f"{symbol} no está en la allowlist de ejecución; se omite el "
@@ -894,7 +957,12 @@ class AutonomousEngine:
 
         # 5. Multi-Agent Committee Consensus Evaluation
         if not agent_service:
-            self.add_log(level="WARNING", message="AgentService not bound to AutonomousEngine")
+            self.add_log(
+                key="internal.unbound",
+                params={"service": "AgentService"},
+                level="WARNING",
+                message="AgentService not bound to AutonomousEngine",
+            )
             return
 
         # Throttle the expensive LLM committee. Exits and SL/TP tracking already
@@ -925,6 +993,8 @@ class AutonomousEngine:
         except Exception as exc:
             logger.warning("committee_batch_failed", error=str(exc))
             self.add_log(
+                key="committee.error",
+                params={"detail": str(exc)},
                 level="ERROR",
                 message=f"Error al ejecutar el comité: {exc}",
                 symbol=entry_symbols[0],
@@ -933,6 +1003,8 @@ class AutonomousEngine:
 
         if not results:
             self.add_log(
+                key="committee.empty",
+                params={},
                 level="WARNING",
                 message="El comité no devolvió decisiones para los mercados seleccionados.",
                 symbol=entry_symbols[0],
@@ -965,6 +1037,8 @@ class AutonomousEngine:
         eligible = [candidate for candidate in scan_result.ranked if candidate.symbol in allowed]
         if not eligible:
             self.add_log(
+                key="scan.none_allowlisted",
+                params={"allowed": ", ".join(sorted(allowed)), "symbol": primary_symbol},
                 level="WARNING",
                 message=(
                     f"Ningún mercado observado está en la allowlist de ejecución "
@@ -980,6 +1054,16 @@ class AutonomousEngine:
         if len(chosen) == 1:
             candidate = chosen[0]
             self.add_log(
+                key="scan.chosen",
+                params={
+                    "symbol": candidate.symbol,
+                    "score": round(float(candidate.selection_score or 0), 2),
+                    "return_pct": round(float(candidate.lookback_return_pct or 0), 2),
+                    "candles": scan_result.lookback_candles,
+                    "regime": candidate.trend_regime or "",
+                    "eligible": len(eligible),
+                    "total": len(scan_result.ranked),
+                },
                 level="INFO",
                 message=(
                     f"Candidato elegido: {candidate.symbol} "
@@ -993,6 +1077,15 @@ class AutonomousEngine:
             )
         else:
             self.add_log(
+                key="scan.batch",
+                params={
+                    "mode": preset.label,
+                    "count": len(chosen),
+                    "parallel": preset.parallel,
+                    "symbols": ", ".join(c.symbol for c in chosen),
+                    "eligible": len(eligible),
+                    "total": len(scan_result.ranked),
+                },
                 level="INFO",
                 message=(
                     f"Modo {preset.label}: {len(chosen)} mercados por análisis "
@@ -1033,6 +1126,11 @@ class AutonomousEngine:
             f"consensus {decision.consensus_level}) "
             f"@ ${current_price:,.2f}"
         )
+        verdict: dict[str, Any] = {
+            "signal": signal_str.upper(),
+            "score": round(float(confidence_pct), 1),
+            "price": float(current_price),
+        }
 
         # 6. Check if signal meets execution threshold
         is_actionable = signal_str.upper() in ("BUY", "STRONG_BUY", "SELL", "STRONG_SELL")
@@ -1044,6 +1142,8 @@ class AutonomousEngine:
                 or "El comité no aprobó la entrada."
             )
             self.add_log(
+                key="decision.risk_abstain",
+                params={**verdict, "detail": str(risk_reasons)},
                 level="WARNING",
                 message=f"{log_msg} — Operación abstendida por Risk Manager: {risk_reasons}",
                 signal=signal_str.upper(),
@@ -1055,6 +1155,8 @@ class AutonomousEngine:
 
         if not is_actionable or not meets_confidence:
             self.add_log(
+                key="decision.standby",
+                params={**verdict},
                 level="INFO",
                 message=f"{log_msg} — Standing by (No trade criteria met).",
                 signal=signal_str.upper(),
@@ -1066,6 +1168,8 @@ class AutonomousEngine:
 
         if not self.config.auto_execute:
             self.add_log(
+                key="decision.auto_off",
+                params={**verdict},
                 level="INFO",
                 message=f"{log_msg} — Actionable signal detected, but Auto-Execute is disabled.",
                 signal=signal_str.upper(),
@@ -1086,6 +1190,8 @@ class AutonomousEngine:
 
             if len(open_positions) >= self.config.max_open_positions:
                 self.add_log(
+                    key="decision.max_positions",
+                    params={**verdict, "max": self.config.max_open_positions},
                     level="WARNING",
                     message=f"{log_msg} — Max open positions limit ({self.config.max_open_positions}) reached. Order skipped.",
                     signal=signal_str.upper(),
@@ -1104,6 +1210,8 @@ class AutonomousEngine:
             if order_side == OrderSide.SELL:
                 if symbol_position is None:
                     self.add_log(
+                        key="decision.no_position_to_sell",
+                        params={**verdict},
                         level="INFO",
                         message=(
                             f"{log_msg} — No hay posición del bot para cerrar; "
@@ -1137,6 +1245,12 @@ class AutonomousEngine:
                     await self._persist_execution(closed_order, mode)
                     self.trades_executed += 1
                     self.add_log(
+                        key="position.signal_exit",
+                        params={
+                            "symbol": symbol,
+                            "price": float(current_price),
+                            "signal": signal_str.upper(),
+                        },
                         level="SUCCESS",
                         message=(
                             f"Salida por señal IA: {symbol} cerrada a "
@@ -1159,6 +1273,8 @@ class AutonomousEngine:
 
             if symbol_position is not None:
                 self.add_log(
+                    key="decision.already_open",
+                    params={**verdict, "symbol": symbol},
                     level="INFO",
                     message=f"{log_msg} — Ya existe una posición del bot en {symbol}; se omite otra compra.",
                     signal=signal_str.upper(),
@@ -1179,6 +1295,8 @@ class AutonomousEngine:
             )
             if correlation_decision.blocks:
                 self.add_log(
+                    key="decision.correlation_block",
+                    params={**verdict, "detail": correlation_decision.reason},
                     level="WARNING",
                     message=f"{log_msg} — Entrada bloqueada por correlación: {correlation_decision.reason}",
                     signal=signal_str.upper(),
@@ -1189,6 +1307,8 @@ class AutonomousEngine:
                 return
             if correlation_decision.action == "reduce":
                 self.add_log(
+                    key="decision.correlation_reduce",
+                    params={**verdict, "detail": correlation_decision.reason},
                     level="INFO",
                     message=f"{log_msg} — {correlation_decision.reason}",
                     signal=signal_str.upper(),
@@ -1245,6 +1365,8 @@ class AutonomousEngine:
             quantity = round(sizing.recommended_units, 6)
             if not sizing.is_valid_setup or quantity <= 0:
                 self.add_log(
+                    key="decision.sizing_skip",
+                    params={**verdict, "detail": str(sizing.notes)},
                     level="WARNING",
                     message=(f"{log_msg} — Entrada omitida por sizing/riesgo: {sizing.notes}"),
                     signal=signal_str.upper(),
@@ -1264,6 +1386,14 @@ class AutonomousEngine:
                 if current_price > 0 and quantity * current_price > max_notional:
                     capped_quantity = round(max_notional / current_price, 6)
                     self.add_log(
+                        key="decision.notional_capped",
+                        params={
+                            **verdict,
+                            "from": float(quantity),
+                            "to": float(capped_quantity),
+                            "symbol": symbol,
+                            "max": float(max_notional),
+                        },
                         level="WARNING",
                         message=(
                             f"{log_msg} — Cantidad ajustada de {quantity} a {capped_quantity} "
@@ -1278,6 +1408,8 @@ class AutonomousEngine:
                     quantity = capped_quantity
                 if quantity <= 0:
                     self.add_log(
+                        key="decision.notional_zero",
+                        params={**verdict, "max": float(max_notional)},
                         level="WARNING",
                         message=(
                             f"{log_msg} — Entrada omitida: REAL_TRADING_MAX_NOTIONAL "
@@ -1298,6 +1430,8 @@ class AutonomousEngine:
             if mode == ExecutionMode.REAL and order_side == OrderSide.BUY:
                 if self.live_trading_service is None:
                     self.add_log(
+                        key="decision.no_live_service",
+                        params={**verdict},
                         level="ERROR",
                         message=f"{log_msg} — Entrada omitida: falta el servicio de trading real.",
                         signal=signal_str.upper(),
@@ -1309,6 +1443,8 @@ class AutonomousEngine:
                 reconciled, gate_error = await self.live_trading_service.preflight_reconciliation()
                 if not reconciled:
                     self.add_log(
+                        key="decision.reconcile_failed",
+                        params={**verdict, "detail": gate_error or ""},
                         level="ERROR",
                         message=(
                             f"{log_msg} — Entrada suspendida: falló la conciliación con el "
@@ -1363,6 +1499,15 @@ class AutonomousEngine:
 
             self.trades_executed += 1
             self.add_log(
+                key="order.executed",
+                params={
+                    "side": order_side.value,
+                    "quantity": float(quantity),
+                    "symbol": symbol,
+                    "price": float(current_price),
+                    "sl": float(stop_loss),
+                    "tp": float(take_profit),
+                },
                 level="SUCCESS",
                 message=f"⚡ AUTO-ORDER EXECUTED: {order_side.value} {quantity} {symbol} @ ${current_price:,.2f} | SL: ${stop_loss:,.2f} | TP: ${take_profit:,.2f}",
                 signal=signal_str.upper(),
@@ -1380,6 +1525,8 @@ class AutonomousEngine:
 
         except RiskViolationError as e:
             self.add_log(
+                key="order.risk_blocked",
+                params={"detail": str(e)},
                 level="WARNING",
                 message=f"🛡️ Order blocked by Risk Guard: {e!s}",
                 signal=signal_str.upper(),
@@ -1389,6 +1536,8 @@ class AutonomousEngine:
             )
         except Exception as e:
             self.add_log(
+                key="order.error",
+                params={"detail": str(e)},
                 level="ERROR",
                 message=f"Order execution error: {e!s}",
                 signal=signal_str.upper(),

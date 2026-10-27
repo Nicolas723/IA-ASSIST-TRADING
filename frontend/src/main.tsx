@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import './index.css';
 import './apiKey';
 import App from './App.tsx';
+import { detectLang, translator } from './i18n/core';
+import { I18nProvider } from './i18n/provider';
 
 interface ErrorBoundaryState {
   error: Error | null;
@@ -21,23 +23,22 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
 
   render() {
     if (!this.state.error) return this.props.children;
+    // Rendered outside the provider on purpose: it must work even if i18n broke.
+    const t = translator(detectLang());
     return (
       <main className="main" style={{ maxWidth: 720 }}>
         <div className="card stack">
-          <h1 style={{ fontSize: 22 }}>Algo ha fallado en la interfaz</h1>
-          <p className="muted">
-            El asistente sigue funcionando en el servidor: esto solo afecta a la pantalla. Recarga la página; si se
-            repite, comparte el detalle de abajo.
-          </p>
+          <h1 style={{ fontSize: 22 }}>{t('crash.title')}</h1>
+          <p className="muted">{t('crash.body')}</p>
           <pre className="mono xsmall" style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
             {this.state.error.toString()}
           </pre>
           <div className="row">
             <button type="button" className="btn btn-primary" onClick={() => window.location.reload()}>
-              Recargar
+              {t('crash.reload')}
             </button>
             <button type="button" className="btn" onClick={() => this.setState({ error: null })}>
-              Intentar de nuevo
+              {t('crash.retry')}
             </button>
           </div>
         </div>
@@ -49,7 +50,9 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ErrorBoundary>
-      <App />
+      <I18nProvider>
+        <App />
+      </I18nProvider>
     </ErrorBoundary>
   </StrictMode>,
 );

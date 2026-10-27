@@ -180,3 +180,26 @@ jobs:
 
       - name: Type-check & build
         run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # Production image (API + web UI) builds and the deployment config is valid
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Production image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t ai-trading-assistant:ci .
+
+      - name: Validate production compose
+        working-directory: infra/docker
+        env:
+          DOMAIN: ci.example
+          BASIC_AUTH_USER: ci
+          BASIC_AUTH_HASH: ci
+          POSTGRES_PASSWORD: ci
+        run: |
+          touch ../../backend/.env
+          docker compose -f docker-compose.prod.yml config --quiet

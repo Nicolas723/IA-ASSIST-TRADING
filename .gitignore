@@ -93,3 +93,6 @@ backend/backups/
 
 # Claude Code local settings (personal permissions)
 .claude/settings.local.json
+
+# Production secrets for docker-compose.prod.yml
+infra/docker/.env.prod

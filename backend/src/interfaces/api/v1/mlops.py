@@ -149,6 +149,41 @@ async def get_drift(
 
 
 @router.get(
+    "/outcomes",
+    response_model=list[DecisionOutcome],
+    summary="Executed bot trades with entry, exit and P&L, newest first",
+)
+async def list_outcomes(
+    decision_repository: Annotated[SqlDecisionRepository, Depends(get_decision_repository)],
+    trading_repository: Annotated[SqlTradingRepository, Depends(get_trading_repository)],
+    symbol: str | None = Query(default=None),
+    mode: ExecutionMode | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[DecisionOutcome]:
+    """Trades the bot actually executed, paired entry/exit per decision.
+
+    Decisions that never produced an order are left out: this is the trade
+    history, not the decision log.
+    """
+    try:
+        decisions = await decision_repository.list_decisions(symbol=symbol, limit=500)
+        orders = await trading_repository.list_orders_for_attribution(
+            mode=mode, symbol=symbol, limit=5000
+        )
+    except Exception as exc:  # pragma: no cover - defensive DB fallback
+        logger.warning("mlops_outcomes_unavailable", error=str(exc))
+        raise HTTPException(status_code=503, detail="Trade history unavailable") from exc
+
+    executed = [
+        outcome
+        for outcome in LearningService().build_outcomes(decisions, orders)
+        if outcome.order_count > 0 and (mode is None or outcome.mode == mode)
+    ]
+    executed.sort(key=lambda o: o.opened_at or o.decision_created_at, reverse=True)
+    return executed[:limit]
+
+
+@router.get(
     "/decisions/{decision_id}/outcome",
     response_model=DecisionOutcome,
     summary="Outcome attributable to one AI decision",

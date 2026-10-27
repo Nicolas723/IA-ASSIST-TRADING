@@ -1,5 +1,6 @@
 import { useMemo, useState, type PointerEvent } from 'react';
-import { fmtNumber, fmtPrice, fmtSigned, toneClass } from '../lib/format';
+import { useI18n } from '../i18n/core';
+import { fmtNumber, fmtPrice, fmtSigned, formatLocale, toneClass } from '../lib/format';
 import type { CandleItem } from '../types';
 
 export type { CandleItem };
@@ -20,6 +21,7 @@ const VISIBLE = 48;
  * filled, so direction reads without relying on colour.
  */
 export function MarketChart({ candles, livePrice, mode = 'candles' }: MarketChartProps) {
+  const { t } = useI18n();
   const [hover, setHover] = useState<number | null>(null);
 
   const data = useMemo(() => {
@@ -37,7 +39,7 @@ export function MarketChart({ candles, livePrice, mode = 'candles' }: MarketChar
   }, [candles, livePrice]);
 
   if (data.length === 0) {
-    return <div className="empty">Sin datos de mercado todavía. Se cargarán en cuanto el exchange responda.</div>;
+    return <div className="empty">{t('chart.empty')}</div>;
   }
 
   const plotW = WIDTH - PAD.left - PAD.right;
@@ -71,7 +73,7 @@ export function MarketChart({ candles, livePrice, mode = 'candles' }: MarketChar
         className="chart-svg"
         viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
         role="img"
-        aria-label={`Gráfico de precio, último ${fmtPrice(data[data.length - 1].close)}`}
+        aria-label={t('chart.aria', { price: fmtPrice(data[data.length - 1].close) })}
         onPointerMove={onPointer}
         onPointerLeave={() => setHover(null)}
       >
@@ -179,7 +181,7 @@ export function MarketChart({ candles, livePrice, mode = 'candles' }: MarketChar
               fontSize="11"
               textAnchor="middle"
             >
-              {new Date(c.timestamp).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}
+              {new Date(c.timestamp).toLocaleTimeString(formatLocale(), { hour: '2-digit', minute: '2-digit' })}
             </text>
           ) : null,
         )}
@@ -187,19 +189,19 @@ export function MarketChart({ candles, livePrice, mode = 'candles' }: MarketChar
 
       <div className="chart-meta" aria-live="polite">
         <span>
-          {hover === null ? 'Vela actual' : new Date(active.timestamp).toLocaleString('es-ES')}
+          {hover === null ? t('chart.current') : new Date(active.timestamp).toLocaleString(formatLocale())}
         </span>
         <span>
-          Apertura <strong>{fmtPrice(active.open)}</strong>
+          {t('chart.open')} <strong>{fmtPrice(active.open)}</strong>
         </span>
         <span>
-          Máx <strong>{fmtPrice(active.high)}</strong>
+          {t('chart.high')} <strong>{fmtPrice(active.high)}</strong>
         </span>
         <span>
-          Mín <strong>{fmtPrice(active.low)}</strong>
+          {t('chart.low')} <strong>{fmtPrice(active.low)}</strong>
         </span>
         <span>
-          Cierre <strong>{fmtPrice(active.close)}</strong>
+          {t('chart.close')} <strong>{fmtPrice(active.close)}</strong>
         </span>
         <span className={toneClass(change)}>{fmtSigned(change, 2, ' %')}</span>
       </div>

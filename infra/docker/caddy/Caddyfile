@@ -1,0 +1,26 @@
+# HTTPS reverse proxy for the trading assistant.
+# Caddy obtains and renews the Let's Encrypt certificate for {$DOMAIN} by
+# itself; ports 80 and 443 must be open on the server.
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Everything (UI, API, WebSocket) requires the login. The browser asks once
+	# and then sends it automatically, including on the live-price WebSocket.
+	basic_auth {
+		{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	reverse_proxy app:8000
+}

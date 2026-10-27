@@ -2,6 +2,7 @@ import { useState } from 'react';
 import toast from 'react-hot-toast';
 import type { IntegrationsData, ProviderId } from '../hooks/useIntegrations';
 import type { PollingState } from '../hooks/usePolling';
+import { useI18n } from '../i18n/core';
 import { apiSend, errorMessage } from '../lib/api';
 import { Card, Disclosure, Notice, Pill, Skeleton } from './ui';
 
@@ -28,24 +29,28 @@ function draftsFrom(data: IntegrationsData): Record<string, ProviderDraft> {
   );
 }
 
+function LoadingOrError({ integrations, height }: { integrations: PollingState<IntegrationsData>; height: number }) {
+  const { t } = useI18n();
+  return integrations.error ? (
+    <Notice tone="error">{t('common.loadFailed', { detail: integrations.error })}</Notice>
+  ) : (
+    <Card>
+      <Skeleton height={height} />
+    </Card>
+  );
+}
+
 /* ----------------------------------------------------------------- LLM */
 
 export function LlmSettings({ integrations }: { integrations: PollingState<IntegrationsData> }) {
   const data = integrations.data;
-  if (!data) {
-    return integrations.error ? (
-      <Notice tone="error">No se pudo cargar la configuración: {integrations.error}</Notice>
-    ) : (
-      <Card>
-        <Skeleton height={180} />
-      </Card>
-    );
-  }
+  if (!data) return <LoadingOrError integrations={integrations} height={180} />;
   // Remount the form whenever a save returns fresh data, so drafts reset.
   return <LlmForm key={JSON.stringify(data.llm)} data={data} onSaved={integrations.setData} />;
 }
 
 function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: IntegrationsData) => void }) {
+  const { t } = useI18n();
   const [drafts, setDrafts] = useState(() => draftsFrom(data));
   const [primary, setPrimary] = useState<ProviderId>(data.llm.primary_provider);
   const [fallbacks, setFallbacks] = useState<ProviderId[]>(data.llm.fallback_providers);
@@ -77,9 +82,9 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
         fallback_enabled: fallbackEnabled,
       });
       onSaved(snapshot);
-      toast.success('Proveedores guardados. Se usan desde el próximo análisis.');
+      toast.success(t('llm.toast.saved'));
     } catch (error) {
-      toast.error(`No se pudo guardar: ${errorMessage(error)}`);
+      toast.error(t('common.saveFailed', { detail: errorMessage(error) }));
     } finally {
       setBusy(null);
     }
@@ -93,7 +98,7 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
       });
       setTests((current) => ({ ...current, ...result.providers }));
     } catch (error) {
-      toast.error(`No se pudo probar: ${errorMessage(error)}`);
+      toast.error(t('common.testFailed', { detail: errorMessage(error) }));
     } finally {
       setBusy(null);
     }
@@ -104,40 +109,40 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
   return (
     <div className="stack-lg">
       <Card
-        title="Cadena de IA"
-        subtitle="El comité prueba el proveedor principal y, si falla, los de respaldo en orden. Sin ninguno configurado usa un análisis determinista."
+        title={t('llm.chain.title')}
+        subtitle={t('llm.chain.subtitle')}
         actions={
           <Pill tone={configured.length ? 'solid' : 'default'}>
-            {configured.length ? `${configured.length} activo(s)` : 'Sin proveedores'}
+            {configured.length ? t('llm.chain.active', { count: configured.length }) : t('llm.chain.none')}
           </Pill>
         }
       >
         <div className="form-grid">
           <label className="field">
-            <span className="field-label">Proveedor principal</span>
+            <span className="field-label">{t('llm.primary')}</span>
             <select className="select" value={primary} onChange={(event) => setPrimary(event.target.value as ProviderId)}>
               {providers.map((provider) => (
                 <option key={provider.provider} value={provider.provider}>
                   {provider.label}
-                  {provider.configured ? '' : ' (sin clave)'}
+                  {provider.configured ? '' : ` (${t('llm.noKey')})`}
                 </option>
               ))}
             </select>
           </label>
           <div className="field">
-            <span className="field-label">Respaldo</span>
+            <span className="field-label">{t('llm.fallback')}</span>
             <label className="check">
               <input
                 type="checkbox"
                 checked={fallbackEnabled}
                 onChange={(event) => setFallbackEnabled(event.target.checked)}
               />
-              <span>Usar proveedores de respaldo si el principal falla</span>
+              <span>{t('llm.fallback.use')}</span>
             </label>
           </div>
         </div>
         <p className="muted xsmall" style={{ marginTop: 12 }}>
-          {data.llm.note}
+          {t('llm.note')}
         </p>
       </Card>
 
@@ -152,9 +157,11 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
               title={provider.label}
               actions={
                 <>
-                  {result !== undefined && <Pill tone={result ? 'pos' : 'neg'}>{result ? 'Conecta' : 'Falla'}</Pill>}
+                  {result !== undefined && (
+                    <Pill tone={result ? 'pos' : 'neg'}>{result ? t('llm.test.ok') : t('llm.test.fail')}</Pill>
+                  )}
                   <Pill tone={provider.configured ? 'solid' : 'default'}>
-                    {provider.configured ? 'Activo' : 'Sin clave'}
+                    {provider.configured ? t('common.active') : t('llm.noKey')}
                   </Pill>
                 </>
               }
@@ -162,13 +169,15 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
               <div className="stack">
                 {provider.requires_key ? (
                   <label className="field">
-                    <span className="field-label">Clave de API</span>
+                    <span className="field-label">{t('llm.apiKey')}</span>
                     <input
                       type="password"
                       className="input"
                       autoComplete="off"
                       disabled={draft.clear_key}
-                      placeholder={provider.masked_key ? `${provider.masked_key} · guardada` : 'Pega la clave'}
+                      placeholder={
+                        provider.masked_key ? t('common.storedSecret', { value: provider.masked_key }) : t('llm.apiKey.placeholder')
+                      }
                       value={draft.api_key}
                       onChange={(event) => updateDraft(provider.provider, { api_key: event.target.value })}
                     />
@@ -180,11 +189,11 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
                       checked={draft.enabled}
                       onChange={(event) => updateDraft(provider.provider, { enabled: event.target.checked })}
                     />
-                    <span>Usar Ollama local (no necesita clave)</span>
+                    <span>{t('llm.ollama')}</span>
                   </label>
                 )}
                 <label className="field">
-                  <span className="field-label">Modelo</span>
+                  <span className="field-label">{t('llm.model')}</span>
                   <input
                     className="input"
                     value={draft.model}
@@ -192,9 +201,9 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
                   />
                 </label>
                 {provider.supports_base_url && (
-                  <Disclosure summary="URL del servicio">
+                  <Disclosure summary={t('llm.baseUrl.section')}>
                     <label className="field">
-                      <span className="field-label">URL base</span>
+                      <span className="field-label">{t('llm.baseUrl')}</span>
                       <input
                         className="input"
                         value={draft.base_url}
@@ -218,7 +227,7 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
                             )
                           }
                         />
-                        <span>Respaldo</span>
+                        <span>{t('llm.fallback.short')}</span>
                       </label>
                     )}
                     {provider.requires_key && provider.masked_key && (
@@ -230,7 +239,7 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
                             updateDraft(provider.provider, { clear_key: event.target.checked, api_key: '' })
                           }
                         />
-                        <span>Quitar clave</span>
+                        <span>{t('llm.clearKey')}</span>
                       </label>
                     )}
                   </div>
@@ -240,7 +249,7 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
                     disabled={busy !== null || !provider.configured}
                     onClick={() => void test(provider.provider)}
                   >
-                    {busy === `test-${provider.provider}` ? 'Probando…' : 'Probar'}
+                    {busy === `test-${provider.provider}` ? t('common.testing') : t('common.test')}
                   </button>
                 </div>
               </div>
@@ -251,9 +260,9 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
 
       <div className="row">
         <button type="button" className="btn btn-primary" disabled={busy !== null} onClick={() => void save()}>
-          {busy === 'save' ? 'Guardando…' : 'Guardar proveedores'}
+          {busy === 'save' ? t('common.saving') : t('llm.save')}
         </button>
-        <span className="muted xsmall">Las claves se guardan cifradas y nunca se muestran completas.</span>
+        <span className="muted xsmall">{t('llm.encryptedNote')}</span>
       </div>
     </div>
   );
@@ -263,15 +272,7 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
 
 export function AlertSettings({ integrations }: { integrations: PollingState<IntegrationsData> }) {
   const data = integrations.data;
-  if (!data) {
-    return integrations.error ? (
-      <Notice tone="error">No se pudo cargar la configuración: {integrations.error}</Notice>
-    ) : (
-      <Card>
-        <Skeleton height={160} />
-      </Card>
-    );
-  }
+  if (!data) return <LoadingOrError integrations={integrations} height={160} />;
   return (
     <div className="stack-lg">
       <TelegramForm key={JSON.stringify(data.telegram)} data={data} onSaved={integrations.setData} />
@@ -281,6 +282,7 @@ export function AlertSettings({ integrations }: { integrations: PollingState<Int
 }
 
 function TelegramForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: IntegrationsData) => void }) {
+  const { t } = useI18n();
   const [token, setToken] = useState('');
   const [chatId, setChatId] = useState(data.telegram.chat_id);
   const [enabled, setEnabled] = useState(data.telegram.enabled);
@@ -298,9 +300,9 @@ function TelegramForm({ data, onSaved }: { data: IntegrationsData; onSaved: (val
           enabled,
         }),
       );
-      toast.success('Telegram guardado.');
+      toast.success(t('telegram.toast.saved'));
     } catch (error) {
-      toast.error(`No se pudo guardar: ${errorMessage(error)}`);
+      toast.error(t('common.saveFailed', { detail: errorMessage(error) }));
     } finally {
       setBusy(null);
     }
@@ -310,10 +312,10 @@ function TelegramForm({ data, onSaved }: { data: IntegrationsData; onSaved: (val
     setBusy('test');
     try {
       const result = await apiSend<{ delivered: boolean }>('POST', '/api/v1/settings/telegram/test');
-      if (result.delivered) toast.success('Mensaje de prueba entregado.');
-      else toast.error('No se entregó. Revisa el token, el chat id y que hayas escrito al bot.');
+      if (result.delivered) toast.success(t('telegram.toast.delivered'));
+      else toast.error(t('telegram.toast.notDelivered'));
     } catch (error) {
-      toast.error(`No se pudo probar: ${errorMessage(error)}`);
+      toast.error(t('common.testFailed', { detail: errorMessage(error) }));
     } finally {
       setBusy(null);
     }
@@ -323,19 +325,27 @@ function TelegramForm({ data, onSaved }: { data: IntegrationsData; onSaved: (val
     <Card
       title="Telegram"
       icon="bell"
-      subtitle="Recibe un aviso cuando el asistente compra, vende, salta un stop o se activa una protección."
-      actions={<Pill tone={data.telegram.configured ? 'solid' : 'default'}>{data.telegram.configured ? 'Configurado' : 'Sin configurar'}</Pill>}
+      subtitle={t('telegram.subtitle')}
+      actions={
+        <Pill tone={data.telegram.configured ? 'solid' : 'default'}>
+          {data.telegram.configured ? t('common.configured') : t('common.notConfigured')}
+        </Pill>
+      }
     >
       <div className="stack">
         <div className="form-grid">
           <label className="field">
-            <span className="field-label">Token del bot</span>
+            <span className="field-label">{t('telegram.token')}</span>
             <input
               type="password"
               className="input"
               autoComplete="off"
               disabled={clearToken}
-              placeholder={data.telegram.masked_token ? `${data.telegram.masked_token} · guardado` : 'Te lo da @BotFather'}
+              placeholder={
+                data.telegram.masked_token
+                  ? t('common.storedSecret', { value: data.telegram.masked_token })
+                  : t('telegram.token.placeholder')
+              }
               value={token}
               onChange={(event) => setToken(event.target.value)}
             />
@@ -344,7 +354,7 @@ function TelegramForm({ data, onSaved }: { data: IntegrationsData; onSaved: (val
             <span className="field-label">Chat id</span>
             <input
               className="input"
-              placeholder="Ej. 123456789"
+              placeholder={t('telegram.chat.placeholder')}
               value={chatId}
               onChange={(event) => setChatId(event.target.value)}
             />
@@ -353,7 +363,7 @@ function TelegramForm({ data, onSaved }: { data: IntegrationsData; onSaved: (val
         <div className="row">
           <label className="check">
             <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
-            <span>Enviar alertas</span>
+            <span>{t('telegram.enabled')}</span>
           </label>
           {data.telegram.masked_token && (
             <label className="check small">
@@ -365,16 +375,16 @@ function TelegramForm({ data, onSaved }: { data: IntegrationsData; onSaved: (val
                   if (event.target.checked) setToken('');
                 }}
               />
-              <span>Quitar token</span>
+              <span>{t('telegram.clear')}</span>
             </label>
           )}
         </div>
         <div className="row">
           <button type="button" className="btn btn-primary" disabled={busy !== null} onClick={() => void save()}>
-            {busy === 'save' ? 'Guardando…' : 'Guardar'}
+            {busy === 'save' ? t('common.saving') : t('common.save')}
           </button>
           <button type="button" className="btn" disabled={busy !== null} onClick={() => void test()}>
-            {busy === 'test' ? 'Enviando…' : 'Enviar prueba'}
+            {busy === 'test' ? t('common.sending') : t('telegram.test')}
           </button>
         </div>
       </div>
@@ -383,6 +393,7 @@ function TelegramForm({ data, onSaved }: { data: IntegrationsData; onSaved: (val
 }
 
 function HeartbeatForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: IntegrationsData) => void }) {
+  const { t } = useI18n();
   const [url, setUrl] = useState('');
   const [interval, setIntervalSeconds] = useState(data.heartbeat.interval_seconds);
   const [disable, setDisable] = useState(false);
@@ -397,9 +408,9 @@ function HeartbeatForm({ data, onSaved }: { data: IntegrationsData; onSaved: (va
         interval_seconds: interval,
       });
       onSaved(snapshot);
-      toast.success(snapshot.heartbeat.running ? 'Heartbeat activo.' : 'Heartbeat desactivado.');
+      toast.success(snapshot.heartbeat.running ? t('heartbeat.toast.on') : t('heartbeat.toast.off'));
     } catch (error) {
-      toast.error(`No se pudo guardar: ${errorMessage(error)}`);
+      toast.error(t('common.saveFailed', { detail: errorMessage(error) }));
     } finally {
       setBusy(null);
     }
@@ -409,10 +420,10 @@ function HeartbeatForm({ data, onSaved }: { data: IntegrationsData; onSaved: (va
     setBusy('test');
     try {
       const result = await apiSend<{ ok: boolean }>('POST', '/api/v1/settings/heartbeat/test');
-      if (result.ok) toast.success('Ping enviado.');
-      else toast.error('El monitor rechazó el ping o no hay URL configurada.');
+      if (result.ok) toast.success(t('heartbeat.toast.pinged'));
+      else toast.error(t('heartbeat.toast.rejected'));
     } catch (error) {
-      toast.error(`No se pudo probar: ${errorMessage(error)}`);
+      toast.error(t('common.testFailed', { detail: errorMessage(error) }));
     } finally {
       setBusy(null);
     }
@@ -420,31 +431,37 @@ function HeartbeatForm({ data, onSaved }: { data: IntegrationsData; onSaved: (va
 
   return (
     <Card
-      title="Aviso si el sistema se apaga"
+      title={t('heartbeat.title')}
       icon="heart"
-      subtitle="Un servicio externo (healthchecks.io, UptimeRobot) te avisa si el backend deja de dar señales de vida."
+      subtitle={t('heartbeat.subtitle')}
       actions={
         <Pill tone={data.heartbeat.running ? 'solid' : 'default'}>
-          {data.heartbeat.running ? 'Latiendo' : data.heartbeat.configured ? 'Detenido' : 'Desactivado'}
+          {data.heartbeat.running
+            ? t('heartbeat.running')
+            : data.heartbeat.configured
+              ? t('heartbeat.stopped')
+              : t('common.disabled')}
         </Pill>
       }
     >
       <div className="stack">
         <div className="form-grid">
           <label className="field">
-            <span className="field-label">URL de ping</span>
+            <span className="field-label">{t('heartbeat.url')}</span>
             <input
               type="password"
               className="input"
               autoComplete="off"
               disabled={disable}
-              placeholder={data.heartbeat.masked_url ? `${data.heartbeat.masked_url} · guardada` : 'https://hc-ping.com/…'}
+              placeholder={
+                data.heartbeat.masked_url ? t('common.storedSecret', { value: data.heartbeat.masked_url }) : 'https://hc-ping.com/…'
+              }
               value={url}
               onChange={(event) => setUrl(event.target.value)}
             />
           </label>
           <label className="field">
-            <span className="field-label">Cada (segundos)</span>
+            <span className="field-label">{t('heartbeat.interval')}</span>
             <input
               className="input"
               type="number"
@@ -458,15 +475,15 @@ function HeartbeatForm({ data, onSaved }: { data: IntegrationsData; onSaved: (va
         {data.heartbeat.configured && (
           <label className="check small">
             <input type="checkbox" checked={disable} onChange={(event) => setDisable(event.target.checked)} />
-            <span>Desactivar heartbeat</span>
+            <span>{t('heartbeat.disable')}</span>
           </label>
         )}
         <div className="row">
           <button type="button" className="btn btn-primary" disabled={busy !== null} onClick={() => void save()}>
-            {busy === 'save' ? 'Guardando…' : 'Guardar'}
+            {busy === 'save' ? t('common.saving') : t('common.save')}
           </button>
           <button type="button" className="btn" disabled={busy !== null} onClick={() => void test()}>
-            {busy === 'test' ? 'Enviando…' : 'Probar ping'}
+            {busy === 'test' ? t('common.sending') : t('heartbeat.test')}
           </button>
         </div>
       </div>

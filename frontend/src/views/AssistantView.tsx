@@ -6,8 +6,10 @@ import { MarketChart } from '../components/MarketChart';
 import { Card, Disclosure, Empty, Notice, Pill, Segmented, Skeleton, Stat } from '../components/ui';
 import { useMarketStream } from '../hooks/useMarketStream';
 import { usePolling, type PollingState } from '../hooks/usePolling';
+import { useI18n } from '../i18n/core';
+import { logText, scanModeLabel } from '../i18n/labels';
 import { apiGet, apiSend, errorMessage } from '../lib/api';
-import { describeSignal, fmtDuration, fmtInt, fmtPrice, fmtTime } from '../lib/format';
+import { fmtDuration, fmtInt, fmtPrice, fmtSigned, fmtTime, readSignal } from '../lib/format';
 import {
   AVAILABLE_SYMBOLS,
   TIMEFRAMES,
@@ -22,18 +24,6 @@ import {
 type RiskProfile = 'conservative' | 'moderate' | 'aggressive';
 
 const RISK_PCT: Record<RiskProfile, number> = { conservative: 1, moderate: 2, aggressive: 3 };
-
-const TREND_LABEL: Record<string, string> = {
-  uptrend: 'Tendencia alcista',
-  downtrend: 'Tendencia bajista',
-  range: 'Lateral',
-};
-
-const VOLATILITY_LABEL: Record<string, string> = {
-  low: 'Volatilidad baja',
-  normal: 'Volatilidad normal',
-  high: 'Volatilidad alta',
-};
 
 interface Draft {
   mode: 'paper' | 'real';
@@ -63,6 +53,7 @@ export function AssistantView({
   runtime,
   navigate,
 }: AssistantViewProps) {
+  const { t } = useI18n();
   const market = useMarketStream(symbol, timeframe);
   const [chartMode, setChartMode] = useState<'candles' | 'line'>('candles');
 
@@ -74,9 +65,15 @@ export function AssistantView({
 
   const status = bot.data;
   const running = Boolean(status?.is_running);
-  const signal = describeSignal(status?.last_signal);
+  const signal = readSignal(status?.last_signal);
+  const signalTitle = !signal.known
+    ? t('signal.view.none.title')
+    : signal.tone === 'wait'
+      ? t('signal.view.wait.title')
+      : t(`signal.view.${signal.tone}${signal.strong ? '.strong' : ''}.title`);
+  const signalAdvice = t(signal.known ? `signal.view.${signal.tone}.advice` : 'signal.view.none.advice');
   const score = status?.last_confidence;
-  const scorePct = typeof score === 'number' ? Math.round((score <= 1 ? score * 100 : score)) : null;
+  const scorePct = typeof score === 'number' ? Math.round(score <= 1 ? score * 100 : score) : null;
   const firstCandle = market.candles[0];
   const sessionChange =
     firstCandle && market.livePrice ? ((market.livePrice - firstCandle.open) / firstCandle.open) * 100 : null;
@@ -84,11 +81,11 @@ export function AssistantView({
   return (
     <div className="assistant-grid">
       <div className="stack-lg">
-        <section className="card card-flush" aria-label="Mercado">
+        <section className="card card-flush" aria-label={t('assistant.market')}>
           <div className="chart-toolbar">
             <div className="price-head">
               <label className="sr-only" htmlFor="symbol">
-                Mercado
+                {t('assistant.market')}
               </label>
               <select
                 id="symbol"
@@ -106,28 +103,27 @@ export function AssistantView({
               <span className="price-big">{fmtPrice(market.livePrice)}</span>
               {sessionChange !== null && (
                 <span className={`small num ${sessionChange >= 0 ? 'pos' : 'neg'}`}>
-                  {sessionChange >= 0 ? '+' : ''}
-                  {sessionChange.toFixed(2)} % en el gráfico
+                  {t('assistant.chartChange', { value: fmtSigned(sessionChange, 2, ' %') })}
                 </span>
               )}
               <Pill dot live={market.connected} tone={market.connected ? 'default' : 'warn'}>
-                {market.connected ? 'En vivo' : 'Conectando'}
+                {market.connected ? t('assistant.live') : t('assistant.connecting')}
               </Pill>
             </div>
             <div className="row">
               <Segmented
-                label="Temporalidad"
+                label={t('assistant.timeframe')}
                 value={timeframe}
                 onChange={onTimeframeChange}
-                options={TIMEFRAMES.map((item) => ({ value: item.id, label: item.label }))}
+                options={TIMEFRAMES.map((item) => ({ value: item.id, label: t(`timeframe.${item.id}`) }))}
               />
               <Segmented
-                label="Tipo de gráfico"
+                label={t('assistant.chartType')}
                 value={chartMode}
                 onChange={setChartMode}
                 options={[
-                  { value: 'candles', label: 'Velas' },
-                  { value: 'line', label: 'Línea' },
+                  { value: 'candles', label: t('assistant.candles') },
+                  { value: 'line', label: t('assistant.line') },
                 ]}
               />
             </div>
@@ -141,45 +137,47 @@ export function AssistantView({
           </div>
         </section>
 
-        <Card title="Qué ve el asistente" subtitle="Lectura del comité de analistas en lenguaje sencillo.">
+        <Card title={t('assistant.reading.title')} subtitle={t('assistant.reading.subtitle')}>
           <div className="stack">
             <div className="verdict">
               <div className={`verdict-icon ${signal.tone}`}>
                 <Icon name={signal.tone === 'buy' ? 'arrowUp' : signal.tone === 'sell' ? 'arrowDown' : 'minus'} />
               </div>
               <div>
-                <div className="verdict-title">{signal.title}</div>
+                <div className="verdict-title">{signalTitle}</div>
                 <p className="muted small" style={{ marginTop: 4 }}>
-                  {signal.advice}
+                  {signalAdvice}
                 </p>
               </div>
             </div>
 
             <div className="row">
               {scorePct !== null && (
-                <Pill title="Fuerza de la señal del comité. No es una probabilidad de éxito.">
-                  Fuerza {scorePct} %
-                </Pill>
+                <Pill title={t('assistant.strengthHint')}>{t('assistant.strength', { value: scorePct })}</Pill>
               )}
               {regime.data?.status === 'classified' && regime.data.trend && (
-                <Pill>{TREND_LABEL[regime.data.trend]}</Pill>
+                <Pill>{t(`regime.trend.${regime.data.trend}`)}</Pill>
               )}
               {regime.data?.status === 'classified' && regime.data.volatility && (
                 <Pill tone={regime.data.volatility === 'high' ? 'warn' : 'default'}>
-                  {VOLATILITY_LABEL[regime.data.volatility]}
+                  {t(`regime.volatility.${regime.data.volatility}`)}
                 </Pill>
               )}
-              {regime.data?.metrics.data_stale && <Pill tone="warn">Datos antiguos</Pill>}
-              {status?.last_symbol && <Pill>Último analizado: {status.last_symbol}</Pill>}
+              {regime.data?.metrics.data_stale && <Pill tone="warn">{t('assistant.staleData')}</Pill>}
+              {status?.last_symbol && <Pill>{t('assistant.lastAnalyzed', { symbol: status.last_symbol })}</Pill>}
             </div>
 
-            {status?.last_error && <Notice tone="warn">Último aviso del asistente: {status.last_error}</Notice>}
+            {status?.last_error && <Notice tone="warn">{t('assistant.lastError', { detail: status.last_error })}</Notice>}
 
             {status?.config?.llm_analysis_interval_seconds ? (
               <p className="muted xsmall">
-                El comité analiza cada {fmtDuration(status.config.llm_analysis_interval_seconds)}
-                {status.last_analysis_at ? ` (último a las ${fmtTime(status.last_analysis_at)})` : ''}. Las salidas y
-                los stops se vigilan cada {fmtDuration(status.config.interval_seconds)}.
+                {t('assistant.cadence', {
+                  analysis: fmtDuration(status.config.llm_analysis_interval_seconds),
+                  last: status.last_analysis_at
+                    ? t('assistant.cadenceLast', { time: fmtTime(status.last_analysis_at) })
+                    : '',
+                  exits: fmtDuration(status.config.interval_seconds),
+                })}
               </p>
             ) : null}
           </div>
@@ -189,16 +187,8 @@ export function AssistantView({
       </div>
 
       <div className="stack-lg sticky">
-        <BotControl
-          symbol={symbol}
-          timeframe={timeframe}
-          bot={bot}
-          runtime={runtime}
-          navigate={navigate}
-        />
-        {!running && (status?.logs?.length ?? 0) === 0 && (
-          <GettingStarted runtime={runtime.data} navigate={navigate} />
-        )}
+        <BotControl symbol={symbol} timeframe={timeframe} bot={bot} runtime={runtime} navigate={navigate} />
+        {!running && (status?.logs?.length ?? 0) === 0 && <GettingStarted runtime={runtime.data} navigate={navigate} />}
       </div>
     </div>
   );
@@ -217,6 +207,7 @@ function BotControl({
   runtime: PollingState<RuntimeTradingConfigData>;
   navigate: (page: Page, section?: string) => void;
 }) {
+  const { t } = useI18n();
   const status = bot.data;
   const running = Boolean(status?.is_running);
   const [busy, setBusy] = useState(false);
@@ -242,12 +233,18 @@ function BotControl({
           interval: config.interval_seconds,
           minScore: config.min_confidence_pct,
           maxPositions: config.max_open_positions,
-          risk: config.risk_per_trade_pct >= 3 ? 'aggressive' : config.risk_per_trade_pct >= 2 ? 'moderate' : 'conservative',
+          risk:
+            config.risk_per_trade_pct >= 3
+              ? 'aggressive'
+              : config.risk_per_trade_pct >= 2
+                ? 'moderate'
+                : 'conservative',
           autoExecute: config.auto_execute,
         }
       : draft;
   const update = (patch: Partial<Draft>) => setDraft((current) => ({ ...current, ...patch }));
   const environment = runtime.data?.trading_environment ?? 'testnet';
+  const mainnet = environment === 'mainnet';
 
   const changeScanMode = async (mode: LLMScanModeValue) => {
     if (savingScanMode || scanMode.data?.mode === mode) return;
@@ -255,9 +252,9 @@ function BotControl({
     try {
       const data = await apiSend<LLMScanModeData>('PUT', '/api/v1/agents/llm/scan-mode', { mode });
       scanMode.setData(data);
-      toast.success(`Consumo de IA: ${data.active.label}. Se aplica en el próximo análisis.`);
+      toast.success(t('bot.toast.scanMode', { mode: scanModeLabel(t, data.mode, data.active.label) }));
     } catch (error) {
-      toast.error(`No se pudo cambiar: ${errorMessage(error)}`);
+      toast.error(t('common.saveFailed', { detail: errorMessage(error) }));
     } finally {
       setSavingScanMode(false);
     }
@@ -266,21 +263,23 @@ function BotControl({
   const start = async () => {
     if (draft.mode === 'real') {
       if (!runtime.data?.credentials[environment]) {
-        toast.error(`Primero conecta tus claves de ${environment === 'mainnet' ? 'Mainnet' : 'Testnet'}.`);
+        toast.error(t(mainnet ? 'bot.toast.needKeysMainnet' : 'bot.toast.needKeysTestnet'));
         navigate('settings', 'cuenta');
         return;
       }
-      if (environment === 'mainnet' && !runtime.data.allow_mainnet_trading) {
-        toast.error('Mainnet requiere activar el permiso de dinero real en Configuración.');
+      if (mainnet && !runtime.data.allow_mainnet_trading) {
+        toast.error(t('bot.toast.needMainnetPermission'));
         navigate('settings', 'proteccion');
         return;
       }
-      const venue = environment === 'mainnet' ? 'Binance con DINERO REAL' : 'Binance Testnet (fondos de prueba)';
       const confirmed = window.confirm(
-        `El asistente podrá enviar órdenes en ${venue} durante esta sesión.\n\n` +
-          `Mercado: ${symbol} · Riesgo por operación: ${RISK_PCT[draft.risk]} % · Máximo por orden: ` +
-          `${runtime.data.real_trading_max_notional} USDT · Posiciones a la vez: ${draft.maxPositions}.\n\n` +
-          'Los límites de riesgo y las protecciones siguen activos. ¿Iniciar?',
+        t('bot.confirmReal', {
+          venue: t(mainnet ? 'bot.venue.mainnet' : 'bot.venue.testnet'),
+          symbol,
+          risk: RISK_PCT[draft.risk],
+          max: String(runtime.data.real_trading_max_notional),
+          positions: draft.maxPositions,
+        }),
       );
       if (!confirmed) return;
     }
@@ -311,9 +310,9 @@ function BotControl({
         take_profit_pct: 4,
       };
       bot.setData(await apiSend<AutonomousBotStatus>('POST', '/api/v1/autonomous/start', payload));
-      toast.success(`Asistente activo en ${symbol}.`);
+      toast.success(t('bot.toast.started', { symbol }));
     } catch (error) {
-      toast.error(`No se pudo iniciar: ${errorMessage(error)}`);
+      toast.error(t('bot.toast.startFailed', { detail: errorMessage(error) }));
     } finally {
       setBusy(false);
     }
@@ -323,25 +322,25 @@ function BotControl({
     setBusy(true);
     try {
       bot.setData(await apiSend<AutonomousBotStatus>('POST', '/api/v1/autonomous/stop'));
-      toast.success('Asistente en pausa. Las posiciones abiertas se conservan.');
+      toast.success(t('bot.toast.stopped'));
     } catch (error) {
-      toast.error(`No se pudo pausar: ${errorMessage(error)}`);
+      toast.error(t('bot.toast.stopFailed', { detail: errorMessage(error) }));
     } finally {
       setBusy(false);
     }
   };
 
   const emergency = async () => {
-    if (!window.confirm('Parada de emergencia: se detiene el asistente y se cierran sus posiciones ahora. ¿Continuar?')) {
-      return;
-    }
+    if (!window.confirm(t('bot.confirmEmergency'))) return;
     try {
       bot.setData(await apiSend<AutonomousBotStatus>('POST', '/api/v1/autonomous/emergency-kill'));
-      toast.success('Parada de emergencia ejecutada.');
+      toast.success(t('bot.toast.emergency'));
     } catch (error) {
-      toast.error(`Error en la parada: ${errorMessage(error)}`);
+      toast.error(t('bot.toast.emergencyFailed', { detail: errorMessage(error) }));
     }
   };
+
+  const venue = shown.mode === 'real' ? t(mainnet ? 'venue.mainnet' : 'venue.testnet') : t('venue.paper');
 
   return (
     <Card>
@@ -351,99 +350,97 @@ function BotControl({
             <Icon name={running ? 'activity' : 'pause'} />
           </div>
           <div>
-            <div className="strong">{running ? 'Asistente activo' : 'Asistente en pausa'}</div>
+            <div className="strong">{running ? t('bot.running') : t('bot.paused')}</div>
             <div className="muted xsmall">
               {running
-                ? `${shown.mode === 'real' ? (environment === 'mainnet' ? 'Dinero real' : 'Testnet') : 'Simulado'} · ${fmtDuration(status?.uptime_seconds)} en marcha`
-                : 'Configura y pulsa iniciar.'}
+                ? t('bot.runningFor', { venue, uptime: fmtDuration(status?.uptime_seconds) })
+                : t('bot.configureHint')}
             </div>
           </div>
         </div>
 
         <div className="stats" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-          <Stat label="Posiciones" value={fmtInt(status?.active_positions_count ?? 0)} />
-          <Stat label="Operaciones" value={fmtInt(status?.trades_executed ?? 0)} />
-          <Stat label="Ciclos" value={fmtInt(status?.total_cycles ?? 0)} />
+          <Stat label={t('bot.positions')} value={fmtInt(status?.active_positions_count ?? 0)} />
+          <Stat label={t('bot.trades')} value={fmtInt(status?.trades_executed ?? 0)} />
+          <Stat label={t('bot.cycles')} value={fmtInt(status?.total_cycles ?? 0)} />
         </div>
 
         <div className="field">
-          <span className="field-label">Dónde opera</span>
+          <span className="field-label">{t('bot.where')}</span>
           <Segmented
-            label="Modo de ejecución"
+            label={t('bot.where')}
             block
             disabled={running}
             value={shown.mode}
             onChange={(mode) => update({ mode })}
             options={[
-              { value: 'paper', label: 'Simulado' },
-              { value: 'real', label: environment === 'mainnet' ? 'Dinero real' : 'Testnet' },
+              { value: 'paper', label: t('venue.paper') },
+              { value: 'real', label: t(mainnet ? 'venue.mainnet' : 'venue.testnet') },
             ]}
           />
           <span className="field-hint">
-            {shown.mode === 'paper'
-              ? 'Practica con saldo virtual. No se envía ninguna orden al exchange.'
-              : environment === 'mainnet'
-                ? 'Usará tu saldo real en Binance. Revisa los límites antes de iniciar.'
-                : 'Órdenes reales en la red de pruebas de Binance, sin dinero real.'}
+            {shown.mode === 'paper' ? t('bot.where.paper') : t(mainnet ? 'bot.where.mainnet' : 'bot.where.testnet')}
           </span>
         </div>
 
         <div className="field">
-          <span className="field-label">Nivel de riesgo</span>
+          <span className="field-label">{t('bot.risk')}</span>
           <Segmented
-            label="Nivel de riesgo"
+            label={t('bot.risk')}
             block
             disabled={running}
             value={shown.risk}
             onChange={(risk) => update({ risk })}
             options={[
-              { value: 'conservative', label: 'Bajo · 1 %' },
-              { value: 'moderate', label: 'Medio · 2 %' },
-              { value: 'aggressive', label: 'Alto · 3 %' },
+              { value: 'conservative', label: t('bot.risk.low') },
+              { value: 'moderate', label: t('bot.risk.medium') },
+              { value: 'aggressive', label: t('bot.risk.high') },
             ]}
           />
-          <span className="field-hint">Lo máximo que se arriesga del saldo en cada operación hasta su stop.</span>
+          <span className="field-hint">{t('bot.risk.hint')}</span>
         </div>
 
         <div className="field">
-          <span className="field-label">Consumo de IA</span>
+          <span className="field-label">{t('bot.ai')}</span>
           <Segmented
-            label="Consumo de IA"
+            label={t('bot.ai')}
             block
             disabled={savingScanMode || !scanMode.data}
             value={scanMode.data?.mode ?? 'savings'}
             onChange={(mode) => void changeScanMode(mode)}
             options={(scanMode.data?.presets ?? []).map((preset) => ({
               value: preset.mode,
-              label: preset.label,
+              label: scanModeLabel(t, preset.mode, preset.label),
               title: preset.description,
             }))}
           />
           {scanMode.data && (
             <span className="field-hint">
-              {scanMode.data.active.max_markets} mercado(s) por análisis,{' '}
-              {scanMode.data.active.parallel ? 'en paralelo' : 'uno tras otro'}. Se puede cambiar en marcha.
+              {t('bot.ai.hint', {
+                markets: scanMode.data.active.max_markets,
+                how: t(scanMode.data.active.parallel ? 'common.parallel' : 'common.sequential'),
+              })}
             </span>
           )}
         </div>
 
-        <Disclosure summary="Ajustes de estrategia">
+        <Disclosure summary={t('bot.strategy')}>
           <label className="field">
-            <span className="field-label">Revisar el mercado cada</span>
+            <span className="field-label">{t('bot.interval')}</span>
             <select
               className="select"
               disabled={running}
               value={shown.interval}
               onChange={(event) => update({ interval: Number(event.target.value) })}
             >
-              <option value={30}>30 segundos</option>
-              <option value={60}>1 minuto (recomendado)</option>
-              <option value={120}>2 minutos</option>
-              <option value={300}>5 minutos</option>
+              <option value={30}>{t('bot.interval.30')}</option>
+              <option value={60}>{t('bot.interval.60')}</option>
+              <option value={120}>{t('bot.interval.120')}</option>
+              <option value={300}>{t('bot.interval.300')}</option>
             </select>
           </label>
           <label className="field">
-            <span className="field-label">Fuerza mínima de la señal: {shown.minScore} %</span>
+            <span className="field-label">{t('bot.minScore', { value: shown.minScore })}</span>
             <input
               type="range"
               min={50}
@@ -453,17 +450,17 @@ function BotControl({
               value={shown.minScore}
               onChange={(event) => update({ minScore: Number(event.target.value) })}
             />
-            <span className="field-hint">Más alto, menos operaciones. No es una probabilidad de acierto.</span>
+            <span className="field-hint">{t('bot.minScore.hint')}</span>
           </label>
           <label className="field">
-            <span className="field-label">Posiciones abiertas a la vez</span>
+            <span className="field-label">{t('bot.maxPositions')}</span>
             <select
               className="select"
               disabled={running}
               value={shown.maxPositions}
               onChange={(event) => update({ maxPositions: Number(event.target.value) })}
             >
-              <option value={1}>1 (recomendado)</option>
+              <option value={1}>{t('bot.maxPositions.1')}</option>
               <option value={2}>2</option>
               <option value={3}>3</option>
             </select>
@@ -476,11 +473,11 @@ function BotControl({
               onChange={(event) => update({ autoExecute: event.target.checked })}
             />
             <span>
-              Ejecutar las señales automáticamente
-              <span className="check-hint">Desactívalo para que solo analice y registre.</span>
+              {t('bot.autoExecute')}
+              <span className="check-hint">{t('bot.autoExecute.hint')}</span>
             </span>
           </label>
-          <p className="muted xsmall">Cada operación usa stop al 2 % y objetivo al 4 % (relación 2:1).</p>
+          <p className="muted xsmall">{t('bot.stopsNote')}</p>
         </Disclosure>
 
         <button
@@ -490,14 +487,14 @@ function BotControl({
           onClick={() => void (running ? stop() : start())}
         >
           <Icon name={running ? 'pause' : 'play'} />
-          {busy ? 'Procesando…' : running ? 'Pausar asistente' : 'Iniciar asistente'}
+          {busy ? t('common.processing') : running ? t('bot.pause') : t('bot.start')}
         </button>
 
-        <Disclosure summary="Emergencia">
-          <p className="muted xsmall">Detiene el asistente y cierra al momento todas las posiciones que abrió.</p>
+        <Disclosure summary={t('bot.emergency')}>
+          <p className="muted xsmall">{t('bot.emergency.hint')}</p>
           <button type="button" className="btn btn-danger btn-block" onClick={() => void emergency()}>
             <Icon name="stop" size={16} />
-            Detener y cerrar posiciones
+            {t('bot.emergency.button')}
           </button>
         </Disclosure>
       </div>
@@ -512,30 +509,31 @@ function GettingStarted({
   runtime: RuntimeTradingConfigData | null;
   navigate: (page: Page, section?: string) => void;
 }) {
+  const { t } = useI18n();
   const hasKeys = Boolean(runtime?.credentials?.testnet || runtime?.credentials?.mainnet);
   return (
-    <Card title="Primeros pasos">
+    <Card title={t('start.title')}>
       <ol className="steps">
         <li className="done">
           <span>
-            Elige un mercado
-            <span className="muted">Bitcoin está seleccionado por defecto.</span>
+            {t('start.market')}
+            <span className="muted">{t('start.market.hint')}</span>
           </span>
         </li>
         <li>
           <span>
-            Empieza en modo simulado
-            <span className="muted">Observa cómo decide sin arriesgar dinero.</span>
+            {t('start.paper')}
+            <span className="muted">{t('start.paper.hint')}</span>
           </span>
         </li>
         <li className={hasKeys ? 'done' : ''}>
           <span>
-            Conecta Binance (opcional)
+            {t('start.keys')}
             <span className="muted">
-              {hasKeys ? 'Claves guardadas y cifradas.' : 'Necesario solo para Testnet o dinero real. '}
+              {hasKeys ? t('start.keys.done') : t('start.keys.hint')}{' '}
               {!hasKeys && (
                 <button type="button" className="btn btn-sm btn-ghost" onClick={() => navigate('settings', 'cuenta')}>
-                  Conectar
+                  {t('start.keys.connect')}
                 </button>
               )}
             </span>
@@ -543,8 +541,8 @@ function GettingStarted({
         </li>
         <li>
           <span>
-            Pulsa «Iniciar asistente»
-            <span className="muted">Puedes pausarlo en cualquier momento.</span>
+            {t('start.go')}
+            <span className="muted">{t('start.go.hint')}</span>
           </span>
         </li>
       </ol>
@@ -553,19 +551,20 @@ function GettingStarted({
 }
 
 function ActivityLog({ status }: { status: AutonomousBotStatus | null }) {
+  const { t } = useI18n();
   const logs = status?.logs ?? [];
   return (
-    <Card title="Actividad" subtitle="Lo que el asistente ha hecho y por qué, del más reciente al más antiguo.">
+    <Card title={t('activity.title')} subtitle={t('activity.subtitle')}>
       {logs.length === 0 ? (
-        <Empty>Sin actividad todavía. Aparecerá aquí en cuanto inicies el asistente.</Empty>
+        <Empty>{t('activity.empty')}</Empty>
       ) : (
         <div className="log" aria-live="polite">
           {logs.slice(0, 40).map((log) => (
             <div key={log.id} className={`log-row ${log.level.toLowerCase()}`}>
               <span className="log-time">{fmtTime(log.timestamp)}</span>
               <span className="log-msg">
-                {log.message}
-                {log.price ? <span className="muted num"> · {fmtPrice(log.price)}</span> : null}
+                {logText(t, log)}
+                {log.price && !log.key ? <span className="muted num"> · {fmtPrice(log.price)}</span> : null}
               </span>
             </div>
           ))}

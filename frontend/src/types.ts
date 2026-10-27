@@ -259,6 +259,8 @@ export interface AutonomousLogEntry {
   level: string;
   symbol: string;
   message: string;
+  key?: string | null;
+  params?: Record<string, unknown>;
   price?: number | null;
 }
 
@@ -360,6 +362,52 @@ export interface AdaptiveWeightsReport {
   note: string;
 }
 
+export interface PositionData {
+  id: string;
+  symbol: string;
+  mode: string;
+  side: 'long' | 'short';
+  entry_price: number | string;
+  quantity: number | string;
+  current_price: number | string;
+  stop_loss: number | string | null;
+  take_profit: number | string | null;
+  unrealized_pnl: number | string;
+  unrealized_pnl_pct: number | string;
+  opened_at: string;
+}
+
+export interface OrderData {
+  id: string;
+  symbol: string;
+  mode: string;
+  side: 'buy' | 'sell';
+  order_type: string;
+  status: string;
+  quantity: number | string;
+  filled_quantity: number | string;
+  average_fill_price: number | string | null;
+  coordinator_decision_id: string | null;
+  created_at: string;
+  rejection_reason: string | null;
+}
+
+export interface TradeOutcomeData {
+  decision_id: string;
+  symbol: string;
+  mode: string | null;
+  status: 'closed' | 'open' | 'unexecuted';
+  outcome: 'win' | 'loss' | 'breakeven' | 'open';
+  entry_price: number | string | null;
+  exit_price: number | string | null;
+  quantity: number | string;
+  net_pnl: number | string;
+  net_pnl_pct: number;
+  fees: number | string;
+  opened_at: string | null;
+  closed_at: string | null;
+}
+
 export const AVAILABLE_SYMBOLS = [
   { id: 'BTC/USDT', name: 'Bitcoin', ticker: 'BTC' },
   { id: 'ETH/USDT', name: 'Ethereum', ticker: 'ETH' },
@@ -374,18 +422,4 @@ export const TIMEFRAMES = [
   { id: '1d', label: '1 día' },
 ] as const;
 
-export const AGENT_LABELS: Record<string, string> = {
-  technical_analyst: 'Analista técnico',
-  price_action_analyst: 'Acción del precio',
-  risk_manager: 'Gestor de riesgo',
-};
-
-export const SIGNAL_LABELS: Record<string, string> = {
-  strong_buy: 'Compra fuerte',
-  buy: 'Compra',
-  neutral: 'Neutral',
-  sell: 'Venta',
-  strong_sell: 'Venta fuerte',
-  hold: 'Mantener',
-  no_signal: 'Sin señal',
-};
+export const AGENT_TYPES = ['technical_analyst', 'price_action_analyst', 'risk_manager'] as const;

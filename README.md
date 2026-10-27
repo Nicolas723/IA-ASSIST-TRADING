@@ -151,13 +151,26 @@ Instala las dependencias la primera vez:
 npm --prefix frontend install
 ```
 
-Arranca el frontend:
+**Opción simple (uso diario):** compila la interfaz una vez y ábrela desde el
+propio backend, sin procesos extra:
+
+```powershell
+npm --prefix frontend run build
+```
+
+Abre <http://localhost:8000>. Vuelve a compilar solo cuando actualices el código.
+
+**Opción desarrollo (recarga en caliente):**
 
 ```powershell
 .\scripts\dev-frontend.ps1
 ```
 
 Abre <http://localhost:5173>.
+
+La interfaz se muestra en español o inglés según el idioma del navegador; se
+puede cambiar con el selector de la cabecera. Para dejarlo funcionando 24/7 en
+un servidor, sigue [docs/DESPLIEGUE_VPS.md](docs/DESPLIEGUE_VPS.md).
 
 ---
 
@@ -167,7 +180,7 @@ Antes de tocar dinero, comprueba este orden:
 
 1. **Backend sano**: `http://127.0.0.1:8000/health` responde `{"status":"ok"}`.
 2. **Base de datos migrada**: `docker exec ata-backend alembic upgrade head` termina sin errores.
-3. **Dashboard abierto**: <http://localhost:5173>.
+3. **Interfaz abierta**: <http://localhost:8000> (o <http://localhost:5173> en modo desarrollo).
 4. **Sin posiciones abiertas** al empezar.
 5. **Mainnet apagado**: no marques el segundo opt-in.
 
