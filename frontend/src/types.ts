@@ -242,6 +242,7 @@ export interface RuntimeTradingConfigData {
   real_trading_allowed_symbols: string[];
   real_trading_oco_enabled: boolean;
   enable_autonomous_real_trading: boolean;
+  shadow_scan_symbols: string[];
   real_trading_active: boolean;
   credentials: Record<string, boolean>;
 }

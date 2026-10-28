@@ -25,7 +25,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 
-from pydantic import Field, PostgresDsn, RedisDsn, computed_field, field_validator
+from pydantic import BaseModel, Field, PostgresDsn, RedisDsn, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Resolve the .env path relative to THIS file (backend/.env) so configuration is
@@ -52,6 +52,7 @@ RUNTIME_TRADING_FIELDS = (
     "enable_autonomous_real_trading",
     "real_trading_oco_enabled",
     "trading_environment",
+    "shadow_scan_symbols",
 )
 
 # LLM scan mode plus the budgets derived from it. The mode controls how many
@@ -112,6 +113,24 @@ class LLMProvider(StrEnum):
     GROQ = "groq"
 
 
+# Markets the autonomous engine pre-scans every cycle (cheap, deterministic);
+# only the best ones reach the LLM committee, per the selected scan mode.
+MAX_SCAN_SYMBOLS = 25
+
+
+class LLMChainEntry(BaseModel):
+    """One step of the LLM routing chain: a provider and, optionally, a model."""
+
+    provider: LLMProvider
+    # Empty means the provider's configured default model.
+    model: str = ""
+    enabled: bool = True
+
+    @property
+    def key(self) -> str:
+        return f"{self.provider.value}:{self.model}" if self.model else self.provider.value
+
+
 class LLMScanMode(StrEnum):
     """How much market breadth the LLM committee consumes per analysis."""
 
@@ -141,7 +160,9 @@ class LLMScanModePreset:
 
 # The budgets are hard caps, not spending targets. They scale with breadth so
 # the selected mode can actually finish its analyses, while a broken provider
-# chain still stops after a bounded number of attempts.
+# chain still stops after a bounded number of attempts. The daily caps cover a
+# full day at the default 30-minute analysis interval: 48 analyses x 2 calls
+# per market, plus headroom for fallback retries.
 LLM_SCAN_MODE_PRESETS: dict[LLMScanMode, LLMScanModePreset] = {
     LLMScanMode.SAVINGS: LLMScanModePreset(
         label="Ahorro",
@@ -152,9 +173,9 @@ LLM_SCAN_MODE_PRESETS: dict[LLMScanMode, LLMScanModePreset] = {
         max_markets=1,
         parallel=False,
         llm_cycle_request_budget=8,
-        llm_daily_request_budget=18,
+        llm_daily_request_budget=130,
         llm_cycle_token_budget=12_000,
-        llm_daily_token_budget=200_000,
+        llm_daily_token_budget=300_000,
     ),
     LLMScanMode.NORMAL: LLMScanModePreset(
         label="Consumo normal",
@@ -164,9 +185,9 @@ LLM_SCAN_MODE_PRESETS: dict[LLMScanMode, LLMScanModePreset] = {
         max_markets=3,
         parallel=False,
         llm_cycle_request_budget=24,
-        llm_daily_request_budget=72,
+        llm_daily_request_budget=380,
         llm_cycle_token_budget=40_000,
-        llm_daily_token_budget=600_000,
+        llm_daily_token_budget=800_000,
     ),
     LLMScanMode.HIGH: LLMScanModePreset(
         label="Alto consumo",
@@ -177,9 +198,9 @@ LLM_SCAN_MODE_PRESETS: dict[LLMScanMode, LLMScanModePreset] = {
         max_markets=10,
         parallel=True,
         llm_cycle_request_budget=80,
-        llm_daily_request_budget=300,
+        llm_daily_request_budget=1_200,
         llm_cycle_token_budget=120_000,
-        llm_daily_token_budget=2_000_000,
+        llm_daily_token_budget=2_500_000,
     ),
 }
 
@@ -468,6 +489,10 @@ class Settings(BaseSettings):
         ]
     )
     llm_fallback_enabled: bool = Field(default=True)
+    # Ordered provider+model chain managed from the UI. When it has enabled
+    # entries it replaces primary/fallbacks, so one provider can appear several
+    # times with different models (free tiers limit each model separately).
+    llm_model_chain: list[LLMChainEntry] = Field(default_factory=list)
     # Consumption mode selected from the UI. It controls how many markets are
     # analyzed per committee run and whether those analyses run in parallel.
     llm_scan_mode: LLMScanMode = Field(default=LLMScanMode.SAVINGS)
@@ -553,7 +578,7 @@ class Settings(BaseSettings):
             "XRP/USDT",
         ],
         min_length=1,
-        max_length=5,
+        max_length=MAX_SCAN_SYMBOLS,
     )
     # One scan per 1h evaluation horizon, limiting mechanical overlap.
     shadow_scan_interval_seconds: int = Field(default=3600, ge=3600, le=86400)
@@ -792,14 +817,30 @@ def load_runtime_overrides(path: Path | None = None) -> dict[str, Any]:
 
 
 def load_runtime_llm_overrides(path: Path | None = None) -> dict[str, Any]:
-    """Read UI-managed LLM scan-mode overrides from disk."""
-    return _load_overrides(
+    """Read UI-managed LLM scan-mode overrides from disk.
+
+    The stored mode wins over the stored budgets: the budgets are copied from
+    the preset when a mode is chosen, so a preset that is later retuned would
+    otherwise stay pinned to its old caps until the mode is re-selected.
+    """
+    overrides = _load_overrides(
         path or runtime_llm_config_path(),
         RUNTIME_LLM_FIELDS,
         env_variable="RUNTIME_LLM_CONFIG_PATH",
         log_name="runtime_llm_config",
         honor_pytest_guard=path is None,
     )
+    try:
+        preset = LLM_SCAN_MODE_PRESETS[LLMScanMode(overrides["llm_scan_mode"])]
+    except (KeyError, ValueError):
+        return overrides
+    overrides.update(
+        llm_cycle_request_budget=preset.llm_cycle_request_budget,
+        llm_daily_request_budget=preset.llm_daily_request_budget,
+        llm_cycle_token_budget=preset.llm_cycle_token_budget,
+        llm_daily_token_budget=preset.llm_daily_token_budget,
+    )
+    return overrides
 
 
 def _validated_with_overrides(base: Settings, overrides: dict[str, Any]) -> Settings:

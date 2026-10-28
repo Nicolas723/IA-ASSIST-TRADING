@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -11,6 +12,7 @@ from src.application.services.indicator_service import IndicatorService, Technic
 from src.application.services.market_data_service import MarketDataService
 from src.application.services.regime_service import MarketRegimeReport, RegimeService
 from src.domain.market.entities import Timeframe
+from src.infrastructure.exchange.market_catalog import MarketOption, fetch_market_catalog
 from src.interfaces.api.v1.deps import (
     get_indicator_service,
     get_market_data_service,
@@ -148,6 +150,20 @@ async def market_coverage() -> MarketCoverageResponse:
             ),
         ],
     )
+
+
+@router.get(
+    "/catalog",
+    response_model=list[MarketOption],
+    summary="Suggested liquid spot markets, ranked by real 24h volume",
+)
+async def market_catalog() -> list[MarketOption]:
+    """Curated USDT markets; ``tradable`` reflects the active trading network."""
+    testnet = get_settings().trading_environment.value == "testnet"
+    try:
+        return await fetch_market_catalog(testnet=testnet)
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=f"Binance no responde: {exc}") from exc
 
 
 @router.get("/symbols", summary="List available trading symbols")

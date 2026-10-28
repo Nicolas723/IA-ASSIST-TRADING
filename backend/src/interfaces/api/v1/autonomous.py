@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from src.application.services.autonomous_engine import (
     AutonomousBotConfig,
@@ -12,7 +13,13 @@ from src.application.services.autonomous_engine import (
     AutonomousEngine,
     AutonomousLogEntry,
 )
-from src.interfaces.api.v1.deps import get_autonomous_engine
+from src.infrastructure.persistence.repositories.engine_log_repository import (
+    SqlEngineLogRepository,
+)
+from src.interfaces.api.v1.deps import get_autonomous_engine, get_engine_log_repository
+from src.shared.logging.setup import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -61,8 +68,27 @@ async def emergency_kill_switch(
 @router.get("/logs", response_model=list[AutonomousLogEntry])
 async def get_autonomous_logs(
     engine: Annotated[AutonomousEngine, Depends(get_autonomous_engine)],
+    repository: Annotated[SqlEngineLogRepository, Depends(get_engine_log_repository)],
+    limit: int = Query(default=50, ge=1, le=500),
+    before: datetime | None = Query(default=None, description="Page back from this time"),
 ) -> list[AutonomousLogEntry]:
+    """Engine log, newest first.
+
+    The in-memory list holds the latest entries (including those not yet
+    flushed); the database holds the whole session history, so a past signal
+    can still be explained hours later.
     """
-    Retrieve real-time event & decision logs from the autonomous bot.
-    """
-    return engine.get_status().logs
+    if before is not None and before.tzinfo is None:
+        before = before.replace(tzinfo=UTC)
+    entries: dict[str, AutonomousLogEntry] = {}
+    try:
+        for row in await repository.list_recent(limit=limit, before=before):
+            entry = AutonomousLogEntry.model_validate(row)
+            entries[entry.id] = entry
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("engine_logs_db_unavailable", error=str(exc))
+    for entry in engine.recent_logs():
+        if before is None or entry.timestamp < before:
+            entries[entry.id] = entry
+    ordered = sorted(entries.values(), key=lambda entry: entry.timestamp, reverse=True)
+    return ordered[:limit]

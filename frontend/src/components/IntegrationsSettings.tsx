@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import toast from 'react-hot-toast';
-import type { IntegrationsData, ProviderId } from '../hooks/useIntegrations';
+import type { ChainEntry, IntegrationsData, ModelOption, ProviderId, ProviderView } from '../hooks/useIntegrations';
 import type { PollingState } from '../hooks/usePolling';
 import { useI18n } from '../i18n/core';
-import { apiSend, errorMessage } from '../lib/api';
+import { apiGet, apiSend, errorMessage } from '../lib/api';
 import { Card, Disclosure, Notice, Pill, Skeleton } from './ui';
 
 interface ProviderDraft {
@@ -52,9 +52,7 @@ export function LlmSettings({ integrations }: { integrations: PollingState<Integ
 function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: IntegrationsData) => void }) {
   const { t } = useI18n();
   const [drafts, setDrafts] = useState(() => draftsFrom(data));
-  const [primary, setPrimary] = useState<ProviderId>(data.llm.primary_provider);
-  const [fallbacks, setFallbacks] = useState<ProviderId[]>(data.llm.fallback_providers);
-  const [fallbackEnabled, setFallbackEnabled] = useState(data.llm.fallback_enabled);
+  const [chain, setChain] = useState<ChainEntry[]>(data.llm.model_chain);
   const [tests, setTests] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -77,9 +75,7 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
             enabled: draft.enabled,
           };
         }),
-        primary_provider: primary,
-        fallback_providers: fallbacks.filter((item) => item !== primary),
-        fallback_enabled: fallbackEnabled,
+        model_chain: chain,
       });
       onSaved(snapshot);
       toast.success(t('llm.toast.saved'));
@@ -104,7 +100,8 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
     }
   };
 
-  const configured = providers.filter((provider) => provider.configured);
+  const configuredIds = new Set(providers.filter((provider) => provider.configured).map((p) => p.provider));
+  const inUse = chain.filter((entry) => entry.enabled && configuredIds.has(entry.provider)).length;
 
   return (
     <div className="stack-lg">
@@ -112,45 +109,18 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
         title={t('llm.chain.title')}
         subtitle={t('llm.chain.subtitle')}
         actions={
-          <Pill tone={configured.length ? 'solid' : 'default'}>
-            {configured.length ? t('llm.chain.active', { count: configured.length }) : t('llm.chain.none')}
+          <Pill tone={inUse ? 'solid' : 'default'}>
+            {inUse ? t('llm.chain.active', { count: inUse }) : t('llm.chain.none')}
           </Pill>
         }
       >
-        <div className="form-grid">
-          <label className="field">
-            <span className="field-label">{t('llm.primary')}</span>
-            <select className="select" value={primary} onChange={(event) => setPrimary(event.target.value as ProviderId)}>
-              {providers.map((provider) => (
-                <option key={provider.provider} value={provider.provider}>
-                  {provider.label}
-                  {provider.configured ? '' : ` (${t('llm.noKey')})`}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="field">
-            <span className="field-label">{t('llm.fallback')}</span>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={fallbackEnabled}
-                onChange={(event) => setFallbackEnabled(event.target.checked)}
-              />
-              <span>{t('llm.fallback.use')}</span>
-            </label>
-          </div>
-        </div>
-        <p className="muted xsmall" style={{ marginTop: 12 }}>
-          {t('llm.note')}
-        </p>
+        <ModelChainEditor providers={providers} chain={chain} onChange={setChain} />
       </Card>
 
       <div className="cols">
         {providers.map((provider) => {
           const draft = drafts[provider.provider];
           const result = tests[provider.provider];
-          const isFallback = fallbacks.includes(provider.provider);
           return (
             <Card
               key={provider.provider}
@@ -214,22 +184,6 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
                 )}
                 <div className="row-between">
                   <div className="row">
-                    {fallbackEnabled && provider.provider !== primary && (
-                      <label className="check small">
-                        <input
-                          type="checkbox"
-                          checked={isFallback}
-                          onChange={(event) =>
-                            setFallbacks((current) =>
-                              event.target.checked
-                                ? [...current.filter((item) => item !== provider.provider), provider.provider]
-                                : current.filter((item) => item !== provider.provider),
-                            )
-                          }
-                        />
-                        <span>{t('llm.fallback.short')}</span>
-                      </label>
-                    )}
                     {provider.requires_key && provider.masked_key && (
                       <label className="check small">
                         <input
@@ -264,6 +218,196 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
         </button>
         <span className="muted xsmall">{t('llm.encryptedNote')}</span>
       </div>
+    </div>
+  );
+}
+
+/** Providers whose live catalogue the backend can list. */
+const CATALOG_PROVIDERS = new Set<ProviderId>(['openrouter', 'groq', 'deepseek', 'openai']);
+
+function ModelChainEditor({
+  providers,
+  chain,
+  onChange,
+}: {
+  providers: ProviderView[];
+  chain: ChainEntry[];
+  onChange: (next: ChainEntry[]) => void;
+}) {
+  const { t } = useI18n();
+  const byId = new Map(providers.map((provider) => [provider.provider, provider]));
+  const firstConfigured = providers.find((provider) => provider.configured)?.provider ?? providers[0]?.provider;
+  const [provider, setProvider] = useState<ProviderId>(firstConfigured ?? 'groq');
+  const [model, setModel] = useState('');
+  const [catalog, setCatalog] = useState<Partial<Record<ProviderId, ModelOption[]>>>({});
+  const [loading, setLoading] = useState(false);
+  const [freeOnly, setFreeOnly] = useState(true);
+
+  const move = (index: number, delta: number) => {
+    const target = index + delta;
+    if (target < 0 || target >= chain.length) return;
+    const next = [...chain];
+    [next[index], next[target]] = [next[target], next[index]];
+    onChange(next);
+  };
+  const update = (index: number, patch: Partial<ChainEntry>) =>
+    onChange(chain.map((entry, position) => (position === index ? { ...entry, ...patch } : entry)));
+  const remove = (index: number) => onChange(chain.filter((_, position) => position !== index));
+  const add = () => {
+    const entry: ChainEntry = { provider, model: model.trim(), enabled: true };
+    if (!chain.some((item) => item.provider === entry.provider && item.model === entry.model)) {
+      onChange([...chain, entry]);
+    }
+    setModel('');
+  };
+  const load = async () => {
+    setLoading(true);
+    try {
+      const options = await apiGet<ModelOption[]>(`/api/v1/settings/llm/models/${provider}`);
+      setCatalog((current) => ({ ...current, [provider]: options }));
+    } catch (error) {
+      toast.error(t('llm.order.loadFailed', { detail: errorMessage(error) }));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loaded = catalog[provider];
+  const options = (loaded ?? []).filter((option) => !freeOnly || option.free);
+  const listId = `models-${provider}`;
+
+  return (
+    <div className="stack">
+      {chain.length === 0 ? (
+        <Notice tone="warn">{t('llm.order.empty')}</Notice>
+      ) : (
+        <ol className="chain-list">
+          {chain.map((entry, index) => {
+            const view = byId.get(entry.provider);
+            const usable = view?.configured ?? false;
+            return (
+              <li key={`${entry.provider}:${entry.model}`} className={entry.enabled && usable ? '' : 'is-off'}>
+                <span className="chain-pos num">{index + 1}</span>
+                <div className="chain-body">
+                  <strong>{view?.label ?? entry.provider}</strong>
+                  <span className="mono xsmall">
+                    {entry.model || t('llm.order.default', { model: view?.model || '—' })}
+                  </span>
+                </div>
+                {!usable && <Pill>{t('llm.order.noKey')}</Pill>}
+                <label className="check small">
+                  <input
+                    type="checkbox"
+                    checked={entry.enabled}
+                    onChange={(event) => update(index, { enabled: event.target.checked })}
+                  />
+                  <span>{t('llm.order.enabled')}</span>
+                </label>
+                <div className="row chain-actions">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost"
+                    aria-label={t('llm.order.up')}
+                    title={t('llm.order.up')}
+                    disabled={index === 0}
+                    onClick={() => move(index, -1)}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost"
+                    aria-label={t('llm.order.down')}
+                    title={t('llm.order.down')}
+                    disabled={index === chain.length - 1}
+                    onClick={() => move(index, 1)}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost"
+                    aria-label={t('llm.order.remove')}
+                    title={t('llm.order.remove')}
+                    onClick={() => remove(index)}
+                  >
+                    ✕
+                  </button>
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+
+      <Disclosure summary={t('llm.order.addTitle')}>
+        <div className="stack">
+          <div className="form-grid">
+            <label className="field">
+              <span className="field-label">{t('llm.order.provider')}</span>
+              <select
+                className="select"
+                value={provider}
+                onChange={(event) => {
+                  setProvider(event.target.value as ProviderId);
+                  setModel('');
+                }}
+              >
+                {providers.map((item) => (
+                  <option key={item.provider} value={item.provider}>
+                    {item.label}
+                    {item.configured ? '' : ` (${t('llm.noKey')})`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span className="field-label">{t('llm.order.model')}</span>
+              <input
+                className="input mono"
+                list={listId}
+                placeholder={t('llm.order.modelPlaceholder')}
+                value={model}
+                onChange={(event) => setModel(event.target.value)}
+              />
+              <datalist id={listId}>
+                {options.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.free ? `${option.name} · ${t('llm.order.free')}` : option.name}
+                  </option>
+                ))}
+              </datalist>
+            </label>
+          </div>
+          <div className="row-between">
+            <div className="row">
+              {CATALOG_PROVIDERS.has(provider) && (
+                <button type="button" className="btn btn-sm" disabled={loading} onClick={() => void load()}>
+                  {loading ? t('llm.order.loading') : t('llm.order.loadModels')}
+                </button>
+              )}
+              {loaded && (
+                <>
+                  <label className="check small">
+                    <input type="checkbox" checked={freeOnly} onChange={(event) => setFreeOnly(event.target.checked)} />
+                    <span>{t('llm.order.freeOnly')}</span>
+                  </label>
+                  <span className="muted xsmall">
+                    {t('llm.order.loaded', {
+                      free: loaded.filter((option) => option.free).length,
+                      total: loaded.length,
+                    })}
+                  </span>
+                </>
+              )}
+            </div>
+            <button type="button" className="btn btn-sm btn-primary" onClick={add}>
+              {t('llm.order.add')}
+            </button>
+          </div>
+          <p className="muted xsmall">{t('llm.order.tip')}</p>
+        </div>
+      </Disclosure>
     </div>
   );
 }

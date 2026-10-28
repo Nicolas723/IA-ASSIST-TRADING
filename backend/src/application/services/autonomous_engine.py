@@ -9,6 +9,7 @@ import contextlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from decimal import ROUND_DOWN, Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -36,6 +37,7 @@ from src.domain.trading.entities import (
 )
 from src.infrastructure.exchange.paper import PlaceOrderRequest
 from src.shared.config.settings import (
+    MAX_SCAN_SYMBOLS,
     LLMScanModePreset,
     get_settings,
     llm_scan_mode_preset,
@@ -55,9 +57,18 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+
+def _price(value: float) -> float:
+    """Keep 8 significant digits so sub-cent prices survive rounding."""
+    return float(f"{value:.8g}")
+
+
 # Injected by DI: persists an executed order to the durable journal.
 JournalCallback = Callable[["Order", "TradingService"], Awaitable[bool]]
 LiveJournalCallback = Callable[["Order"], Awaitable[bool]]
+# Injected by DI: stores log entries durably (the in-memory list rotates).
+LogSink = Callable[[list["AutonomousLogEntry"]], Awaitable[None]]
+_MAX_UNSAVED_LOGS = 1000
 
 
 @dataclass(slots=True)
@@ -178,7 +189,9 @@ class AutonomousEngine:
         journal_real: LiveJournalCallback | None = None,
         alert_service: AlertService | None = None,
         cycle_service_factory: CycleServiceFactory | None = None,
+        log_sink: LogSink | None = None,
     ) -> None:
+        self.log_sink = log_sink
         self.agent_service = agent_service
         self.trading_service = trading_service
         self.market_service = market_service
@@ -206,7 +219,9 @@ class AutonomousEngine:
         # Read by the watchdog: a loop that keeps failing is as bad as a dead one.
         self.consecutive_errors = 0
         self._daily_limit_day: date | None = None
+        self._universe_from_settings = False
         self._logs: list[AutonomousLogEntry] = []
+        self._unsaved_logs: list[AutonomousLogEntry] = []
         self._task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
@@ -243,7 +258,7 @@ class AutonomousEngine:
                 universe.append(symbol)
         if self.config.symbol not in universe:
             universe.insert(0, self.config.symbol)
-        return universe[:10]
+        return universe[:MAX_SCAN_SYMBOLS]
 
     def _allowed_symbols(self) -> set[str]:
         """Symbols eligible for entry analysis in the current execution mode."""
@@ -532,6 +547,28 @@ class AutonomousEngine:
         self._logs.insert(0, entry)
         if len(self._logs) > 200:
             self._logs = self._logs[:200]
+        if self.log_sink is not None:
+            self._unsaved_logs.append(entry)
+            del self._unsaved_logs[:-_MAX_UNSAVED_LOGS]
+
+    def recent_logs(self) -> list[AutonomousLogEntry]:
+        """In-memory entries, newest first (up to 200, some not yet stored)."""
+        return list(self._logs)
+
+    async def flush_logs(self) -> None:
+        """Hand pending entries to the durable store (best-effort).
+
+        A failed write keeps the entries for the next attempt, bounded so a
+        long database outage cannot grow memory without limit.
+        """
+        if self.log_sink is None or not self._unsaved_logs:
+            return
+        batch, self._unsaved_logs = self._unsaved_logs, []
+        try:
+            await self.log_sink(batch)
+        except Exception as exc:
+            logger.warning("engine_logs_persist_failed", error=str(exc), count=len(batch))
+            self._unsaved_logs = (batch + self._unsaved_logs)[-_MAX_UNSAVED_LOGS:]
 
     def get_status(self) -> AutonomousBotStatus:
         uptime = 0.0
@@ -575,6 +612,9 @@ class AutonomousEngine:
         # endpoint shows exactly what the daemon will scan. An empty list falls
         # back to the configured shadow-scan universe; the primary symbol is
         # always included.
+        # A session without an explicit list follows the markets chosen in the
+        # settings, so editing them takes effect on the next cycle.
+        self._universe_from_settings = not self.config.scan_symbols
         self.config.scan_symbols = self._resolve_scan_universe(self.config.scan_symbols)
 
         mode = self._mode()
@@ -674,6 +714,7 @@ class AutonomousEngine:
             level="WARNING",
             message="🛑 Autonomous Trading Daemon stopped.",
         )
+        await self.flush_logs()
         return self.get_status()
 
     async def _persist_execution(
@@ -764,6 +805,7 @@ class AutonomousEngine:
             level="ERROR",
             message=f"🚨 EMERGENCY KILL-SWITCH ACTIVATED: Daemon halted and {closed_count} open positions closed.",
         )
+        await self.flush_logs()
         return self.get_status()
 
     async def _run_loop(self) -> None:
@@ -786,6 +828,7 @@ class AutonomousEngine:
                     level="ERROR",
                     message=f"Cycle evaluation error: {e!s}",
                 )
+            await self.flush_logs()
 
             try:
                 await asyncio.sleep(self.config.interval_seconds)
@@ -815,6 +858,8 @@ class AutonomousEngine:
         agent_service: AgentService | None,
     ) -> None:
         primary_symbol = self.config.symbol
+        if self._universe_from_settings:
+            self.config.scan_symbols = self._resolve_scan_universe([])
         universe = self.config.scan_symbols or [primary_symbol]
 
         if not market_service:
@@ -1374,13 +1419,15 @@ class AutonomousEngine:
             # per-asset allocation; the Risk Guard in TradingService remains
             # the independent final preflight.
             balance = float(portfolio.total_balance)
-            # Calculate SL and TP prices
+            # Calculate SL and TP prices. Rounding to cents would push a $0.20
+            # market's stop 4 % away and a $0.000006 one's to zero; the exchange
+            # adapter applies the real tick size before any OCO is placed.
             if order_side == OrderSide.BUY:
-                stop_loss = round(current_price * (1 - self.config.stop_loss_pct / 100.0), 2)
-                take_profit = round(current_price * (1 + self.config.take_profit_pct / 100.0), 2)
+                stop_loss = _price(current_price * (1 - self.config.stop_loss_pct / 100.0))
+                take_profit = _price(current_price * (1 + self.config.take_profit_pct / 100.0))
             else:
-                stop_loss = round(current_price * (1 + self.config.stop_loss_pct / 100.0), 2)
-                take_profit = round(current_price * (1 - self.config.take_profit_pct / 100.0), 2)
+                stop_loss = _price(current_price * (1 + self.config.stop_loss_pct / 100.0))
+                take_profit = _price(current_price * (1 - self.config.take_profit_pct / 100.0))
 
             sizing_request = PositionSizeRequest(
                 symbol=symbol,
@@ -1430,7 +1477,14 @@ class AutonomousEngine:
             if mode == ExecutionMode.REAL:
                 max_notional = float(get_settings().real_trading_max_notional)
                 if current_price > 0 and quantity * current_price > max_notional:
-                    capped_quantity = round(max_notional / current_price, 6)
+                    # Round down, in the same Decimal arithmetic the live service
+                    # checks with: rounding to nearest left orders a fraction of a
+                    # cent above the cap, and every one of them was rejected.
+                    capped_quantity = float(
+                        (Decimal(str(max_notional)) / Decimal(str(current_price))).quantize(
+                            Decimal("0.000001"), rounding=ROUND_DOWN
+                        )
+                    )
                     self.add_log(
                         key="decision.notional_capped",
                         params={

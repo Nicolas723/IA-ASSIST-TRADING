@@ -43,7 +43,13 @@ async def get_decisions(
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("audit_decisions_db_unavailable", error=str(exc))
 
-    return agent_service.get_audit_history(limit=limit)
+    # The fallback must honour the symbol filter too: otherwise a market with no
+    # stored decisions gets every other market's recent decisions.
+    history = agent_service.get_audit_history(limit=100)
+    if symbol is not None:
+        wanted = symbol.replace("-", "/").replace("_", "/").upper()
+        history = [decision for decision in history if decision.symbol == wanted]
+    return history[:limit]
 
 
 @router.get("/events", summary="Get system audit events")

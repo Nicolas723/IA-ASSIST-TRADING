@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated
 
 from fastapi import Depends
@@ -18,6 +19,7 @@ from src.application.services.alert_service import AlertService
 from src.application.services.autonomous_engine import (
     AutonomousCycleServices,
     AutonomousEngine,
+    AutonomousLogEntry,
 )
 from src.application.services.concentration_service import ConcentrationService
 from src.application.services.indicator_service import IndicatorService
@@ -53,6 +55,9 @@ from src.infrastructure.market_data.rest_fetcher import RetryingMarketDataFetche
 from src.infrastructure.persistence.database import get_db, get_db_session
 from src.infrastructure.persistence.repositories.candle_repository import TimescaleCandleRepository
 from src.infrastructure.persistence.repositories.decision_repository import SqlDecisionRepository
+from src.infrastructure.persistence.repositories.engine_log_repository import (
+    SqlEngineLogRepository,
+)
 from src.infrastructure.persistence.repositories.research_repository import SqlResearchRepository
 from src.infrastructure.persistence.repositories.shadow_scan_repository import (
     SqlShadowScanRepository,
@@ -434,6 +439,7 @@ def get_autonomous_engine(
             journal_real=_persist_live_order,
             alert_service=get_alert_service(),
             cycle_service_factory=autonomous_cycle_services,
+            log_sink=persist_engine_logs,
         )
     else:
         _autonomous_engine.trading_service = trading_service
@@ -443,6 +449,25 @@ def get_autonomous_engine(
         _autonomous_engine.journal_real = _persist_live_order
         _autonomous_engine.alert_service = get_alert_service()
     return _autonomous_engine
+
+
+# Engine logs older than this are pruned on each write.
+ENGINE_LOG_RETENTION = timedelta(days=30)
+
+
+async def persist_engine_logs(entries: list[AutonomousLogEntry]) -> None:
+    """Log sink for the engine: one short-lived session per flush."""
+    async with get_db_session() as session:
+        repository = SqlEngineLogRepository(session)
+        await repository.add_many([entry.model_dump() for entry in entries])
+        await repository.prune(datetime.now(tz=UTC) - ENGINE_LOG_RETENTION)
+
+
+def get_engine_log_repository(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> SqlEngineLogRepository:
+    """Durable engine log store bound to the request session."""
+    return SqlEngineLogRepository(session)
 
 
 async def _persist_live_order(order: Order) -> bool:

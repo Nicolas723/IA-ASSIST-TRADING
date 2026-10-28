@@ -15,6 +15,7 @@ from src.application.services.integration_settings_service import (
     HeartbeatSettingsUpdate,
     IntegrationSettingsService,
     IntegrationSettingsView,
+    LLMModelOption,
     LLMSettingsUpdate,
     TelegramSettingsUpdate,
 )
@@ -75,6 +76,22 @@ async def update_llm_settings(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     refresh_llm_gateway()
     return service.snapshot()
+
+
+@router.get(
+    "/llm/models/{provider}",
+    response_model=list[LLMModelOption],
+    summary="List the models a provider offers (free ones first)",
+)
+async def list_llm_models(
+    provider: LLMProvider,
+    service: IntegrationSettingsService = Depends(get_integration_settings_service),
+) -> list[LLMModelOption]:
+    """Read the provider's live catalogue; nothing is sent besides the stored key."""
+    try:
+        return await service.list_models(provider)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post(

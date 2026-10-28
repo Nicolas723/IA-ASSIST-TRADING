@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field, field_validator
 
 from src.shared.config.settings import (
+    MAX_SCAN_SYMBOLS,
     RUNTIME_TRADING_FIELDS,
     ExecutionMode,
     Settings,
@@ -45,8 +46,12 @@ class RuntimeTradingConfig(BaseModel):
     real_trading_allowed_symbols: list[str] = Field(default_factory=list)
     real_trading_oco_enabled: bool = False
     enable_autonomous_real_trading: bool = False
+    # Markets scanned every cycle. Execution still requires the allowlist.
+    shadow_scan_symbols: list[str] = Field(
+        default_factory=list, min_length=1, max_length=MAX_SCAN_SYMBOLS
+    )
 
-    @field_validator("real_trading_allowed_symbols")
+    @field_validator("real_trading_allowed_symbols", "shadow_scan_symbols")
     @classmethod
     def _normalize_symbols(cls, value: list[str]) -> list[str]:
         return _normalize_symbols(value)
@@ -63,6 +68,7 @@ class RuntimeTradingConfig(BaseModel):
             real_trading_allowed_symbols=list(settings.real_trading_allowed_symbols),
             real_trading_oco_enabled=settings.real_trading_oco_enabled,
             enable_autonomous_real_trading=settings.enable_autonomous_real_trading,
+            shadow_scan_symbols=list(settings.shadow_scan_symbols),
         )
 
     @property
@@ -90,9 +96,12 @@ class RuntimeTradingConfigUpdate(BaseModel):
     real_trading_allowed_symbols: list[str] | None = None
     real_trading_oco_enabled: bool | None = None
     enable_autonomous_real_trading: bool | None = None
+    shadow_scan_symbols: list[str] | None = Field(
+        default=None, min_length=1, max_length=MAX_SCAN_SYMBOLS
+    )
     confirm: bool = False
 
-    @field_validator("real_trading_allowed_symbols")
+    @field_validator("real_trading_allowed_symbols", "shadow_scan_symbols")
     @classmethod
     def _normalize_symbols(cls, value: list[str] | None) -> list[str] | None:
         return _normalize_symbols(value) if value is not None else None

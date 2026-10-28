@@ -231,6 +231,18 @@ class BaseLLMAdapter(abc.ABC):
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _Route:
+    """One attempt in the routing chain."""
+
+    provider: LLMProvider
+    model: str = ""
+
+    @property
+    def key(self) -> str:
+        return f"{self.provider.value}:{self.model}" if self.model else self.provider.value
+
+
 class LLMGateway:
     """
     Routes LLM requests to the appropriate provider.
@@ -346,13 +358,13 @@ class LLMGateway:
         self._cycle_tokens_used = 0
         self._cycle_requests_used = 0
 
-    def _active_cooldown(self, provider: LLMProvider) -> _ProviderCooldown | None:
-        """Return the cooldown for a provider, dropping it once it has expired."""
-        cooldown = self._cooldowns.get(provider.value)
+    def _active_cooldown(self, key: str) -> _ProviderCooldown | None:
+        """Return the cooldown for a provider (or provider:model), dropping it once expired."""
+        cooldown = self._cooldowns.get(key)
         if cooldown is None:
             return None
         if cooldown.until <= time.monotonic():
-            self._cooldowns.pop(provider.value, None)
+            self._cooldowns.pop(key, None)
             return None
         return cooldown
 
@@ -572,6 +584,10 @@ class LLMGateway:
         first configured fallback then becomes the effective primary, so status
         endpoints describe what will actually be attempted.
         """
+        chain_entries = [entry for entry in self._settings.llm_model_chain if entry.enabled]
+        if chain_entries:
+            ordered = list(dict.fromkeys(entry.provider for entry in chain_entries))
+            return [provider for provider in ordered if provider in self._adapters]
         requested = self._settings.llm_primary_provider
         chain = [requested]
         if self._settings.llm_fallback_enabled:
@@ -625,11 +641,8 @@ class LLMGateway:
         fallback_providers: list[LLMProvider] | None,
     ) -> LLMResponse:
         primary = provider or self._settings.llm_primary_provider
-        fallbacks = fallback_providers
-        if fallbacks is None and self._settings.llm_fallback_enabled:
-            fallbacks = self._settings.llm_fallback_providers
-        providers_to_try = self._build_provider_list(primary, fallbacks)
-        if not providers_to_try:
+        routes = self._routes(provider, fallback_providers)
+        if not routes:
             if not self._adapters:
                 raise LLMError("No LLM providers are configured.", provider="none")
             cooldowns = self._cooldown_status()
@@ -652,7 +665,8 @@ class LLMGateway:
         last_error: Exception | None = None
         agent_type = str(request.metadata.get("agent_type", "unknown"))
 
-        for index, p in enumerate(providers_to_try):
+        for index, route in enumerate(routes):
+            p = route.provider
             adapter = self._adapters.get(p)
             if adapter is None:
                 logger.warning("llm_provider_not_configured", provider=p.value)
@@ -675,8 +689,8 @@ class LLMGateway:
                     self._fallbacks_today += 1
                     logger.warning(
                         "llm_fallback_attempt",
-                        failed_provider=providers_to_try[index - 1].value,
-                        fallback_provider=p.value,
+                        failed_provider=routes[index - 1].key,
+                        fallback_provider=route.key,
                     )
                 logger.debug(
                     "llm_request_start",
@@ -686,13 +700,13 @@ class LLMGateway:
                 )
 
                 provider_request = request
-                # A model id is provider-specific. Fallback adapters use their
-                # own configured default model instead of receiving (for
-                # example) an OpenAI model name.
-                if p != primary and request.model:
+                # A model id is provider-specific. A chain entry pins its own
+                # model; legacy fallbacks use their configured default instead
+                # of receiving (for example) an OpenAI model name.
+                if route.model or (p != primary and request.model):
                     provider_request = LLMRequest(
                         messages=request.messages,
-                        model="",
+                        model=route.model,
                         max_tokens=request.max_tokens,
                         temperature=request.temperature,
                         system_prompt=request.system_prompt,
@@ -779,8 +793,10 @@ class LLMGateway:
                 logger.warning("llm_rate_limit", provider=p.value, error=str(exc))
                 self._record_failure(provider=p.value, agent_type=agent_type)
                 llm_errors_total.labels(provider=p.value, error_type="rate_limit").inc()
+                # Free tiers limit each model separately: park only this model
+                # so the next entry of the same provider can still answer.
                 self._start_cooldown(
-                    p.value,
+                    route.key,
                     exc.retry_after_seconds or DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS,
                     "rate_limit",
                 )
@@ -829,6 +845,47 @@ class LLMGateway:
         msg = f"All LLM providers failed. Last error: {last_error}"
         raise LLMError(msg, provider="all")
 
+    def _routes(
+        self,
+        provider: LLMProvider | None,
+        fallback_providers: list[LLMProvider] | None,
+    ) -> list[_Route]:
+        """Ordered (provider, model) attempts for one request.
+
+        The UI-managed model chain wins unless the caller pins a provider.
+        Entries are skipped while their provider (quota/auth) or the model
+        itself (rate limit) is cooling down.
+        """
+        chain = [entry for entry in self._settings.llm_model_chain if entry.enabled]
+        if provider is None and fallback_providers is None and chain:
+            routes: list[_Route] = []
+            for entry in chain:
+                route = _Route(entry.provider, entry.model.strip())
+                if route in routes:
+                    continue
+                if entry.provider not in self._adapters:
+                    logger.info("llm_chain_entry_not_configured", route=route.key)
+                    continue
+                cooldown = self._active_cooldown(entry.provider.value) or self._active_cooldown(
+                    route.key
+                )
+                if cooldown is not None:
+                    logger.info(
+                        "llm_provider_cooling_down",
+                        provider=route.key,
+                        reason=cooldown.reason,
+                        seconds_remaining=int(cooldown.until - time.monotonic()) + 1,
+                    )
+                    continue
+                routes.append(route)
+            return routes
+
+        primary = provider or self._settings.llm_primary_provider
+        fallbacks = fallback_providers
+        if fallbacks is None and self._settings.llm_fallback_enabled:
+            fallbacks = self._settings.llm_fallback_providers
+        return [_Route(item, "") for item in self._build_provider_list(primary, fallbacks)]
+
     def _build_provider_list(
         self,
         primary: LLMProvider | None,
@@ -857,7 +914,7 @@ class LLMGateway:
             if provider not in self._adapters:
                 logger.warning("llm_provider_not_configured", provider=provider.value)
                 continue
-            cooldown = self._active_cooldown(provider)
+            cooldown = self._active_cooldown(provider.value)
             if cooldown is not None:
                 logger.info(
                     "llm_provider_cooling_down",

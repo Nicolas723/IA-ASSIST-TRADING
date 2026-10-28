@@ -15,12 +15,27 @@ export interface ProviderView {
   enabled: boolean;
 }
 
+export interface ChainEntry {
+  provider: ProviderId;
+  /** Empty means the provider's default model. */
+  model: string;
+  enabled: boolean;
+}
+
+export interface ModelOption {
+  id: string;
+  name: string;
+  free: boolean;
+  context_length: number | null;
+}
+
 export interface IntegrationsData {
   llm: {
     providers: ProviderView[];
     primary_provider: ProviderId;
     fallback_providers: ProviderId[];
     fallback_enabled: boolean;
+    model_chain: ChainEntry[];
     configured_providers: string[];
     scan_mode: string;
     note: string;

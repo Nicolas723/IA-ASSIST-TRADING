@@ -71,3 +71,32 @@ class DecisionLogModel(Base):
         Index("ix_decision_logs_symbol_created", "symbol", "created_at"),
         Index("ix_decision_logs_signal_created", "final_signal", "created_at"),
     )
+
+
+class EngineLogModel(Base):
+    """One autonomous-engine log entry, kept so a session can be audited later.
+
+    The engine keeps only its latest entries in memory; this table is what
+    explains, hours later, why a signal did or did not become an order.
+    """
+
+    __tablename__ = "engine_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    entry_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    level: Mapped[str] = mapped_column(String(16), nullable=False)
+    cycle: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False)
+    key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    params: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    signal: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    confidence_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        Index("ix_engine_logs_timestamp", "timestamp"),
+        Index("ix_engine_logs_key_timestamp", "key", "timestamp"),
+    )

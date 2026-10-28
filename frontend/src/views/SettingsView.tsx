@@ -3,6 +3,7 @@ import toast from 'react-hot-toast';
 import type { Page } from '../App';
 import AccountBalanceCard from '../components/AccountBalanceCard';
 import { AlertSettings, LlmSettings } from '../components/IntegrationsSettings';
+import { MarketsSettings } from '../components/MarketsSettings';
 import { Card, Notice, PageHead, Pill, Segmented, Skeleton, Stat, SubNav } from '../components/ui';
 import { useIntegrations } from '../hooks/useIntegrations';
 import { usePolling, type PollingState } from '../hooks/usePolling';
@@ -18,10 +19,11 @@ import type {
   TradingEnvironment,
 } from '../types';
 
-type Section = 'cuenta' | 'ia' | 'alertas' | 'proteccion';
+type Section = 'cuenta' | 'mercados' | 'ia' | 'alertas' | 'proteccion';
 
 const SECTIONS: ReadonlyArray<{ id: Section; label: MessageKey }> = [
   { id: 'cuenta', label: 'settings.nav.account' },
+  { id: 'mercados', label: 'settings.nav.markets' },
   { id: 'ia', label: 'settings.nav.ai' },
   { id: 'alertas', label: 'settings.nav.alerts' },
   { id: 'proteccion', label: 'settings.nav.protection' },
@@ -56,6 +58,7 @@ export function SettingsView({
           <ExchangeKeys runtime={runtime} />
         </div>
       )}
+      {active === 'mercados' && <MarketsSettings runtime={runtime} />}
       {active === 'ia' && <LlmSettings integrations={integrations} />}
       {active === 'alertas' && (
         <div className="stack-lg">
@@ -262,7 +265,6 @@ function RuntimeLimitsForm({
 }) {
   const { t } = useI18n();
   const [maxNotional, setMaxNotional] = useState(String(config.real_trading_max_notional));
-  const [symbols, setSymbols] = useState(config.real_trading_allowed_symbols.join(', '));
   const [autonomousReal, setAutonomousReal] = useState(config.enable_autonomous_real_trading);
   const [oco, setOco] = useState(config.real_trading_oco_enabled);
   const [busy, setBusy] = useState(false);
@@ -331,16 +333,6 @@ function RuntimeLimitsForm({
             />
             <span className="field-hint">{t('limits.maxOrder.hint')}</span>
           </label>
-          <label className="field">
-            <span className="field-label">{t('limits.markets')}</span>
-            <input
-              className="input"
-              placeholder="BTC/USDT, ETH/USDT"
-              value={symbols}
-              onChange={(event) => setSymbols(event.target.value)}
-            />
-            <span className="field-hint">{t('limits.markets.hint')}</span>
-          </label>
         </div>
 
         <div className="stack" style={{ gap: 4 }}>
@@ -380,10 +372,6 @@ function RuntimeLimitsForm({
             onClick={() =>
               void save({
                 real_trading_max_notional: Number(maxNotional),
-                real_trading_allowed_symbols: symbols
-                  .split(',')
-                  .map((item) => item.trim().toUpperCase())
-                  .filter(Boolean),
                 enable_autonomous_real_trading: autonomousReal,
                 real_trading_oco_enabled: oco,
                 require_manual_confirmation: true,

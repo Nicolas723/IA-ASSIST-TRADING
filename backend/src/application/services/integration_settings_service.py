@@ -18,11 +18,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 from pydantic import BaseModel, Field
 
 from src.infrastructure.llm.factory import create_llm_gateway
 from src.infrastructure.security.secure_settings_store import SecureSettingsStore
 from src.shared.config.settings import (
+    LLMChainEntry,
     LLMProvider,
     Settings,
     get_settings,
@@ -86,6 +88,19 @@ PROVIDER_META: dict[LLMProvider, dict[str, Any]] = {
 }
 
 
+_NON_CHAT_MODEL_TAGS = (
+    "whisper",
+    "tts",
+    "orpheus",
+    "playai",
+    "guard",
+    "safety",
+    "lyria",
+    "embed",
+    "image",
+)
+
+
 def _mask(secret: str) -> str:
     value = (secret or "").strip()
     if not value:
@@ -112,6 +127,9 @@ class LLMSettingsView(BaseModel):
     primary_provider: LLMProvider
     fallback_providers: list[LLMProvider]
     fallback_enabled: bool
+    # Effective routing order. Derived from primary/fallbacks until the user
+    # saves an explicit chain, so the UI always starts from what runs today.
+    model_chain: list[LLMChainEntry] = Field(default_factory=list)
     configured_providers: list[str]
     scan_mode: str
     note: str = (
@@ -158,6 +176,17 @@ class LLMSettingsUpdate(BaseModel):
     primary_provider: LLMProvider | None = None
     fallback_providers: list[LLMProvider] | None = None
     fallback_enabled: bool | None = None
+    model_chain: list[LLMChainEntry] | None = Field(
+        default=None,
+        description="Ordered provider+model attempts. An empty list returns to primary/fallbacks.",
+    )
+
+
+class LLMModelOption(BaseModel):
+    id: str
+    name: str
+    free: bool
+    context_length: int | None = None
 
 
 class TelegramSettingsUpdate(BaseModel):
@@ -227,9 +256,18 @@ class IntegrationSettingsService:
             primary_provider=self.settings.llm_primary_provider,
             fallback_providers=list(self.settings.llm_fallback_providers),
             fallback_enabled=self.settings.llm_fallback_enabled,
+            model_chain=self._effective_chain(),
             configured_providers=configured,
             scan_mode=self.settings.llm_scan_mode.value,
         )
+
+    def _effective_chain(self) -> list[LLMChainEntry]:
+        if self.settings.llm_model_chain:
+            return list(self.settings.llm_model_chain)
+        order = [self.settings.llm_primary_provider]
+        if self.settings.llm_fallback_enabled:
+            order += [p for p in self.settings.llm_fallback_providers if p not in order]
+        return [LLMChainEntry(provider=provider) for provider in order]
 
     def _telegram_view(self) -> TelegramSettingsView:
         token = self.settings.telegram_bot_token or ""
@@ -272,14 +310,20 @@ class IntegrationSettingsService:
             meta = PROVIDER_META[update.provider]
             block = getattr(self.settings, meta["attr"])
             current = dict(providers.get(update.provider.value) or {})
-            current.setdefault("api_key", str(getattr(block, "api_key", "") or ""))
+            if meta["requires_key"]:
+                current.setdefault("api_key", str(getattr(block, "api_key", "") or ""))
+            else:
+                # Keyless providers (Ollama) have no api_key field to assign.
+                current.pop("api_key", None)
             current.setdefault("model", str(getattr(block, "default_model", "") or ""))
             if meta["supports_base_url"]:
                 current.setdefault("base_url", str(getattr(block, "base_url", "") or ""))
             if hasattr(block, "enabled"):
                 current.setdefault("enabled", bool(getattr(block, "enabled", True)))
 
-            if update.clear_key:
+            if not meta["requires_key"]:
+                pass
+            elif update.clear_key:
                 current["api_key"] = ""
             elif update.api_key is not None and update.api_key.strip():
                 current["api_key"] = update.api_key.strip()
@@ -305,6 +349,12 @@ class IntegrationSettingsService:
         ]
         if payload.fallback_enabled is not None:
             stored["fallback_enabled"] = bool(payload.fallback_enabled)
+        if payload.model_chain is not None:
+            entries: dict[str, LLMChainEntry] = {}
+            for entry in payload.model_chain:
+                cleaned = entry.model_copy(update={"model": entry.model.strip()})
+                entries.setdefault(cleaned.key, cleaned)
+            stored["model_chain"] = [entry.model_dump(mode="json") for entry in entries.values()]
         stored["providers"] = providers
 
         self.store.set_section("llm", stored)
@@ -376,7 +426,10 @@ class IntegrationSettingsService:
                     continue
                 block = getattr(self.settings, meta["attr"])
                 api_key = values.get("api_key")
-                if isinstance(api_key, str):
+                # Older saves stored an empty key for Ollama, which has no such
+                # field; assigning it aborted the whole apply (and every later
+                # provider and the routing order with it).
+                if isinstance(api_key, str) and "api_key" in type(block).model_fields:
                     block.api_key = api_key.strip()
                 model = values.get("model")
                 if isinstance(model, str) and model.strip():
@@ -404,6 +457,14 @@ class IntegrationSettingsService:
         fallback_enabled = stored.get("fallback_enabled")
         if fallback_enabled is not None:
             self.settings.llm_fallback_enabled = bool(fallback_enabled)
+        chain = stored.get("model_chain")
+        if isinstance(chain, list):
+            try:
+                self.settings.llm_model_chain = [
+                    LLMChainEntry.model_validate(item) for item in chain
+                ]
+            except ValueError as exc:
+                raise ValidationError(f"Cadena de modelos inválida: {exc}") from exc
 
     def _apply_telegram(self, stored: dict[str, Any]) -> None:
         token = stored.get("bot_token")
@@ -440,6 +501,70 @@ class IntegrationSettingsService:
         if provider is not None:
             health = {provider.value: health.get(provider.value, False)}
         return {"mode": "llm_with_fallback", "providers": health, "cooldowns": []}
+
+    async def list_models(
+        self,
+        provider: LLMProvider,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> list[LLMModelOption]:
+        """Models the provider offers right now (free ones first).
+
+        Free model ids change often, so they are read live instead of being
+        hard-coded. OpenRouter's catalogue is public; OpenAI-compatible
+        providers (Groq, DeepSeek, OpenAI) need the stored key.
+        """
+        meta = PROVIDER_META[provider]
+        block = getattr(self.settings, meta["attr"])
+        if provider == LLMProvider.OPENROUTER:
+            base = str(getattr(block, "base_url", "") or meta["default_base_url"])
+            headers: dict[str, str] = {}
+        elif provider in {LLMProvider.GROQ, LLMProvider.DEEPSEEK, LLMProvider.OPENAI}:
+            key = str(getattr(block, "api_key", "") or "").strip()
+            if not key:
+                raise ValidationError(f"Guarda primero la clave de {meta['label']}.")
+            base = str(getattr(block, "base_url", "") or meta["default_base_url"] or "")
+            base = base or "https://api.openai.com/v1"
+            headers = {"Authorization": f"Bearer {key}"}
+        else:
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=10.0, transport=transport) as client:
+                response = await client.get(f"{base.rstrip('/')}/models", headers=headers)
+                response.raise_for_status()
+                rows = response.json().get("data", [])
+        except (httpx.HTTPError, ValueError) as exc:
+            raise ValidationError(f"No se pudo leer la lista de modelos: {exc}") from exc
+
+        options: list[LLMModelOption] = []
+        for row in rows:
+            model_id = str(row.get("id") or "")
+            if not model_id or row.get("active") is False:
+                continue
+            pricing = row.get("pricing") or {}
+            if provider == LLMProvider.OPENROUTER:
+                free = model_id.endswith(":free") or (
+                    str(pricing.get("prompt")) == "0" and str(pricing.get("completion")) == "0"
+                )
+            else:
+                # Groq's own API is free-tier for every model; others are paid.
+                free = provider == LLMProvider.GROQ
+            # Audio, music and moderation models cannot act as analysts.
+            outputs = (row.get("architecture") or {}).get("output_modalities")
+            if isinstance(outputs, list) and "text" not in outputs:
+                continue
+            if any(tag in model_id for tag in _NON_CHAT_MODEL_TAGS):
+                continue
+            options.append(
+                LLMModelOption(
+                    id=model_id,
+                    name=str(row.get("name") or model_id),
+                    free=free,
+                    context_length=row.get("context_length") or row.get("context_window"),
+                )
+            )
+        options.sort(key=lambda option: (not option.free, option.id))
+        return options
 
     async def test_heartbeat(self) -> bool:
         from src.application.services.heartbeat_service import HeartbeatService

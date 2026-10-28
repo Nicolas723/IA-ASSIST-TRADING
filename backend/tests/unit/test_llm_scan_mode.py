@@ -120,7 +120,26 @@ def test_llm_loader_ignores_trading_keys_and_vice_versa(tmp_path: Path) -> None:
 
     loaded = load_runtime_llm_overrides(path)
 
-    assert loaded == {"llm_scan_mode": "normal", "llm_cycle_request_budget": 24}
+    assert "execution_mode" not in loaded
+    assert loaded["llm_scan_mode"] == "normal"
+    assert loaded["llm_cycle_request_budget"] == 24
+
+
+def test_stored_mode_uses_the_current_preset_budgets(tmp_path: Path) -> None:
+    # A savings mode saved when the preset capped the day at 18 requests must
+    # pick up the retuned preset instead of staying pinned to the old cap.
+    path = tmp_path / "llm.json"
+    path.write_text(
+        json.dumps({"llm_scan_mode": "savings", "llm_daily_request_budget": 18}),
+        encoding="utf-8",
+    )
+
+    loaded = load_runtime_llm_overrides(path)
+
+    preset = llm_scan_mode_preset(LLMScanMode.SAVINGS)
+    assert loaded["llm_daily_request_budget"] == preset.llm_daily_request_budget
+    # A full day at the default 30-minute interval: 48 analyses x 2 calls.
+    assert preset.llm_daily_request_budget >= 48 * preset.estimated_llm_calls_per_analysis
 
 
 def test_corrupt_llm_config_is_ignored(tmp_path: Path) -> None:
