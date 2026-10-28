@@ -93,7 +93,7 @@ class AutonomousBotConfig(BaseModel):
     # Markets considered by the deterministic pre-scan. The primary `symbol` is
     # always included. An empty list means "use SHADOW_SCAN_SYMBOLS" when the
     # session starts; the engine then analyzes only the best allowed market.
-    scan_symbols: list[str] = Field(default_factory=list, max_length=10)
+    scan_symbols: list[str] = Field(default_factory=list, max_length=MAX_SCAN_SYMBOLS)
     timeframe: str = "1h"
     interval_seconds: int = Field(default=60, ge=2, le=3600)
     # Minimum seconds between full LLM committee runs. Position tracking and

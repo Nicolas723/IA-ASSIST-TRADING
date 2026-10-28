@@ -116,6 +116,9 @@ class LLMProvider(StrEnum):
 # Markets the autonomous engine pre-scans every cycle (cheap, deterministic);
 # only the best ones reach the LLM committee, per the selected scan mode.
 MAX_SCAN_SYMBOLS = 25
+OPENROUTER_FREE_ROUTER = "openrouter/free"
+# Built-in OpenRouter default before the free router; it is a paid model.
+OPENROUTER_LEGACY_DEFAULT = "openai/gpt-4o-mini"
 
 
 class LLMChainEntry(BaseModel):
@@ -318,7 +321,9 @@ class OpenRouterSettings(BaseSettings):
 
     api_key: str = Field(default="")
     base_url: str = Field(default="https://openrouter.ai/api/v1")
-    default_model: str = Field(default="openai/gpt-4o-mini")
+    # OpenRouter's own router over its free models: no credits needed, and
+    # it moves to another free model when one is saturated.
+    default_model: str = Field(default=OPENROUTER_FREE_ROUTER)
 
 
 class DeepSeekSettings(BaseSettings):

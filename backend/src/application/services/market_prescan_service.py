@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from src.application.services.regime_service import classify_regime
 from src.domain.market.entities import Timeframe
+from src.shared.config.settings import MAX_SCAN_SYMBOLS
 
 if TYPE_CHECKING:
     from src.application.services.market_data_service import MarketDataService
@@ -31,7 +32,6 @@ SELECTION_BASIS = (
 # Maximum points the trend label can add or subtract. Keeping it small means
 # recent movement dominates while a confirmed trend breaks near-ties.
 REGIME_WEIGHT_PCT = 0.5
-MAX_SCAN_SYMBOLS = 10
 
 
 def _as_utc(value: datetime) -> datetime:

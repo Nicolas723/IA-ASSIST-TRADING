@@ -24,6 +24,8 @@ from pydantic import BaseModel, Field
 from src.infrastructure.llm.factory import create_llm_gateway
 from src.infrastructure.security.secure_settings_store import SecureSettingsStore
 from src.shared.config.settings import (
+    OPENROUTER_FREE_ROUTER,
+    OPENROUTER_LEGACY_DEFAULT,
     LLMChainEntry,
     LLMProvider,
     Settings,
@@ -327,8 +329,12 @@ class IntegrationSettingsService:
                 current["api_key"] = ""
             elif update.api_key is not None and update.api_key.strip():
                 current["api_key"] = update.api_key.strip()
-            if update.model is not None and update.model.strip():
-                current["model"] = update.model.strip()
+            if update.model is not None:
+                # An emptied field means "back to the built-in default", not
+                # "keep whatever was stored before".
+                current["model"] = update.model.strip() or str(
+                    type(block).model_fields["default_model"].default
+                )
             if meta["supports_base_url"] and update.base_url is not None:
                 current["base_url"] = update.base_url.strip()
             if update.enabled is not None:
@@ -432,6 +438,15 @@ class IntegrationSettingsService:
                 if isinstance(api_key, str) and "api_key" in type(block).model_fields:
                     block.api_key = api_key.strip()
                 model = values.get("model")
+                if (
+                    provider == LLMProvider.OPENROUTER
+                    and isinstance(model, str)
+                    and model.strip() == OPENROUTER_LEGACY_DEFAULT
+                ):
+                    # Seeded from the old built-in default, never picked in the
+                    # UI: move it to the free router instead of a paid model.
+                    model = OPENROUTER_FREE_ROUTER
+                    values["model"] = model
                 if isinstance(model, str) and model.strip():
                     block.default_model = model.strip()
                 if meta["supports_base_url"]:
@@ -563,7 +578,10 @@ class IntegrationSettingsService:
                     context_length=row.get("context_length") or row.get("context_window"),
                 )
             )
-        options.sort(key=lambda option: (not option.free, option.id))
+        # The free router leads: it is the safest pick when unsure.
+        options.sort(
+            key=lambda option: (option.id != OPENROUTER_FREE_ROUTER, not option.free, option.id)
+        )
         return options
 
     async def test_heartbeat(self) -> bool:

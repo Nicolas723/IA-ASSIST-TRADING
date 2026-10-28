@@ -12,7 +12,12 @@ from src.application.services.integration_settings_service import (
     LLMSettingsUpdate,
 )
 from src.infrastructure.llm.gateway import BaseLLMAdapter, LLMGateway, LLMRequest, LLMResponse
-from src.shared.config.settings import LLMChainEntry, LLMProvider, Settings
+from src.shared.config.settings import (
+    OPENROUTER_FREE_ROUTER,
+    LLMChainEntry,
+    LLMProvider,
+    Settings,
+)
 from src.shared.exceptions.domain import LLMRateLimitError
 
 if TYPE_CHECKING:
@@ -187,3 +192,51 @@ async def test_openrouter_catalogue_lists_free_models_first() -> None:
         ("z/zero", True),
         ("openai/gpt-4o", False),
     ]
+
+
+def test_emptied_model_returns_to_the_free_router() -> None:
+    settings = Settings(_env_file=None)
+    store = _MemoryStore()
+    service = IntegrationSettingsService(settings=settings, store=store)  # type: ignore[arg-type]
+
+    service.update_llm(
+        LLMSettingsUpdate(
+            providers=[LLMProviderUpdate(provider=LLMProvider.OPENROUTER, model="x/y")]
+        )
+    )
+    assert settings.openrouter.default_model == "x/y"
+
+    service.update_llm(
+        LLMSettingsUpdate(providers=[LLMProviderUpdate(provider=LLMProvider.OPENROUTER, model=" ")])
+    )
+    assert settings.openrouter.default_model == OPENROUTER_FREE_ROUTER
+
+
+def test_seeded_paid_openrouter_default_moves_to_the_free_router() -> None:
+    settings = Settings(_env_file=None)
+    store = _MemoryStore()
+    store.sections["llm"] = {"providers": {"openrouter": {"model": "openai/gpt-4o-mini"}}}
+
+    IntegrationSettingsService(settings=settings, store=store).apply_persisted()  # type: ignore[arg-type]
+
+    assert settings.openrouter.default_model == OPENROUTER_FREE_ROUTER
+
+
+async def test_free_router_leads_the_openrouter_catalogue() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "a/model:free", "pricing": {"prompt": "0"}},
+                    {"id": "openrouter/free", "pricing": {"prompt": "0"}},
+                ]
+            },
+        )
+
+    service = IntegrationSettingsService(settings=Settings(_env_file=None), store=_MemoryStore())  # type: ignore[arg-type]
+    options = await service.list_models(
+        LLMProvider.OPENROUTER, transport=httpx.MockTransport(handler)
+    )
+    assert options[0].id == OPENROUTER_FREE_ROUTER

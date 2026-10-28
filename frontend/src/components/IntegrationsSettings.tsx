@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import toast from 'react-hot-toast';
-import type { ChainEntry, IntegrationsData, ModelOption, ProviderId, ProviderView } from '../hooks/useIntegrations';
+import type { ChainEntry, IntegrationsData, ProviderId, ProviderView } from '../hooks/useIntegrations';
 import type { PollingState } from '../hooks/usePolling';
 import { useI18n } from '../i18n/core';
-import { apiGet, apiSend, errorMessage } from '../lib/api';
+import { apiSend, errorMessage } from '../lib/api';
+import { type ModelCatalog, useModelCatalog } from '../hooks/useModelCatalog';
+import { ModelPicker } from './ModelPicker';
 import { Card, Disclosure, Notice, Pill, Skeleton } from './ui';
 
 interface ProviderDraft {
@@ -55,6 +57,7 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
   const [chain, setChain] = useState<ChainEntry[]>(data.llm.model_chain);
   const [tests, setTests] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const catalog = useModelCatalog();
 
   const providers = data.llm.providers;
   const updateDraft = (provider: ProviderId, patch: Partial<ProviderDraft>) =>
@@ -114,7 +117,7 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
           </Pill>
         }
       >
-        <ModelChainEditor providers={providers} chain={chain} onChange={setChain} />
+        <ModelChainEditor providers={providers} chain={chain} onChange={setChain} catalog={catalog} />
       </Card>
 
       <div className="cols">
@@ -162,14 +165,17 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
                     <span>{t('llm.ollama')}</span>
                   </label>
                 )}
-                <label className="field">
+                <div className="field">
                   <span className="field-label">{t('llm.model')}</span>
-                  <input
-                    className="input"
+                  <ModelPicker
+                    provider={provider.provider}
+                    configured={provider.configured}
                     value={draft.model}
-                    onChange={(event) => updateDraft(provider.provider, { model: event.target.value })}
+                    onChange={(model) => updateDraft(provider.provider, { model })}
+                    catalog={catalog}
                   />
-                </label>
+                  <span className="muted xsmall">{t('llm.model.hint')}</span>
+                </div>
                 {provider.supports_base_url && (
                   <Disclosure summary={t('llm.baseUrl.section')}>
                     <label className="field">
@@ -222,26 +228,22 @@ function LlmForm({ data, onSaved }: { data: IntegrationsData; onSaved: (value: I
   );
 }
 
-/** Providers whose live catalogue the backend can list. */
-const CATALOG_PROVIDERS = new Set<ProviderId>(['openrouter', 'groq', 'deepseek', 'openai']);
-
 function ModelChainEditor({
   providers,
   chain,
   onChange,
+  catalog,
 }: {
   providers: ProviderView[];
   chain: ChainEntry[];
   onChange: (next: ChainEntry[]) => void;
+  catalog: ModelCatalog;
 }) {
   const { t } = useI18n();
   const byId = new Map(providers.map((provider) => [provider.provider, provider]));
   const firstConfigured = providers.find((provider) => provider.configured)?.provider ?? providers[0]?.provider;
   const [provider, setProvider] = useState<ProviderId>(firstConfigured ?? 'groq');
   const [model, setModel] = useState('');
-  const [catalog, setCatalog] = useState<Partial<Record<ProviderId, ModelOption[]>>>({});
-  const [loading, setLoading] = useState(false);
-  const [freeOnly, setFreeOnly] = useState(true);
 
   const move = (index: number, delta: number) => {
     const target = index + delta;
@@ -260,21 +262,7 @@ function ModelChainEditor({
     }
     setModel('');
   };
-  const load = async () => {
-    setLoading(true);
-    try {
-      const options = await apiGet<ModelOption[]>(`/api/v1/settings/llm/models/${provider}`);
-      setCatalog((current) => ({ ...current, [provider]: options }));
-    } catch (error) {
-      toast.error(t('llm.order.loadFailed', { detail: errorMessage(error) }));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loaded = catalog[provider];
-  const options = (loaded ?? []).filter((option) => !freeOnly || option.free);
-  const listId = `models-${provider}`;
+  const selected = byId.get(provider);
 
   return (
     <div className="stack">
@@ -361,46 +349,20 @@ function ModelChainEditor({
                 ))}
               </select>
             </label>
-            <label className="field">
+            <div className="field">
               <span className="field-label">{t('llm.order.model')}</span>
-              <input
-                className="input mono"
-                list={listId}
-                placeholder={t('llm.order.modelPlaceholder')}
+              <ModelPicker
+                key={provider}
+                provider={provider}
+                configured={selected?.configured ?? false}
                 value={model}
-                onChange={(event) => setModel(event.target.value)}
+                onChange={setModel}
+                catalog={catalog}
+                defaultLabel={t('llm.order.default', { model: selected?.model || '—' })}
               />
-              <datalist id={listId}>
-                {options.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.free ? `${option.name} · ${t('llm.order.free')}` : option.name}
-                  </option>
-                ))}
-              </datalist>
-            </label>
-          </div>
-          <div className="row-between">
-            <div className="row">
-              {CATALOG_PROVIDERS.has(provider) && (
-                <button type="button" className="btn btn-sm" disabled={loading} onClick={() => void load()}>
-                  {loading ? t('llm.order.loading') : t('llm.order.loadModels')}
-                </button>
-              )}
-              {loaded && (
-                <>
-                  <label className="check small">
-                    <input type="checkbox" checked={freeOnly} onChange={(event) => setFreeOnly(event.target.checked)} />
-                    <span>{t('llm.order.freeOnly')}</span>
-                  </label>
-                  <span className="muted xsmall">
-                    {t('llm.order.loaded', {
-                      free: loaded.filter((option) => option.free).length,
-                      total: loaded.length,
-                    })}
-                  </span>
-                </>
-              )}
             </div>
+          </div>
+          <div className="row">
             <button type="button" className="btn btn-sm btn-primary" onClick={add}>
               {t('llm.order.add')}
             </button>

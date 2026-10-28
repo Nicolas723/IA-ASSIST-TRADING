@@ -13,6 +13,7 @@ from src.application.services.market_prescan_service import (
     _regime_adjustment,
 )
 from src.domain.market.entities import OHLCV, Candle, Exchange, Timeframe
+from src.shared.config.settings import MAX_SCAN_SYMBOLS
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 
@@ -163,8 +164,9 @@ def test_regime_adjustment_is_small_bounded_and_directional() -> None:
 async def test_prescan_rejects_invalid_universes() -> None:
     service = MarketPreScanService(MagicMock())
 
-    with pytest.raises(ValueError, match="between 1 and 10"):
-        await service.scan([f"SYM{index}/USDT" for index in range(11)])
+    # Same cap as the markets the settings allow, so a full list always scans.
+    with pytest.raises(ValueError, match=f"between 1 and {MAX_SCAN_SYMBOLS}"):
+        await service.scan([f"SYM{index}/USDT" for index in range(MAX_SCAN_SYMBOLS + 1)])
 
     with pytest.raises(ValueError, match="BASE/QUOTE"):
         await service.scan(["BTCUSDT"])
